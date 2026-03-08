@@ -1,213 +1,187 @@
+"""
+LaughLM configuration schema.
+
+Defines all configuration dataclasses used throughout the system.
+All YAML configs are validated against these structures.
+
+Design rules:
+- YAML defines primitive values only
+- Derived values computed in __post_init__
+- Validation happens immediately at load time
+- Config objects are immutable after creation
+"""
+
 from dataclasses import dataclass, field
-from typing import Optional, Literal
-import math
+from typing import Optional, List
 
-@dataclass(frozen=True)
-class AttentionConfig:
-    num_heads: int
-    dropout: float
-    use_bias: bool
 
-    def __post_init__(self):
-        if self.num_heads <= 0:
-            raise ValueError("num_heads must be positive")
-        if not (0.0 <= self.dropout < 1.0):
-            raise ValueError("attention dropout must be in [0, 1]")
-        
-@dataclass(frozen=True)
-class MLPConfig:
-    d_ff: int
-    activation: Literal["gelu", "swiglu"]
-    dropout: float
-    use_bias: bool
+# ============================================================
+# MODEL CONFIG
+# ============================================================
 
-    def __post_init__(self):
-        if self.d_ff <= 0:
-            raise ValueError("d_ff must be postive")
-        if not (0.0 <= self.dropout <= 1.0):
-            raise ValueError("mlp dropout must be in [0, 1]")
-        
-@dataclass(frozen=True)
-class NormConfig:
-    norm_type: Literal["layernorm", "rmsnorm"]
-    eps: float
-    prenorm: bool
-
-    def __post_init__(self):
-        if self.eps <= 0:
-            raise ValueError("norm eps must be positive")
-        
-@dataclass(frozen=True)
-class InitializationConfig:
-    init_std: float
-    residual_scale: float
-
-    def __post__init__(self):
-        if self.init_std <= 0:
-            raise ValueError("init_std must be positive")
-        
-        if self.residual_scale <= 0:
-            raise ValueError("residual_scale must be postive")
-        
-@dataclass(frozen=True)
+@dataclass
 class ModelConfig:
     vocab_size: int
-    seq_len: int
     d_model: int
-    num_layers: int
-    attention: AttentionConfig
-    mlp: MLPConfig
-    norm: NormConfig
-    initialization: InitializationConfig
-    tie_embeddings: bool
+    n_layers: int
+    n_heads: int
+    n_kv_heads: int
+    max_sequence_length: int
 
-    def __post__init__(self):
-        if self.vocab_size <= 0:
-            raise ValueError("vocab_size must be positive")
-        if self.seq_len <= 0:
-            raise ValueError("seq_len must be positive")
-        if self.d_model <= 0:
-            raise ValueError("d_model must be positive")
-        if self.num_layers <= 0:
-            raise ValueError("num_layers must be positive")
-        if self.d_model % self.attention.num_heads != 0:
-            raise ValueError("d_model must be divisible by num_heads")
-        
+    ffn_multiplier: float = 4.0
 
-@dataclass(frozen=True)
+    # Derived
+    head_dim: int = field(init=False)
+    ffn_hidden_size: int = field(init=False)
+
+    def __post_init__(self):
+
+        if self.d_model % self.n_heads != 0:
+            raise ValueError(
+                f"d_model ({self.d_model}) must be divisible by n_heads ({self.n_heads})"
+            )
+
+        if self.n_heads % self.n_kv_heads != 0:
+            raise ValueError(
+                f"GQA requires n_heads % n_kv_heads == 0 "
+                f"but got {self.n_heads} % {self.n_kv_heads}"
+            )
+
+        # Head dimension
+        self.head_dim = self.d_model // self.n_heads
+
+        # FFN hidden size
+        raw = int(self.d_model * self.ffn_multiplier)
+
+        # Align to TPU-friendly multiple
+        alignment = 256
+        self.ffn_hidden_size = ((raw + alignment - 1) // alignment) * alignment
+
+
+# ============================================================
+# ARCHITECTURE FEATURES
+# ============================================================
+
+@dataclass
+class ArchitectureConfig:
+    use_rope: bool
+    use_rmsnorm: bool
+    use_swiglu: bool
+    use_gqa: bool
+
+    attention_bias: bool = False
+    mlp_bias: bool = False
+
+
+# ============================================================
+# TOKENIZER
+# ============================================================
+
+@dataclass
+class TokenizerConfig:
+    algorithm: str
+    vocab_size: int
+    character_coverage: float
+    normalization: str
+
+
+# ============================================================
+# DATASET CONFIG
+# ============================================================
+
+@dataclass
+class DatasetSource:
+    name: str
+    weight: float
+
+
+@dataclass
+class DatasetConfig:
+    sequence_length: int
+    sources: List[DatasetSource]
+    shuffle_buffer_size: int
+    prefetch_batches: int
+
+
+# ============================================================
+# OPTIMIZER CONFIG
+# ============================================================
+
+@dataclass
 class OptimizerConfig:
-    optimizer_type: Literal["adam"]
+    name: str
     learning_rate: float
     beta1: float
     beta2: float
-    eps: float
     weight_decay: float
-    grad_clip_norm: Optional[float]
+    grad_clip_norm: float
 
-    def __post__init__(self):
-        if self.learning_rate <= 0:
-            raise ValueError("learning_rate must be positive")
-        if self.beta1 <= 0:
-            raise ValueError("beta1 must be in (0, 1)")
-        if self.beta2 <= 0:
-            raise ValueError("beta2 must be in (0, 1)")
-        if self.eps <= 0:
-            raise ValueError("eps must be positive")
-        if self.weight_decay <= 0:
-            raise ValueError("weight_decay must be >= 0")
-        
-@dataclass(frozen=True)
+
+# ============================================================
+# SCHEDULER CONFIG
+# ============================================================
+
+@dataclass
 class SchedulerConfig:
-    scheduler_type: Literal["cosine", "linear"]
+    name: str
     warmup_steps: int
     total_steps: int
     min_lr_ratio: float
 
-    def __post__init__(self):
-        if self.warmup_steps < 0:
-            raise ValueError("warmup_steps must be >= 0")
-        if self.total_steps < 0:
-            raise ValueError("total_steps must be positive")
-        if not (0.0 ,+ self.min_lr_ratio <= 1.0) < 0:
-            raise ValueError("min_lr_ratio must be in [0, 1]")
-        
 
-@dataclass(frozen=True)
+# ============================================================
+# TRAINING RUNTIME
+# ============================================================
+
+@dataclass
 class RuntimeConfig:
-    global_batch_size: int
-    microbatch_size: int
-    grad_accum_steps: int
-    precision: Literal["bf16", "fp32"]
-    checkpoint_interval: int
-    log_interval: int
+    seed: int
+    precision: str
+    train_steps: int
+    log_every_steps: int
+    eval_every_steps: int
+    checkpoint_every_steps: int
 
-    def __post__init__(self):
-        if self.global_batch_size <= 0:
-            raise ValueError("global_batch_size must be positive")
-        if self.microbatch_size <= 0:
-            raise ValueError("microbatch_size must be positive")
-        if self.grad_accum_steps <= 0:
-            raise ValueError("grad_accum_steps must be positive")
-        if self.checkpoint_interval <= 0:
-            raise ValueError("checkpoint_interval must be positive")
-        if self.log_interval <= 0:
-            raise ValueError("log_interval must be positive")
-        
-        expected = self.microbatch_size * self.grad_accum_steps
-        if self.global_batch_size != expected:
-            raise ValueError("global_batch_size must be equal microbatch * grad_accum_steps")
-        
-@dataclass(frozen=True)
-class TraininingConfig:
+
+# ============================================================
+# HARDWARE CONFIG
+# ============================================================
+
+@dataclass
+class HardwareConfig:
+    accelerator: str
+    devices: int
+    hbm_per_device_gb: int
+
+
+# ============================================================
+# PARALLELISM CONFIG
+# ============================================================
+
+@dataclass
+class ParallelismConfig:
+    mesh_shape: List[int]
+
+    def __post_init__(self):
+
+        if len(self.mesh_shape) != 2:
+            raise ValueError(
+                "mesh_shape must have 2 dimensions (e.g. [1,8] or [2,4])"
+            )
+
+
+# ============================================================
+# ROOT CONFIG
+# ============================================================
+
+@dataclass
+class LaughLMConfig:
+    model: ModelConfig
+    architecture: ArchitectureConfig
+    tokenizer: TokenizerConfig
+    dataset: DatasetConfig
     optimizer: OptimizerConfig
     scheduler: SchedulerConfig
     runtime: RuntimeConfig
-
-
-@dataclass(frozen=True)
-class DatasetConfig:
-    dataset_path: str
-    shuffle: bool
-    seed: int
-
-    def __post__init__(self):
-        if not self.dataset_path:
-            raise ValueError("dataset_path must not empty")
-        
-@dataclass(frozen=True)
-class TokenizerConfig:
-    tokenizer_type: Literal["bpe", "sentencepiece"]
-    vocab_path: str
-
-    def __post__init__(self):
-        if not self.vocab_path:
-            raise ValueError("vocab_path must not be empty")
-        
-@dataclass(frozen=True)
-class DataConfig:
-    dataset: DatasetConfig
-    tokenizer: TokenizerConfig
-        
-
-@dataclass(frozen=True)
-class HardwareConfig:
-    num_devices: int
-    device_type: Literal["tpu", "gpu", "cpu"]
-    memory_per_device_gb: float
-
-    def __post__init__(self):
-        if self.num_devices <= 0:
-            raise ValueError("num_devices must be positive")
-        if self.memory_per_device_gb <= 0:
-            raise ValueError("memory_per_device_gb must be positive")
-        
-
-@dataclass(frozen=True)
-class ParallelismConfig:
-    strategy: Literal["data_parallel", "model_parallel"]
-    use_pmap: bool
-    use_pjit: bool
-
-    def __post__init__(self):
-        if self.use_pmap and self.use_pjit:
-            raise ValueError("Cannot enable both pmap and pjit")
-        
-
-@dataclass(frozen=True)
-class SystemConfig:
     hardware: HardwareConfig
-    parellelism: ParallelismConfig
-
-
-@dataclass(frozen=True)
-class ExpermentConfig:
-    name: str
-    seed: int
-
-@dataclass(frozen=True)
-class RootConfig:
-    model: ModelConfig
-    training: TraininingConfig
-    data: DataConfig
-    SystemConfig: SystemConfig
-    experiment: ExpermentConfig
+    parallelism: ParallelismConfig
