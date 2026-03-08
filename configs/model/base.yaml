@@ -1,0 +1,17 @@
+vocab_size: 32000
+
+# Transformer width
+d_model: 768
+
+# Number of decoder layers
+n_layers: 12
+
+# Attention configuration
+n_heads: 12
+n_kv_heads: 4   # grouped-query attention ratio
+
+# Context window
+max_sequence_length: 2048
+
+# FFN width multiplier
+ffn_multiplier: 4.0
