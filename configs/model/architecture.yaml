@@ -1,0 +1,15 @@
+# Positional encoding
+use_rope: true
+
+# Normalization layer
+use_rmsnorm: true
+
+# Feed-forward activation
+use_swiglu: true
+
+# Attention variant
+use_gqa: true
+
+# Bias configuration
+attention_bias: false
+mlp_bias: false
