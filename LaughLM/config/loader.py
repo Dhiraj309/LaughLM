@@ -1,10 +1,8 @@
 import yaml
 from pathlib import Path
 from typing import Dict, Any, Union
-
 from LaughLM.config.schema import LaughLMConfig
 from LaughLM.config.validation import validate_config
-
 
 # ------------------------------------------------------------
 # YAML utilities
