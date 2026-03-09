@@ -1,8 +1,9 @@
 import yaml
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Union
 
 from config.schema import LaughLMConfig
+from config.validation import validate_config
 
 
 # ------------------------------------------------------------
@@ -20,6 +21,7 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
     with open(path, "r") as f:
         data = yaml.safe_load(f)
 
+    # YAML may return None for empty files
     if data is None:
         data = {}
 
@@ -34,7 +36,7 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     """
     Recursively merge two dictionaries.
 
-    override values take precedence.
+    The override dictionary always takes precedence.
     """
 
     result = base.copy()
@@ -55,22 +57,37 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
 
 
 # ------------------------------------------------------------
+# Path normalization
+# ------------------------------------------------------------
+
+def _normalize_path(path: Union[str, Path]) -> Path:
+    """
+    Ensure config paths are Path objects.
+    """
+
+    if isinstance(path, str):
+        return Path(path)
+
+    return path
+
+
+# ------------------------------------------------------------
 # Main config loader
 # ------------------------------------------------------------
 
 def load_config(
-    base_config: Path,
-    override_config: Path | None = None
+    base_config: Union[str, Path],
+    override_config: Union[str, Path, None] = None
 ) -> LaughLMConfig:
     """
     Load and validate configuration.
 
     Parameters
     ----------
-    base_config : Path
+    base_config : str | Path
         Base YAML configuration
 
-    override_config : Path | None
+    override_config : str | Path | None
         Optional override YAML
 
     Returns
@@ -79,14 +96,24 @@ def load_config(
         Fully validated configuration object
     """
 
+    base_config = _normalize_path(base_config)
+
     base_dict = _load_yaml(base_config)
 
     if override_config is not None:
+        override_config = _normalize_path(override_config)
+
         override_dict = _load_yaml(override_config)
+
         merged = _deep_merge(base_dict, override_dict)
+
     else:
         merged = base_dict
 
+    # Pydantic schema validation
     config = LaughLMConfig(**merged)
+
+    # Cross-field validation rules
+    validate_config(config)
 
     return config
