@@ -49,6 +49,6 @@ def build_residual(config):
 
         alpha = (2 * layers) ** 0.25
 
-        return DeepNormResidual(scale=alpha)
+        return DeepNormResidual(scale= 1 / alpha)
 
     raise ValueError(f"Unknown residual type: {residual_type}")
