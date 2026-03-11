@@ -5,22 +5,24 @@ from flax import linen as nn
 
 from LaughLM.config.schema import LaughLMConfig
 
-class LeanedPositionalEmbeddings(nn.Module):
+class LearnedPositionalEmbedding(nn.Module):
     """
     Learned positional embeddings used in GPT-2.
     """
+
     max_seq_len: int
     hidden_size: int
 
     @nn.compact
-    def __call__(self, x):
-        pos_embeddings=self.param(
+    def __call__(self, positions):
+
+        pos_embedding = self.param(
             "pos_embedding",
-            nn.initializers.normal(stddev=0.02)
-            (self.max_seq_len, self.hidden_size)
+            nn.initializers.normal(stddev=0.02),
+            (self.max_seq_len, self.hidden_size),
         )
 
-        return pos_embedding
+        return pos_embedding[positions]
 
 class SinusoidalPositionalEmbedding(nn.Module):
     """
@@ -81,8 +83,8 @@ def apply_rope(x, sin, cos):
         [batch, seq, heads, head_dim]
     """
 
-    x1 = x[...., ::2]
-    x2 = x[...., 1::2]
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
 
     rotated = jnp.stack(
         [-x2, -x1], axis=-1
@@ -100,7 +102,7 @@ def build_positional_encoding(config: LaughLMConfig):
     hidden = config.model.d_model
 
     if pos_type == "learned":
-        return LeanedPositionalEmbeddings(max_seq, hidden)
+        return LearnedPositionalEmbedding(max_seq, hidden)
 
     if pos_type == "sinusoidal":
         return SinusoidalPozitionEmbedding(max_seq_len, hidden)

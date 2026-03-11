@@ -32,7 +32,7 @@ class TransformerBlock(nn.Module):
 
             return x
 
-        if norm_placement == "post":
+        if self.norm_placement == "post":
             h = self.attn(x)
             x = self.norm1(x+h)
 
@@ -41,7 +41,7 @@ class TransformerBlock(nn.Module):
 
             return x
 
-        if norm_placement == "sandwich":
+        if self.norm_placement == "sandwich":
             h = self.attn(self.norm1(x))
             x = x + h
 

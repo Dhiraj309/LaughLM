@@ -3,18 +3,23 @@ import jax.numpy as jnp
 
 from LaughLM.config.schema import LaughLMConfig
 
+
+# ------------------------------------------------------------
+# Utility
+# ------------------------------------------------------------
+
 def split_heads(x, num_heads):
     """
     Convert [B, T, D] → [B, T, H, Dh]
     """
 
     b, t, d = x.shape
-
     head_dim = d // num_heads
 
     x = x.reshape(b, t, num_heads, head_dim)
 
     return x
+
 
 def merge_heads(x):
     """
@@ -23,32 +28,38 @@ def merge_heads(x):
 
     b, t, h, d = x.shape
 
-    return x.reshape(b, r, h*d)
+    return x.reshape(b, t, h * d)
 
+
+# ------------------------------------------------------------
+# Multi-Head Attention
+# ------------------------------------------------------------
 
 class MultiHeadAttention(nn.Module):
+
     d_model: int
     num_heads: int
 
     @nn.compact
     def __call__(self, x):
+
         head_dim = self.d_model // self.num_heads
 
         q = nn.Dense(self.d_model)(x)
         k = nn.Dense(self.d_model)(x)
         v = nn.Dense(self.d_model)(x)
 
-        q = split_head(q, self.num_heads)
-        k = split_head(k, self.num_heads)
-        v = split_head(v, self.num_heads)
+        q = split_heads(q, self.num_heads)
+        k = split_heads(k, self.num_heads)
+        v = split_heads(v, self.num_heads)
 
         attn_scores = jnp.einsum(
-            "bthd.bshd->bhts", q, v
+            "bthd,bshd->bhts", q, k
         ) / jnp.sqrt(head_dim)
 
         mask = jnp.tril(jnp.ones((x.shape[1], x.shape[1])))
 
-        attn_scores = attn_scores * mask - 1e10 * (1-mask)
+        attn_scores = attn_scores * mask - 1e10 * (1 - mask)
 
         attn_probs = nn.softmax(attn_scores, axis=-1)
 
@@ -57,10 +68,15 @@ class MultiHeadAttention(nn.Module):
         )
 
         out = merge_heads(out)
+
         out = nn.Dense(self.d_model)(out)
 
         return out
 
+
+# ------------------------------------------------------------
+# Multi-Query Attention
+# ------------------------------------------------------------
 
 class MultiQueryAttention(nn.Module):
 
@@ -103,6 +119,10 @@ class MultiQueryAttention(nn.Module):
 
         return out
 
+
+# ------------------------------------------------------------
+# Grouped-Query Attention
+# ------------------------------------------------------------
 
 class GroupedQueryAttention(nn.Module):
 
@@ -147,6 +167,11 @@ class GroupedQueryAttention(nn.Module):
         out = nn.Dense(self.d_model)(out)
 
         return out
+
+
+# ------------------------------------------------------------
+# Factory
+# ------------------------------------------------------------
 
 def build_attention(config: LaughLMConfig):
 

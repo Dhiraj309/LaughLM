@@ -1,4 +1,4 @@
-from config.schema import LaughLMConfig
+from LaughLM.config.schema import LaughLMConfig
 
 
 # ------------------------------------------------------------

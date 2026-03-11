@@ -1,8 +1,8 @@
-
 import jax.numpy as jnp
 from flax import linen as nn
 
 from LaughLM.config.schema import LaughLMConfig
+
 
 def gelu(x):
     """
@@ -13,11 +13,13 @@ def gelu(x):
         jnp.sqrt(2 / jnp.pi) * (x + 0.044715 * x**3)
     ))
 
+
 def swish(x):
     """
-    Swish activation used in swiglu
+    Swish activation used in SwiGLU
     """
     return x * nn.sigmoid(x)
+
 
 class GELUMLP(nn.Module):
     d_model: int
@@ -27,9 +29,10 @@ class GELUMLP(nn.Module):
     def __call__(self, x):
         x = nn.Dense(self.ffn_dim)(x)
         x = gelu(x)
-        x = nn.Densw(self.d_model)(x)
+        x = nn.Dense(self.d_model)(x)
 
         return x
+
 
 class GEGLU(nn.Module):
     d_model: int
@@ -46,6 +49,7 @@ class GEGLU(nn.Module):
 
         return x
 
+
 class SwiGLU(nn.Module):
     d_model: int
     ffn_dim: int
@@ -61,7 +65,9 @@ class SwiGLU(nn.Module):
 
         return x
 
-def build_factory(config: LaughLMConfig):
+
+def build_mlp(config: LaughLMConfig):
+
     ffn_type = config.architecture.ffn_type
     d_model = config.model.d_model
 
@@ -77,8 +83,6 @@ def build_factory(config: LaughLMConfig):
         return SwiGLU(d_model, ffn_dim)
 
     if ffn_type == "moe":
-        return NotImplementedError(
-            f"MoE will be added later"
-        )
+        raise NotImplementedError("MoE will be added later")
 
-    return ValueError(f"Unknown FFN type: {ffn_type}")
+    raise ValueError(f"Unknown FFN type: {ffn_type}")
