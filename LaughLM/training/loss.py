@@ -11,7 +11,7 @@ def shift_tokens(input_ids):
     input:  [B, T]
     target: [B, T]
     """
-    inputs = input_idss[:, -1]
+    inputs = input_ids[:, :-1]
     targets = input_ids[:, 1:]
 
     return inputs, target
