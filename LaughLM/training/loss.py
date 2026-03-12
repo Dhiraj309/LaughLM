@@ -29,7 +29,7 @@ def cross_entropy_loss(logits, targets, mask = None):
 
     log_probs = jax.nn.log_softmax(logits)
 
-    loss = jnp.sum(one_hot * log_probs, axis=-1)
+    loss = -jnp.sum(one_hot * log_probs, axis=-1)
 
     if mask is not None:
         loss = loss * mask
@@ -58,12 +58,8 @@ def compute_loss(logits, targets, mask=None, zloss_coeff=1e-4):
 
     ce = cross_entropy_loss(logits, targets, mask)
 
-    zl = z_loss(loss, z_loss_coeff)
+    zl = z_loss(logits, z_loss_coeff)
 
     total = ce + zl
 
-    return {
-        "cross_entropy": ce,
-        "z_loss": zl,
-        "total": total,
-    }
+    return total, {"cross_entropy": float(ce), "z_loss": float(zl), "total": float(total)}
