@@ -27,7 +27,7 @@ def cross_entropy_loss(logits, targets, mask = None):
     vocab_size = logits.shape[-1]
     one_hot = jnp.eye(vocab_size)[targets]
 
-    log_probs = jnp.nn.log_softmax(logits)
+    log_probs = jax.nn.log_softmax(logits)
 
     loss = jnp.sum(one_hot * log_probs, axis=-1)
 
