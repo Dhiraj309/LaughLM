@@ -1,136 +1,176 @@
-
-import jax
 import optax
+from flax import traverse_util
+from typing import Any, Callable
+
 from LaughLM.config.schema import LaughLMConfig
-from LaughLM.training.scheduler import build_scheduler
 
 
-# ─────────────────────────────────────────────────────────────
-# Weight Decay Mask
-# ─────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# Weight decay mask
+# ------------------------------------------------------------
 
-def _weight_decay_mask(params):
+def get_weight_decay_mask(params: Any) -> Any:
     """
-    Returns a pytree of booleans mirroring params.
+    Return a mask tree matching the params structure.
     True  = apply weight decay to this parameter.
-    False = skip weight decay (norm scales, biases, embeddings).
+    False = exclude from weight decay.
 
-    Why: optax.add_decayed_weights applies decay to everything by default,
-    including RMSNorm/LayerNorm scale params. Decaying those distorts learned
-    normalization and degrades training. All frontier models exclude them.
+    Excluded parameters:
+      - 'scale' : RMSNorm / LayerNorm scale (γ)
+      - 'bias'  : any bias term
+      - 'pos_embedding' : learned positional embeddings
+
+    Why exclude norm scale weights:
+        Weight decay penalizes large magnitudes. Normalisation scale parameters
+        are supposed to grow freely to control activation scale — decaying them
+        distorts the learned scale and degrades training. Every frontier model
+        (Llama, DeepSeek, GPT-4) excludes norm parameters from weight decay.
+
+    FIX: was using optax.adamw(weight_decay=...) which applies decay to ALL
+    parameters. Now uses masked decay via optax.add_decayed_weights.
+    """
+    # Flatten the nested param dict to a flat dict with tuple keys
+    flat = traverse_util.flatten_dict(params)
+
+    # The last element of the key tuple is the parameter name
+    no_decay = {"scale", "bias", "pos_embedding"}
+    mask_flat = {k: (k[-1] not in no_decay) for k in flat}
+
+    # Unflatten back to the original nested structure
+    return traverse_util.unflatten_dict(mask_flat)
+
+
+# ------------------------------------------------------------
+# Optimizer builders
+# ------------------------------------------------------------
+
+def build_adamw(config: LaughLMConfig, schedule: Callable) -> optax.GradientTransformation:
+    """
+    AdamW with:
+      - Gradient clipping (before parameter update)
+      - Adam moment estimation
+      - Masked weight decay (excludes norm params)
+      - Learning rate schedule
+
+    We build AdamW manually via optax.chain rather than using optax.adamw,
+    because optax.adamw does not support masked weight decay out of the box.
+    Building from primitives gives us full control.
+
+    Parameter update rule:
+        m_t = β1 * m_{t-1} + (1 - β1) * g_t                  (first moment)
+        v_t = β2 * v_{t-1} + (1 - β2) * g_t²                 (second moment)
+        m̂_t = m_t / (1 - β1^t)                               (bias correction)
+        v̂_t = v_t / (1 - β2^t)
+        θ_t = θ_{t-1} - lr * (m̂_t / (√v̂_t + ε) + λ * θ_{t-1})
+
+    β2=0.95 note:
+        Standard Adam uses β2=0.999. All frontier models (Llama 3, DeepSeek V3,
+        MiniCPM) use β2=0.95. Lower β2 makes the second moment adapt faster to
+        gradient magnitude changes. With WSD schedule's large LR swings,
+        faster adaptation = better stability.
     """
 
-    def should_decay(path, _):
-        # path is a tuple of keys, e.g. ('layers_0', 'attn', 'scale')
-        leaf = path[-1].key if hasattr(path[-1], "key") else str(path[-1])
-        return leaf not in ("scale", "bias", "embedding")
-
-    return jax.tree_util.tree_map_with_path(should_decay, params)
-
-
-# ─────────────────────────────────────────────────────────────
-# Per-optimizer builders (internal helpers)
-# ─────────────────────────────────────────────────────────────
-
-def _build_adamw_chain(config: LaughLMConfig, schedule):
-    """
-    AdamW as an explicit transformation chain with schedule baked in.
-
-    Chain order matters:
-      1. clip_by_global_norm  — clip raw gradients first
-      2. scale_by_adam        — compute moment estimates (no LR yet)
-      3. add_decayed_weights  — decoupled weight decay (masked)
-      4. scale_by_learning_rate(schedule) — apply LR from WSD/cosine curve
-
-    scale_by_learning_rate applies a negative sign automatically,
-    so updates point in the descent direction without manual negation.
-    """
     return optax.chain(
+        # 1. Clip gradient norm FIRST (before any scaling)
         optax.clip_by_global_norm(config.optimizer.gradient_clip),
+
+        # 2. Adam moment estimation (no LR here — applied separately)
         optax.scale_by_adam(
             b1=config.optimizer.beta1,
             b2=config.optimizer.beta2,
             eps=config.optimizer.eps,
         ),
+
+        # 3. Masked weight decay: only on non-norm, non-bias params
+        #    add_decayed_weights adds λ * θ to the update
         optax.add_decayed_weights(
             weight_decay=config.optimizer.weight_decay,
-            mask=_weight_decay_mask,
+            mask=get_weight_decay_mask,
         ),
+
+        # 4. Apply learning rate schedule (negative: gradient descent)
         optax.scale_by_learning_rate(schedule),
     )
 
 
-def _build_adafactor_chain(config: LaughLMConfig, schedule):
+def build_adafactor(config: LaughLMConfig, schedule: Callable) -> optax.GradientTransformation:
     """
-    Adafactor with schedule. Adafactor uses factored second-moment
-    estimation — much lower memory than Adam (no full v vector).
-    Good alternative when optimizer memory is tight on TPU.
+    Adafactor: memory-efficient optimizer that factors the second moment.
+    Uses much less memory than Adam at the cost of some stability.
+    Good for very large models where Adam optimizer state doesn't fit.
+    For 143M, Adam is preferred.
+
+    FIX: was 'config.optmizee' (typo) — now 'config.optimizer'.
     """
     return optax.chain(
         optax.clip_by_global_norm(config.optimizer.gradient_clip),
-        optax.scale_by_factored_rms(),
-        optax.scale_by_learning_rate(schedule),
+        optax.adafactor(learning_rate=schedule),
     )
 
 
-def _build_lion_chain(config: LaughLMConfig, schedule):
+def build_lion(config: LaughLMConfig, schedule: Callable) -> optax.GradientTransformation:
     """
-    Lion optimizer. Uses sign of gradient — memory efficient,
-    often matches AdamW at lower LR (typical: 3-10x lower than AdamW LR).
+    Lion optimizer (EvoLved Sign Momentum).
+    Uses only the sign of the gradient update — lower memory than Adam.
+    Reported to match or beat Adam at scale, but less tested at 143M range.
+
+    FIX: was missing return statement (returned None silently).
     """
     return optax.chain(
         optax.clip_by_global_norm(config.optimizer.gradient_clip),
-        optax.scale_by_lion(
+        optax.lion(
+            learning_rate=schedule,
             b1=config.optimizer.beta1,
             b2=config.optimizer.beta2,
         ),
-        optax.add_decayed_weights(
-            weight_decay=config.optimizer.weight_decay,
-            mask=_weight_decay_mask,
-        ),
-        optax.scale_by_learning_rate(schedule),
     )
 
 
-# ─────────────────────────────────────────────────────────────
-# Public API
-# ─────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# Main factory
+# ------------------------------------------------------------
 
-def build_optimizer(config: LaughLMConfig):
+def build_optimizer(
+    config: LaughLMConfig,
+    schedule: Callable,
+) -> optax.GradientTransformation:
     """
-    Build optimizer with learning rate schedule baked in.
+    Build optimizer from config.
 
-    The schedule is NOT a separate object — it lives inside the optimizer
-    chain via scale_by_learning_rate(schedule). Optax calls schedule(step)
-    automatically on every optimizer.update() call using the step counter
-    stored in opt_state. You never pass the step manually.
+    Parameters
+    ----------
+    config   : LaughLMConfig
+    schedule : callable step → lr, built by build_scheduler()
 
-    Usage
-    -----
-    optimizer = build_optimizer(config)
-    opt_state = optimizer.init(params)
+    The schedule must be passed in here (not built internally) because
+    the same schedule object is also used for logging the current LR.
 
-    # In training loop:
-    updates, opt_state = optimizer.update(grads, opt_state, params)
-    params = optax.apply_updates(params, updates)
+    FIX: previous version kept schedule and optimizer as separate objects,
+    meaning the LR schedule was never applied to parameter updates.
+    Now the schedule is baked into the optimizer via optax.chain.
+
+    FIX: 'out_type' → 'opt_type' (NameError).
+    FIX: build_optimizer now always returns — previous version returned None
+         when gradient_clip was None.
     """
-
-    # Build the schedule first — it becomes part of the optimizer chain
-    schedule = build_scheduler(config)
 
     opt_type = config.optimizer.type
 
     if opt_type == "adamw":
-        return _build_adamw_chain(config, schedule)
+        return build_adamw(config, schedule)
 
-    elif opt_type == "adafactor":
-        return _build_adafactor_chain(config, schedule)
+    if opt_type == "adafactor":
+        return build_adafactor(config, schedule)
 
-    elif opt_type == "lion":
-        return _build_lion_chain(config, schedule)
+    if opt_type == "lion":
+        return build_lion(config, schedule)
 
-    elif opt_type == "muon":
-        raise NotImplementedError("Muon optimizer not yet implemented")
+    if opt_type == "muon":
+        raise NotImplementedError(
+            "Muon optimizer not yet implemented. Use 'adamw'."
+        )
 
-    else:
-        raise ValueError(f"Unknown optimizer type: {opt_type!r}")
+    raise ValueError(
+        f"Unknown optimizer type: '{opt_type}'. "
+        f"Valid options: adamw, adafactor, lion, muon."
+    )

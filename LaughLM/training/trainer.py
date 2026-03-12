@@ -1,16 +1,16 @@
 import time
+from typing import Iterator
+
 import jax
 import jax.numpy as jnp
-import jax.tree_util as jtu
+import optax
 
 from LaughLM.config.schema import LaughLMConfig
 from LaughLM.model.gpt import GPTModel
 from LaughLM.model.parameter_utils import generate_preflight_report
-
 from LaughLM.training.optimizer import build_optimizer
-from LaughLM.training.scheduler import build_scheduler
-from LaughLM.training.train_step import create_train_step, create_grad_fn
-
+from LaughLM.training.scheduler import build_scheduler, compute_total_steps
+from LaughLM.training.train_step import create_train_step, create_eval_step
 from LaughLM.utils.rng import create_rng
 
 
@@ -21,261 +21,237 @@ class Trainer:
 
     def __init__(self, config: LaughLMConfig):
 
-        # ── FIX 1: was `self.config = LaughLMConfig` (assigned the class, not the instance) ──
+        # FIX 1: store instance, not class
         self.config = config
 
         self.rng = create_rng(seed=42)
 
+        # Print parameter / memory / step estimates before training starts
         generate_preflight_report(config)
 
-        # ── Model ────────────────────────────────────────────────────────────
+        # ------------------------------------------------------------------
+        # Model
+        # ------------------------------------------------------------------
         self.model = GPTModel(config=config)
 
+        # Initialize parameters with a dummy batch
         dummy = jnp.zeros(
-            (
-                config.runtime.micro_batch_per_device,
-                config.runtime.seq_len,
-            ),
+            (config.runtime.micro_batch_per_device, config.runtime.seq_len),
             dtype=jnp.int32,
         )
+        self.params = self.model.init(self.rng.next_key(), dummy)["params"]
 
-        params = self.model.init(self.rng.next_key(), dummy)["params"]
+        # ------------------------------------------------------------------
+        # Schedule (built first, passed to optimizer)
+        # FIX 5: schedule is baked into optimizer chain via
+        #        optax.scale_by_learning_rate(schedule)
+        # ------------------------------------------------------------------
+        self.schedule  = build_scheduler(config)
+        self.optimizer = build_optimizer(config, self.schedule)
 
-        # ── FIX 2: mixed precision — store params as float32 (master weights)
-        #    The forward pass will cast to bfloat16 internally.
-        #    This is the standard AMP setup: float32 params + bf16 compute.
-        self.params = params
+        # FIX 2: initialize optimizer state with .init()
+        self.opt_state = self.optimizer.init(self.params)
 
-        # ── Optimizer + Scheduler ────────────────────────────────────────────
-        self.schedule = build_scheduler(config)
-
-        # build_optimizer now chains schedule internally (fixed in optimizer.py)
-        self.optimizer = build_optimizer(config)
-
-        # ── FIX 3: was `self.optimizer(params)` — Optax uses .init(), not __call__ ──
-        self.opt_state = self.optimizer.init(params)
-
-        # ── Compiled step functions ──────────────────────────────────────────
-        # Separate grad function from update function to support accumulation
-        self.grad_fn   = create_grad_fn(self.model)
+        # ------------------------------------------------------------------
+        # Compiled step functions
+        # ------------------------------------------------------------------
         self.train_step = create_train_step(self.model, self.optimizer)
+        self.eval_step  = create_eval_step(self.model)
 
-        # ── Step counter ─────────────────────────────────────────────────────
-        self.global_step = 0          # optimizer update steps (after accumulation)
-        self.micro_step  = 0          # total forward passes
-        self.tokens_seen = 0
+        # ------------------------------------------------------------------
+        # Step counter
+        # ------------------------------------------------------------------
+        self.step = 0
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Token / step bookkeeping
-    # ─────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Training loop
+    # ------------------------------------------------------------------
 
-    def _compute_total_steps(self) -> int:
-        cfg = self.config
-        tokens_per_micro = (
-            cfg.runtime.seq_len
-            * cfg.runtime.micro_batch_per_device
-            * cfg.parallelism.data_parallel
-        )
-        total_micro_steps = cfg.runtime.total_tokens // tokens_per_micro
-        return total_micro_steps // cfg.runtime.gradient_accumulation
-
-    def _tokens_per_optimizer_step(self) -> int:
-        cfg = self.config
-        return (
-            cfg.runtime.seq_len
-            * cfg.runtime.micro_batch_per_device
-            * cfg.parallelism.data_parallel
-            * cfg.runtime.gradient_accumulation
-        )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Gradient accumulation helpers
-    # ─────────────────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _zero_like(tree):
-        """Create a zeroed pytree with the same structure as `tree`."""
-        return jtu.tree_map(jnp.zeros_like, tree)
-
-    @staticmethod
-    def _accumulate(accum, new):
-        """Element-wise add two pytrees."""
-        return jtu.tree_map(lambda a, b: a + b, accum, new)
-
-    @staticmethod
-    def _scale(tree, factor: float):
-        """Scale every leaf in a pytree by `factor`."""
-        return jtu.tree_map(lambda x: x * factor, tree)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Main training loop
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def train(self, dataloader):
+    def train(self, dataloader: Iterator) -> None:
         """
-        Full training loop with gradient accumulation and mixed precision.
+        Main training loop with gradient accumulation.
 
         Gradient accumulation
-        ─────────────────────
-        Every `gradient_accumulation` micro-batches are processed before a
-        single optimizer update. This lets you reach millions of tokens per
-        optimizer step without OOM.
+        ---------------------
+        We cannot fit large batches in a single TPU step, so we split
+        each logical batch into N micro-batches, accumulate their gradients,
+        then apply one optimizer update.
 
-        On v5e-8 with seq_len=2048, micro_batch=32, grad_accum=16:
-            tokens/step = 2048 × 32 × 8 × 16 = 8,388,608 ≈ 8M tokens/step
+        Effective batch size = micro_batch × data_parallel × grad_accum × seq_len
+        Example (this config): 32 × 8 × 16 × 2048 = 8,388,608 tokens/step
+
+        This is critical. Without accumulation we get ~32K tokens/step, which is
+        far below the ~4M token/step that Chinchilla-optimal training requires
+        for stable, efficient learning at 143M scale.
         """
 
-        cfg              = self.config
-        accum_steps      = cfg.runtime.gradient_accumulation
-        total_opt_steps  = self._compute_total_steps()
-        tokens_per_step  = self._tokens_per_optimizer_step()
+        cfg = self.config  # FIX 3: use self.config, not bare 'config'
 
-        print(f"\n{'─'*56}")
-        print(f"  Training Configuration")
-        print(f"{'─'*56}")
-        print(f"  Optimizer steps    : {total_opt_steps:,}")
-        print(f"  Gradient accum     : {accum_steps}")
-        print(f"  Tokens/opt step    : {tokens_per_step:,}")
-        print(f"  Total tokens       : {cfg.runtime.total_tokens:,}")
-        print(f"{'─'*56}\n")
+        total_steps     = compute_total_steps(cfg)
+        grad_accum      = cfg.runtime.gradient_accumulation
+        tokens_per_step = (
+            cfg.runtime.seq_len
+            * cfg.runtime.micro_batch_per_device
+            * cfg.parallelism.data_parallel
+            * grad_accum
+        )
 
-        # Accumulation state
-        accum_grads   = self._zero_like(self.params)
-        accum_metrics = {}
+        print(f"\n{'='*60}")
+        print(f"  Training for {total_steps:,} optimizer steps")
+        print(f"  Gradient accumulation: {grad_accum} micro-batches")
+        print(f"  Effective tokens per step: {tokens_per_step:,}")
+        print(f"{'='*60}\n")
 
-        start      = time.time()
-        step_start = time.time()
+        start_time  = time.time()
+        accum_grads = None   # Accumulated gradient tree
+        accum_loss  = 0.0    # Sum of micro-batch losses for logging
 
-        for micro_step, batch_tokens in enumerate(dataloader):
+        for micro_step, batch in enumerate(dataloader):
 
-            # ── FIX 4: mixed precision — cast batch to int32, model handles bf16 ──
-            batch_tokens = jnp.array(batch_tokens, dtype=jnp.int32)
+            # ----------------------------------------------------------------
+            # Compute gradients for this micro-batch (no optimizer update yet)
+            # ----------------------------------------------------------------
+            loss, metrics, grads = self._compute_grads(batch)
+            accum_loss += loss
 
-            # ── Compute gradients (no optimizer update yet) ───────────────────
-            grads, metrics = self.grad_fn(self.params, batch_tokens)
-
-            # ── Accumulate gradients ──────────────────────────────────────────
-            accum_grads = self._accumulate(accum_grads, grads)
-
-            # Accumulate metrics for averaging
-            for k, v in metrics.items():
-                accum_metrics[k] = accum_metrics.get(k, 0.0) + float(v)
-
-            self.micro_step  += 1
-            self.tokens_seen += (
-                cfg.runtime.seq_len
-                * cfg.runtime.micro_batch_per_device
-                * cfg.parallelism.data_parallel
-            )
-
-            # ── Optimizer update every `accum_steps` micro-batches ────────────
-            if (micro_step + 1) % accum_steps == 0:
-
-                # Average accumulated gradients
-                averaged_grads = self._scale(accum_grads, 1.0 / accum_steps)
-
-                # Apply optimizer update
-                self.params, self.opt_state = self._apply_update(
-                    self.params, self.opt_state, averaged_grads
+            # Accumulate gradients: sum across micro-batches
+            if accum_grads is None:
+                accum_grads = grads
+            else:
+                accum_grads = jax.tree_util.tree_map(
+                    lambda a, b: a + b,
+                    accum_grads,
+                    grads,
                 )
 
-                # Average accumulated metrics
-                avg_metrics = {k: v / accum_steps for k, v in accum_metrics.items()}
+            # ----------------------------------------------------------------
+            # Apply update every `grad_accum` micro-batches
+            # ----------------------------------------------------------------
+            is_update_step = ((micro_step + 1) % grad_accum == 0)
 
-                self.global_step += 1
+            if is_update_step:
 
-                # ── FIX 5: was `self.step % self config.` (missing dot) ───────
-                #    was `config.runtime.log_interval` (bare name, not self.config)
-                if self.global_step % self.config.runtime.log_interval == 0:
-                    self._log(avg_metrics, tokens_per_step, step_start)
-                    step_start = time.time()
+                # Average gradients over accumulation steps
+                accum_grads = jax.tree_util.tree_map(
+                    lambda g: g / grad_accum,
+                    accum_grads,
+                )
 
-                # Eval / checkpoint interval
-                if self.global_step % self.config.runtime.eval_interval == 0:
-                    self._checkpoint(avg_metrics)
+                # Optimizer update (clip → adam → weight_decay → lr_scale)
+                updates, self.opt_state = self.optimizer.update(
+                    accum_grads,
+                    self.opt_state,
+                    self.params,
+                )
+                self.params = optax.apply_updates(self.params, updates)
 
-                # Reset accumulation buffers
-                accum_grads   = self._zero_like(self.params)
-                accum_metrics = {}
+                # Reset accumulation state
+                accum_grads = None
+                avg_loss    = accum_loss / grad_accum
+                accum_loss  = 0.0
 
-                # ── Stop condition ────────────────────────────────────────────
-                if self.global_step >= total_opt_steps:
+                self.step += 1
+
+                # ----------------------------------------------------------------
+                # Logging
+                # ----------------------------------------------------------------
+                if self.step % cfg.runtime.log_interval == 0:
+                    elapsed   = time.time() - start_time
+                    tokens    = self.step * tokens_per_step
+                    tok_per_s = tokens / max(elapsed, 1e-6)
+                    lr        = float(self.schedule(self.step))
+
+                    print(
+                        f"step={self.step:6d} | "
+                        f"loss={avg_loss:.4f} | "
+                        f"ce={metrics.get('cross_entropy', 0):.4f} | "
+                        f"zl={metrics.get('z_loss', 0):.5f} | "
+                        f"lr={lr:.2e} | "
+                        f"tok/s={tok_per_s:,.0f} | "
+                        f"tokens={tokens / 1e9:.3f}B"
+                    )
+
+                # ----------------------------------------------------------------
+                # Eval
+                # ----------------------------------------------------------------
+                if self.step % cfg.runtime.eval_interval == 0:
+                    self._run_eval()
+
+                # ----------------------------------------------------------------
+                # Done?
+                # ----------------------------------------------------------------
+                if self.step >= total_steps:
                     break
 
-        elapsed = time.time() - start
-        print(f"\nTraining complete in {elapsed/3600:.2f}h — "
-              f"{self.tokens_seen:,} tokens over {self.global_step:,} steps")
+        print(f"\nTraining complete. Total steps: {self.step:,}")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Optimizer apply (separated for gradient accumulation)
-    # ─────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
-    def _apply_update(self, params, opt_state, grads):
-        """Apply optimizer update. Returns (new_params, new_opt_state)."""
-        import optax
-        updates, new_opt_state = self.optimizer.update(grads, opt_state, params)
-        new_params = optax.apply_updates(params, updates)
-        return new_params, new_opt_state
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Logging
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _log(self, metrics: dict, tokens_per_step: int, step_start: float):
+    def _compute_grads(self, batch):
         """
-        Print training metrics.
-
-        Logs:
-          step        — global optimizer step
-          loss        — total training loss
-          ce / kl     — CE and distillation components if present
-          lr          — current learning rate from schedule
-          tok/s       — tokens per second (wall-clock)
-          tokens      — cumulative tokens seen
-          grad_norm   — gradient norm (stability canary)
+        Compute loss and gradients for a single micro-batch.
+        Does NOT apply the optimizer update.
         """
-        elapsed_step = max(time.time() - step_start, 1e-6)
+        from LaughLM.training.loss import shift_tokens, compute_loss
 
-        # ── FIX 6: tok/s was computing wrong value (used step count not time) ──
-        tok_per_sec = tokens_per_step / elapsed_step
+        def loss_fn(params):
+            inputs, targets = shift_tokens(batch)
+            logits = self.model.apply({"params": params}, inputs)
+            loss, metrics = compute_loss(logits, targets)
+            return loss, metrics
 
-        # Current LR from schedule (schedule is a function of global step)
-        lr = float(self.schedule(self.global_step))
+        (loss, metrics), grads = jax.value_and_grad(
+            loss_fn, has_aux=True
+        )(self.params)
 
-        parts = [
-            f"step={self.global_step:>6}",
-            f"loss={metrics.get('total', metrics.get('loss', 0.0)):.4f}",
-        ]
+        return float(loss), metrics, grads
 
-        if "cross_entropy" in metrics:
-            parts.append(f"ce={metrics['cross_entropy']:.4f}")
-        if "kl_loss" in metrics:
-            parts.append(f"kl={metrics['kl_loss']:.4f}")
-        if "grad_norm" in metrics:
-            parts.append(f"‖g‖={metrics['grad_norm']:.3f}")
-
-        parts += [
-            f"lr={lr:.2e}",
-            f"tok/s={tok_per_sec:,.0f}",
-            f"tokens={self.tokens_seen/1e9:.3f}B",
-        ]
-
-        print("  ".join(parts))
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Checkpoint
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _checkpoint(self, metrics: dict):
+    def _run_eval(self):
         """
-        Save checkpoint. Placeholder — wire to orbax or simple numpy save.
+        Run a quick eval pass on a fixed held-out batch.
+        In a real training loop, pass a separate eval dataloader.
+        Placeholder here — replace with real eval data.
         """
-        print(
-            f"  [ckpt] step={self.global_step} "
-            f"loss={metrics.get('total', 0.0):.4f} "
-            f"tokens={self.tokens_seen/1e9:.2f}B"
-        )
-        # TODO: implement orbax checkpoint save
-        # import orbax.checkpoint as ocp
-        # checkpointer = ocp.StandardCheckpointer()
-        # checkpointer.save(f"checkpoints/step_{self.global_step}", self.params)
+        # TODO: wire up real eval dataloader
+        print(f"  [Eval] step={self.step} — plug in eval dataloader")
+
+    # ------------------------------------------------------------------
+    # Checkpoint save / load
+    # ------------------------------------------------------------------
+
+    def save_checkpoint(self, path: str) -> None:
+        """
+        Save params + optimizer state + step counter.
+
+        For WSD: save at end of STABLE phase (before decay).
+        This checkpoint can be resumed for extended training
+        by loading params + opt_state and continuing with a new schedule.
+        """
+        import pickle
+        ckpt = {
+            "params":    self.params,
+            "opt_state": self.opt_state,
+            "step":      self.step,
+        }
+        with open(path, "wb") as f:
+            pickle.dump(ckpt, f)
+        print(f"Checkpoint saved → {path} (step {self.step:,})")
+
+    def load_checkpoint(self, path: str) -> None:
+        """
+        Load params + optimizer state + step counter.
+
+        When resuming WSD training from the STABLE phase checkpoint:
+          - Load this checkpoint
+          - Build a new schedule with warmup_steps=0 and extended total_tokens
+          - The resumed run enters stable phase immediately (no re-warmup)
+        """
+        import pickle
+        with open(path, "rb") as f:
+            ckpt = pickle.load(f)
+        self.params    = ckpt["params"]
+        self.opt_state = ckpt["opt_state"]
+        self.step      = ckpt["step"]
+        print(f"Checkpoint loaded ← {path} (step {self.step:,})")

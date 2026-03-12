@@ -13,7 +13,15 @@ class ModelBaseConfig(BaseModel):
 
     d_model: int = Field(..., description="Hidden dimension size")
     num_layers: int = Field(..., description="Number of transformer blocks")
-    num_heads: int = Field(..., description="Number of attention heads")
+    num_heads: int = Field(..., description="Number of query attention heads")
+    num_kv_heads: Optional[int] = Field(
+        default=None,
+        description=(
+            "Number of KV heads for GQA. "
+            "None = same as num_heads (standard MHA). "
+            "Set to num_heads // 4 for 4:1 GQA ratio."
+        )
+    )
 
     vocab_size: int = Field(..., description="Tokenizer vocabulary size")
     max_seq_len: int = Field(..., description="Maximum sequence length")
@@ -142,7 +150,25 @@ class SchedulerConfig(BaseModel):
     ]
 
     warmup_steps: int
-    min_lr_ratio: float
+    min_lr_ratio: float = 0.0
+
+    # WSD-specific fields
+    stable_fraction: float = Field(
+        default=0.88,
+        description=(
+            "WSD only. Fraction of total steps in stable (constant-LR) phase. "
+            "Warmup uses warmup_steps. Decay uses the remainder. "
+            "0.88 → 88% stable, ~10% decay (with 2% warmup). "
+            "Research finding: longer stable + short decay beats long decay."
+        )
+    )
+    decay_steps: Optional[int] = Field(
+        default=None,
+        description=(
+            "WSD only. Override computed decay window with a fixed step count. "
+            "When None, decay_steps = total_steps - warmup_steps - stable_steps."
+        )
+    )
 
 
 # ------------------------------------------------------------
@@ -176,6 +202,8 @@ class DatasetSource(BaseModel):
 
     name: str
     weight: float
+    config: Optional[str] = None
+    split: str = "train"
 
 
 class DataConfig(BaseModel):
