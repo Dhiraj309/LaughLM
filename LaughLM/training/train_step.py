@@ -1,6 +1,6 @@
 
 import jax
-import jax.numpybas jnp
+import jax.numpy as jnp
 import optax
 
 from LaughLM.training.loss import shift_tokens, compute_loss
@@ -25,8 +25,8 @@ def create_train_step(model, optimizer):
 
         return loss, (metrics, logits)
 
-    def train_state(param, opt_state, batch):
-        (loss, (metrics, logits)), grads = jax.grad_and_value(
+    def train_step(param, opt_state, batch):
+        (loss, (metrics, logits)), grads = jax.valu_and_grad(
             loss_fn,
             has_aux=True
         )(params, batch)
