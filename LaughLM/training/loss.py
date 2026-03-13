@@ -142,9 +142,9 @@ def compute_loss(
     total = ce + zl
 
     metrics = {
-        "cross_entropy": float(ce),
-        "z_loss":        float(zl),
-        "total":         float(total),
+        "cross_entropy": ce,
+        "z_loss": zl,
+        "total": total,
     }
 
     return total, metrics

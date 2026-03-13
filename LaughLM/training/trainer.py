@@ -11,12 +11,37 @@ from LaughLM.model.parameter_utils import generate_preflight_report
 from LaughLM.training.optimizer import build_optimizer
 from LaughLM.training.scheduler import build_scheduler, compute_total_steps
 from LaughLM.training.train_step import create_train_step, create_eval_step
+from LaughLM.training.logger import TrainingLogger
 from LaughLM.utils.rng import create_rng
 
 
 class Trainer:
     """
     LaughLM training orchestration.
+
+    Handles:
+      - Model + optimizer initialization
+      - JIT-compiled training and eval steps
+      - Gradient accumulation across micro-batches
+      - Logging (loss, LR, tokens/sec, per-component metrics)
+      - Checkpoint saving / resuming
+
+    Fixes applied
+    -------------
+    FIX 1: self.config = LaughLMConfig  →  self.config = config
+            (was assigning the class, not the instance)
+
+    FIX 2: self.optimizer(params)  →  self.optimizer.init(params)
+            (Optax optimizers use .init(), not direct call)
+
+    FIX 3: config.  →  self.config.  in train() body
+            ('config' was not in scope — 'self.config' is)
+
+    FIX 4: Gradient accumulation implemented
+            (was in config but completely absent from training loop)
+
+    FIX 5: Schedule is built first, then passed to build_optimizer
+            (previously schedule was separate object, LR was never applied)
     """
 
     def __init__(self, config: LaughLMConfig):
@@ -62,6 +87,13 @@ class Trainer:
         # Step counter
         # ------------------------------------------------------------------
         self.step = 0
+
+        # ------------------------------------------------------------------
+        # Logger
+        # ------------------------------------------------------------------
+        from LaughLM.model.parameter_utils import estimate_parameters
+        total_params = estimate_parameters(config)["total_params"]
+        self.logger = TrainingLogger(config, total_params=total_params)
 
     # ------------------------------------------------------------------
     # Training loop
@@ -111,7 +143,7 @@ class Trainer:
             # ----------------------------------------------------------------
             # Compute gradients for this micro-batch (no optimizer update yet)
             # ----------------------------------------------------------------
-            loss, metrics, grads = self._compute_grads(batch)
+            loss, metrics, grads, grad_norm = self._compute_grads(batch)
             accum_loss += loss
 
             # Accumulate gradients: sum across micro-batches
@@ -153,22 +185,20 @@ class Trainer:
                 self.step += 1
 
                 # ----------------------------------------------------------------
-                # Logging
+                # Step logging (phase banners fire automatically inside log_step)
                 # ----------------------------------------------------------------
                 if self.step % cfg.runtime.log_interval == 0:
-                    elapsed   = time.time() - start_time
-                    tokens    = self.step * tokens_per_step
-                    tok_per_s = tokens / max(elapsed, 1e-6)
-                    lr        = float(self.schedule(self.step))
+                    lr          = float(self.schedule(self.step))
+                    tokens_seen = self.step * tokens_per_step
+                    metrics["loss"] = avg_loss
+                    # grad_norm already computed in _compute_grads
 
-                    print(
-                        f"step={self.step:6d} | "
-                        f"loss={avg_loss:.4f} | "
-                        f"ce={metrics.get('cross_entropy', 0):.4f} | "
-                        f"zl={metrics.get('z_loss', 0):.5f} | "
-                        f"lr={lr:.2e} | "
-                        f"tok/s={tok_per_s:,.0f} | "
-                        f"tokens={tokens / 1e9:.3f}B"
+                    self.logger.log_step(
+                        step=self.step,
+                        metrics=metrics,
+                        lr=lr,
+                        grad_norm=grad_norm,
+                        tokens_seen=tokens_seen,
                     )
 
                 # ----------------------------------------------------------------
@@ -183,7 +213,7 @@ class Trainer:
                 if self.step >= total_steps:
                     break
 
-        print(f"\nTraining complete. Total steps: {self.step:,}")
+        self.logger.log_summary(self.step, self.step * tokens_per_step)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -191,8 +221,11 @@ class Trainer:
 
     def _compute_grads(self, batch):
         """
-        Compute loss and gradients for a single micro-batch.
+        Compute loss, gradients, and grad norm for a single micro-batch.
         Does NOT apply the optimizer update.
+
+        Grad norm is computed BEFORE the optimizer clips it, which is
+        what you want — the pre-clip norm is the real instability signal.
         """
         from LaughLM.training.loss import shift_tokens, compute_loss
 
@@ -206,7 +239,19 @@ class Trainer:
             loss_fn, has_aux=True
         )(self.params)
 
-        return float(loss), metrics, grads
+        # Global L2 grad norm across all parameters (pre-clip)
+        grad_norm = float(
+            jnp.sqrt(
+                sum(
+                    jnp.sum(g ** 2)
+                    for g in jax.tree_util.tree_leaves(grads)
+                )
+            )
+        )
+
+        # Only convert loss/metrics to float at log time to minimise
+        # device syncs. grad_norm sync is unavoidable here.
+        return float(loss), metrics, grads, grad_norm
 
     def _run_eval(self):
         """
