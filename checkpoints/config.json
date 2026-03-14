@@ -1,0 +1,85 @@
+{
+  "model": {
+    "d_model": 256,
+    "num_layers": 4,
+    "num_heads": 4,
+    "num_kv_heads": null,
+    "vocab_size": 50257,
+    "max_seq_len": 128
+  },
+  "architecture": {
+    "positional": "learned",
+    "normalization": "layer_norm",
+    "norm_placement": "post",
+    "attention_variant": "mha",
+    "attention_impl": "standard",
+    "ffn_type": "gelu_mlp",
+    "residual": "standard",
+    "embeddings": "standard",
+    "bias": true,
+    "weight_tying": true
+  },
+  "initialization": {
+    "method": "normal",
+    "std": 0.02,
+    "embedding_std": 0.02,
+    "attention_std": 0.02,
+    "mlp_std": 0.02,
+    "residual_scale": 1.0
+  },
+  "optimizer": {
+    "type": "adamw",
+    "learning_rate": 0.0003,
+    "beta1": 0.9,
+    "beta2": 0.95,
+    "eps": 1e-08,
+    "weight_decay": 0.01,
+    "gradient_clip": 1.0
+  },
+  "scheduler": {
+    "type": "cosine",
+    "warmup_steps": 100,
+    "min_lr_ratio": 0.1,
+    "stable_fraction": 0.88,
+    "decay_steps": null
+  },
+  "runtime": {
+    "seq_len": 128,
+    "micro_batch_per_device": 4,
+    "gradient_accumulation": 1,
+    "total_tokens": 1000000,
+    "eval_interval": 100,
+    "log_interval": 10,
+    "checkpoint_interval": 40,
+    "checkpoint_max_to_keep": 3,
+    "checkpoint_dir": "checkpoints"
+  },
+  "data": {
+    "sources": [],
+    "max_seq_len": 128,
+    "packing": false,
+    "eos_between_docs": true,
+    "pad_to_multiple": 128
+  },
+  "tokenizer": {
+    "algorithm": "bpe",
+    "vocab_size": 50257,
+    "pre_tokenizer": "byte_level",
+    "number_tokenization": "single_digit",
+    "output_format": "huggingface_fast"
+  },
+  "hardware": {
+    "accelerator": "gpu",
+    "type": "local"
+  },
+  "parallelism": {
+    "data_parallel": 1,
+    "model_parallel": 1,
+    "compute_dtype": "float16",
+    "param_dtype": "float32"
+  },
+  "monitoring": {
+    "tensorboard": false,
+    "rich_terminal": true
+  }
+}

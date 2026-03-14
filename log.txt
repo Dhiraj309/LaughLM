@@ -1,0 +1,29 @@
+Loaded dataset with 100,000,000 tokens
+
+Model Report
+────────────────────────
+Total parameters:        16,013,568
+Embedding parameters:    12,865,792
+Parameters per layer:    786,944
+
+Training Report
+────────────────────────
+Tokens per step:         512
+Total training steps:    1,953
+Target tokens:           1,000,000
+
+Memory Report
+────────────────────────
+Parameter memory:        0.03 GB
+Optimizer memory:        0.13 GB
+Gradient memory:         0.03 GB
+Estimated total:         0.19 GB
+
+
+============================================================
+Training for 1,953 optimizer steps
+Effective tokens per step: 512
+============================================================
+
+*    10      0.5%  │    10.7830    48.2K      n/a  │  ↑   3.00e-05  │      146   0.001%  │      5.1K     994.8K       1h53m
+*    20      1.0%  │    10.5649    38.8K      n/a  │  ↑   6.00e-05  │      201   0.001%  │     10.2K     989.7K       1h22m

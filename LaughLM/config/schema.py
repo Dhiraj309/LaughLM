@@ -190,6 +190,25 @@ class RuntimeConfig(BaseModel):
     eval_interval: int
     log_interval: int
 
+    # ------------------------------------------------------------
+    # Checkpointing
+    # ------------------------------------------------------------
+
+    checkpoint_interval: int = Field(
+        default=1000,
+        description="Save checkpoint every N optimizer steps"
+    )
+
+    checkpoint_max_to_keep: int = Field(
+        default=3,
+        description="Maximum number of recent checkpoints to retain"
+    )
+
+    checkpoint_dir: str = Field(
+        default="checkpoints",
+        description="Directory where checkpoints are stored"
+    )
+
 
 # ------------------------------------------------------------
 # Dataset Sources

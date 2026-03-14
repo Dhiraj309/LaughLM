@@ -1,25 +1,5 @@
 """
 LaughLM/training/logger.py
-
-High-performance training logger designed for accelerator workloads.
-
-Goals
------
-• Zero meaningful accelerator overhead
-• Clean structured telemetry
-• Stable column alignment
-• ANSI-safe formatting
-• Phase banners for scheduler stages
-
-Critical rule
--------------
-Always pad plain strings BEFORE applying ANSI colour.
-
-    WRONG:
-        f"{green('text'):>10}"
-
-    RIGHT:
-        green(f"{'text':>10}")
 """
 
 import time
@@ -28,7 +8,29 @@ import sys
 from collections import deque
 from typing import Dict, Optional
 
+import jax
+
 from LaughLM.config.schema import LaughLMConfig
+
+
+# ─────────────────────────────────────────────────────────────
+# Scalar safety
+# ─────────────────────────────────────────────────────────────
+
+def _scalar(x):
+    """
+    Convert JAX / numpy scalars safely to Python float.
+    Prevents DeviceArray printing explosions.
+    """
+    if x is None:
+        return None
+    try:
+        return float(x)
+    except Exception:
+        try:
+            return float(jax.device_get(x))
+        except Exception:
+            return float("nan")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -224,60 +226,20 @@ class TrainingLogger:
         self._stable_end = warmup + stable
 
 
-    # ─────────────────────────────────────────────────────
-    # Phase detection
-    # ─────────────────────────────────────────────────────
-
     def _get_phase(self, step):
         if step <= self._warmup_end: return "warmup"
         if step <= self._stable_end: return "stable"
         return "decay"
 
 
-    def _print_phase_banner(self, phase):
-
-        lr = self.config.optimizer.learning_rate
-
-        if phase == "warmup":
-            label = f"steps 1 → {self._warmup_end}"
-            lrmsg = f"lr: 0 → {fmt_lr(lr)}"
-            colour = yellow
-
-        elif phase == "stable":
-            label = f"steps {self._warmup_end+1} → {self._stable_end}"
-            lrmsg = f"lr: {fmt_lr(lr)} constant"
-            colour = green
-
-        else:
-            label = f"steps {self._stable_end+1} → {self.total_steps}"
-            lrmsg = f"lr: {fmt_lr(lr)} → 0"
-            colour = cyan
-
-        body = f"── {phase.upper()}  [ {label} · {lrmsg} ]"
-        banner = body + " " + "─" * max(0, len(_HEADER_PLAIN) - len(body))
-
-        print()
-        print(colour(banner))
-        print(_HEADER)
-        print(_RULE)
-
-
-    # ─────────────────────────────────────────────────────
-    # Main step logger
-    # ─────────────────────────────────────────────────────
-
     def log_step(self, step, metrics, lr, grad_norm=None, tokens_seen=None):
 
-        # 🔴 CRITICAL: only log every N steps
         if step % self.config.runtime.log_interval != 0:
             return
 
-        loss = metrics.get("loss", float("nan"))
-
-        phase = self._get_phase(step)
-        if phase != self._phase:
-            self._phase = phase
-            self._print_phase_banner(phase)
+        # 🔒 SAFE scalar conversion
+        loss = _scalar(metrics.get("loss", float("nan")))
+        grad_norm = _scalar(grad_norm)
 
         if tokens_seen is None:
             tokens_seen = step * self._tps
@@ -322,7 +284,7 @@ class TrainingLogger:
             )
 
         lr_val = fmt_lr(lr).rjust(_W['lr']-2)
-        c_lr = _phase_arrow(phase) + " " + dim(lr_val)
+        c_lr = _phase_arrow(self._get_phase(step)) + " " + dim(lr_val)
 
         c_toks = dim(f"{int(avg_toks):,}".rjust(_W['toks']))
         c_mfu  = dim(fmt_mfu(mfu).rjust(_W['mfu']))
@@ -349,27 +311,3 @@ class TrainingLogger:
         warning = self._detector.check(loss, grad_norm)
         if warning:
             print(f"         {warning}")
-
-
-    # ─────────────────────────────────────────────────────
-    # Training summary
-    # ─────────────────────────────────────────────────────
-
-    def log_summary(self, step, tokens_seen):
-
-        elapsed = time.time() - self._t0
-
-        avg_toks = sum(self._window)/len(self._window) if self._window else 0
-
-        w = len(_HEADER_PLAIN)+1
-
-        print()
-        print(green("═"*w))
-        print(green("Training complete"))
-        print(green(f"Steps        {step:,}/{self.total_steps:,}"))
-        print(green(f"Tokens seen  {fmt_tokens(tokens_seen)}"))
-        print(green(f"Best loss    {self._best_loss:.4f}"))
-        print(green(f"Wall time    {fmt_time(elapsed)}"))
-        print(green(f"Avg tok/s    {avg_toks:,.0f}"))
-        print(green("═"*w))
-        print()

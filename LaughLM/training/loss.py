@@ -1,4 +1,3 @@
-
 import jax
 import jax.numpy as jnp
 import optax
@@ -113,32 +112,10 @@ def compute_loss(
     targets: jnp.ndarray,
     mask: Optional[jnp.ndarray] = None,
     zloss_coeff: float = 1e-4,
-) -> Tuple[jnp.ndarray, Dict[str, float]]:
-    """
-    Compute total training loss = cross-entropy + z-loss.
+):
 
-    Parameters
-    ----------
-    logits      : [B, T, V]  model output (float32)
-    targets     : [B, T]     ground truth token IDs
-    mask        : [B, T]     attention mask, 1.0 = real token, 0.0 = pad
-    zloss_coeff : weight for z-loss term (default: 1e-4)
-
-    Returns
-    -------
-    total_loss : scalar
-    metrics    : dict with per-component losses for logging
-
-    FIX (2 bugs):
-      1. 'z_loss(loss, z_loss_coeff)' → 'z_loss(logits, zloss_coeff)'
-         ('loss' was undefined; parameter name was inconsistent)
-      2. Return is now (scalar, dict) — matching the unpacking in train_step:
-         'loss, metrics = compute_loss(...)'
-         Previously returned only a dict, so unpacking would crash.
-    """
-
-    ce    = cross_entropy_loss(logits, targets, mask)
-    zl    = z_loss(logits, zloss_coeff)
+    ce = cross_entropy_loss(logits, targets, mask)
+    zl = z_loss(logits, zloss_coeff)
     total = ce + zl
 
     metrics = {
