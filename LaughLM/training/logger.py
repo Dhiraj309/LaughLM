@@ -18,10 +18,6 @@ from LaughLM.config.schema import LaughLMConfig
 # ─────────────────────────────────────────────────────────────
 
 def _scalar(x):
-    """
-    Convert JAX / numpy scalars safely to Python float.
-    Prevents DeviceArray printing explosions.
-    """
     if x is None:
         return None
     try:
@@ -160,7 +156,6 @@ class InstabilityDetector:
     def __init__(self, window=50):
         self._loss_buf = deque(maxlen=window)
         self._norm_buf = deque(maxlen=window)
-        self._best     = float("inf")
 
     def check(self, loss, grad_norm):
 
@@ -210,14 +205,12 @@ class TrainingLogger:
 
         self.start_time = time.time()
 
-        self._t0        = time.time()
         self._last_t    = time.time()
         self._last_step = 0
 
         self._window = deque(maxlen=100)
 
         self._best_loss = float("inf")
-        self._phase     = None
 
         self._detector = InstabilityDetector()
 
@@ -226,6 +219,11 @@ class TrainingLogger:
 
         self._warmup_end = warmup
         self._stable_end = warmup + stable
+
+        # Header management
+        self._printed_header = False
+        self._lines_since_header = 0
+        self._header_every = 50
 
 
     def _get_phase(self, step):
@@ -307,7 +305,20 @@ class TrainingLogger:
             + c_seen + "  " + c_rem + "  " + c_eta
         )
 
+        # Header printing
+        if not self._printed_header:
+            print(_HEADER)
+            print(_RULE)
+            self._printed_header = True
+
+        elif self._lines_since_header >= self._header_every:
+            print()
+            print(_HEADER)
+            print(_RULE)
+            self._lines_since_header = 0
+
         print(row)
+        self._lines_since_header += 1
 
         warning = self._detector.check(loss, grad_norm)
         if warning:
