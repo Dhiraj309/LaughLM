@@ -208,6 +208,8 @@ class TrainingLogger:
         self._tokens_total = self.total_steps * self._tps
         self._hw_flops     = 1.576e15
 
+        self.start_time = time.time()
+
         self._t0        = time.time()
         self._last_t    = time.time()
         self._last_step = 0
@@ -237,7 +239,6 @@ class TrainingLogger:
         if step % self.config.runtime.log_interval != 0:
             return
 
-        # 🔒 SAFE scalar conversion
         loss = _scalar(metrics.get("loss", float("nan")))
         grad_norm = _scalar(grad_norm)
 
@@ -311,3 +312,23 @@ class TrainingLogger:
         warning = self._detector.check(loss, grad_norm)
         if warning:
             print(f"         {warning}")
+
+
+    # ─────────────────────────────────────────────────────────
+    # Training summary
+    # ─────────────────────────────────────────────────────────
+
+    def log_summary(self, step: int, tokens: int):
+
+        elapsed = time.time() - self.start_time
+        hrs = elapsed / 3600
+
+        print("\n" + "=" * 60)
+        print("Training Summary")
+        print("=" * 60)
+
+        print(f"Final step:        {step:,}")
+        print(f"Tokens processed:  {tokens:,}")
+        print(f"Wall time:         {hrs:.2f} hours")
+
+        print("=" * 60)

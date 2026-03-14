@@ -1,17 +1,16 @@
+
 from flax import struct
+from typing import Any
 
 
 @struct.dataclass
 class TrainState:
     """
     Full training state stored in checkpoints.
-
-    Using a dataclass ensures Orbax restores the correct
-    PyTree structure for Optax optimizer state.
     """
 
-    params: any
-    opt_state: any
+    params: Any
+    opt_state: Any
     step: int
     tokens_processed: int
-    rng_key: any
+    rng_key: Any

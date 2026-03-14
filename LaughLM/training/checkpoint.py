@@ -1,12 +1,13 @@
+
 import orbax.checkpoint as ocp
 from pathlib import Path
 
 
 class CheckpointManager:
     """
-    Modern Orbax checkpoint manager for LaughLM.
+    Orbax checkpoint manager for LaughLM.
 
-    Saves complete training state for seamless resume.
+    Saves and restores the full training state.
     """
 
     def __init__(self, directory: str, max_to_keep: int = 3):
@@ -29,7 +30,7 @@ class CheckpointManager:
     # Save checkpoint
     # ------------------------------------------------------------
 
-    def save(self, step: int, state: dict):
+    def save(self, step: int, state):
 
         print(f"[checkpoint] saving step {step}")
 
@@ -45,7 +46,7 @@ class CheckpointManager:
     # Restore latest checkpoint
     # ------------------------------------------------------------
 
-    def restore_latest(self):
+    def restore_latest(self, target_state=None):
 
         latest_step = self.manager.latest_step()
 
@@ -54,10 +55,14 @@ class CheckpointManager:
 
         print(f"[checkpoint] restoring step {latest_step}")
 
+        # IMPORTANT: provide target tree
         args = ocp.args.Composite(
-            state=ocp.args.StandardRestore()
+            state=ocp.args.StandardRestore(item=target_state)
         )
 
-        restored = self.manager.restore(latest_step, args=args)
+        restored = self.manager.restore(
+            latest_step,
+            args=args,
+        )
 
         return restored["state"], latest_step

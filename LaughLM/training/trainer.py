@@ -13,6 +13,7 @@ from LaughLM.training.scheduler import build_scheduler, compute_total_steps
 from LaughLM.training.train_step import create_train_step, create_eval_step
 from LaughLM.training.logger import TrainingLogger
 from LaughLM.training.checkpoint import CheckpointManager
+from LaughLM.training.train_state import TrainState
 from LaughLM.utils.rng import create_rng
 
 
@@ -21,10 +22,6 @@ from LaughLM.utils.rng import create_rng
 # ------------------------------------------------------------
 
 def _scalar(x):
-    """
-    Convert JAX scalars to Python floats safely.
-    Prevents DeviceArray printing explosions.
-    """
     if x is None:
         return None
     try:
@@ -68,7 +65,7 @@ class Trainer:
             dtype=jnp.int32,
         )
 
-        self.params = self.model.init(
+        params = self.model.init(
             self.rng.next_key(),
             dummy,
         )["params"]
@@ -79,7 +76,7 @@ class Trainer:
         self.schedule = build_scheduler(config)
         self.optimizer = build_optimizer(config, self.schedule)
 
-        self.opt_state = self.optimizer.init(self.params)
+        opt_state = self.optimizer.init(params)
 
         # ------------------------------------------------------------
         # JIT steps
@@ -88,10 +85,15 @@ class Trainer:
         self.eval_step = create_eval_step(self.model)
 
         # ------------------------------------------------------------
-        # Counters
+        # Training state
         # ------------------------------------------------------------
-        self.step = 0
-        self.tokens_processed = 0
+        self.state = TrainState(
+            params=params,
+            opt_state=opt_state,
+            step=0,
+            tokens_processed=0,
+            rng_key=self.rng.key,
+        )
 
         # ------------------------------------------------------------
         # Logger
@@ -127,31 +129,15 @@ class Trainer:
         # ------------------------------------------------------------
         # Restore checkpoint if available
         # ------------------------------------------------------------
-        restored = self.checkpoints.restore_latest()
+        restored = self.checkpoints.restore_latest(self.state)
 
         if restored is not None:
 
-            state, step = restored
+            self.state, step = restored
 
-            self.params = state["params"]
+            self.rng._key = self.state.rng_key
 
-            """
-            init_opt_state = self.optimizer.init(self.params)
-
-            self.opt_state = jax.tree_util.tree_map(
-                lambda new, old: old,
-                init_opt_state,
-                state["opt_state"],
-            )"""
-
-            self.opt_state = state["opt_state"]
-
-            self.step = state["step"]
-            self.tokens_processed = state["tokens_processed"]
-
-            self.rng._key = state["rng_key"]
-
-            print(f"[trainer] resumed from step {self.step}")
+            print(f"[trainer] resumed from step {self.state.step}")
 
     # ------------------------------------------------------------
     # Training loop
@@ -179,26 +165,33 @@ class Trainer:
             batch = jnp.asarray(batch, dtype=jnp.int32)
 
             # --------------------------------------------------------
-            # JIT compiled update
+            # Training step
             # --------------------------------------------------------
-            self.params, self.opt_state, metrics = self.train_step(
-                self.params,
-                self.opt_state,
+            new_params, new_opt_state, metrics = self.train_step(
+                self.state.params,
+                self.state.opt_state,
                 batch,
             )
 
-            # Ensure metrics come back to CPU safely
             metrics = jax.device_get(metrics)
 
-            self.step += 1
-            self.tokens_processed += tokens_per_step
+            new_step = self.state.step + 1
+            new_tokens = self.state.tokens_processed + tokens_per_step
+
+            self.state = TrainState(
+                params=new_params,
+                opt_state=new_opt_state,
+                step=new_step,
+                tokens_processed=new_tokens,
+                rng_key=self.rng.key,
+            )
 
             # --------------------------------------------------------
             # Logging
             # --------------------------------------------------------
-            if self.step % cfg.runtime.log_interval == 0:
+            if self.state.step % cfg.runtime.log_interval == 0:
 
-                lr = _scalar(self.schedule(self.step))
+                lr = _scalar(self.schedule(self.state.step))
 
                 safe_metrics = {
                     k: _scalar(v)
@@ -206,55 +199,39 @@ class Trainer:
                 }
 
                 self.logger.log_step(
-                    step=self.step,
+                    step=self.state.step,
                     metrics=safe_metrics,
                     lr=lr,
                     grad_norm=None,
-                    tokens_seen=self.tokens_processed,
+                    tokens_seen=self.state.tokens_processed,
                 )
 
             # --------------------------------------------------------
             # Evaluation
             # --------------------------------------------------------
-            if self.step % cfg.runtime.eval_interval == 0:
+            if self.state.step % cfg.runtime.eval_interval == 0:
                 self._run_eval()
 
             # --------------------------------------------------------
             # Checkpoint
             # --------------------------------------------------------
-            if self.step % self.checkpoint_interval == 0:
+            if self.state.step % self.checkpoint_interval == 0:
 
-                state = {
-                    "params": self.params,
-                    "opt_state": self.opt_state,
-                    "step": self.step,
-                    "tokens_processed": self.tokens_processed,
-                    "rng_key": self.rng.key,
-                }
+                print(f"[checkpoint] saving step {self.state.step}")
 
-                print(f"[checkpoint] saving step {self.step}")
+                self.checkpoints.save(self.state.step, self.state)
 
-                self.checkpoints.save(self.step, state)
-
-            if self.step >= total_steps:
+            if self.state.step >= total_steps:
                 break
 
         # ------------------------------------------------------------
         # Final checkpoint
         # ------------------------------------------------------------
-        final_state = {
-            "params": self.params,
-            "opt_state": self.opt_state,
-            "step": self.step,
-            "tokens_processed": self.tokens_processed,
-            "rng_key": self.rng.key,
-        }
-
-        self.checkpoints.save(self.step, final_state)
+        self.checkpoints.save(self.state.step, self.state)
 
         self.logger.log_summary(
-            self.step,
-            self.tokens_processed,
+            self.state.step,
+            self.state.tokens_processed,
         )
 
     # ------------------------------------------------------------
@@ -263,4 +240,4 @@ class Trainer:
 
     def _run_eval(self):
 
-        print(f"[Eval] step={self.step} — plug in eval dataloader")
+        print(f"[Eval] step={self.state.step} — plug in eval dataloader")
