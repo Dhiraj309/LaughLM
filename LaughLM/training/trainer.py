@@ -15,6 +15,7 @@ from LaughLM.training.logger import TrainingLogger
 from LaughLM.training.checkpoint import CheckpointManager
 from LaughLM.training.train_state import TrainState
 from LaughLM.utils.rng import create_rng
+from LaughLM.utils.prefetch import prefetch_to_device
 
 
 # ------------------------------------------------------------
@@ -160,7 +161,9 @@ class Trainer:
         print(f"Effective tokens per step: {tokens_per_step:,}")
         print("=" * 60 + "\n")
 
-        for batch in dataloader:
+        prefetched_loader = prefetch_to_device(iter(dataloader), size=2)
+
+        for batch in prefetched_loader:
 
             batch = jnp.asarray(batch, dtype=jnp.int32)
 
