@@ -171,7 +171,7 @@ def benchmark(config_path: str, steps: int = 200, warmup: int = 20):
 if __name__ == "__main__":
 
     benchmark(
-        config_path="configs/test.yaml",
+        config_path="configs/gpu_test.yaml",
         steps=200,
         warmup=20,
     )
