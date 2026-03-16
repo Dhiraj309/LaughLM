@@ -237,7 +237,7 @@ class GroupedQueryAttention(nn.Module):
 
         q, kv = jnp.split(qkv, [self.d_model], axis=-1)
 
-        k, v = jnp.split(qkv, [self.d_model], axis=-1)
+        k, v = jnp.split(kv, 2, axis=-1)
 
         q = split_heads(q, self.num_heads)
         k = split_heads(k, self.num_kv_heads)
