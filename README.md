@@ -1,179 +1,387 @@
 # LaughLM
 
-**LaughLM** is a configuration-driven, reproducible, industry-grade decoder-only LLM training system built with JAX/Flax.
+A high-performance **decoder-only transformer training system** built with **JAX + Flax** and optimized for **TPU training**.
 
-This project is **not** a notebook experiment.
+LaughLM is designed as a **research-friendly yet production-capable framework** for experimenting with modern transformer architectures while maintaining high training throughput.
 
-It is a clean, modular, hardware-aware training framework designed for:
+The system emphasizes:
 
-* Deterministic pretraining on TPU (v5e-8)
-* Controlled architectural experimentation
-* Reproducible fine-tuning on GPU
-* Config-driven scaling
-* Resume-safe checkpointing
-
-All architectural, optimization, and runtime decisions are controlled via YAML configuration files.
-Model code contains **zero hardcoded dimensions**.
+- clean modular architecture
+- hardware-efficient training
+- reproducible experiments
+- flexible configuration
+- large-scale dataset streaming
+- high MFU optimization on TPUs
 
 ---
 
-## Core Design Philosophy
+# Features
 
-**Configuration is the single source of truth.**
+- **Decoder-only GPT architecture**
+- **JAX + Flax implementation**
+- **TPU-optimized mixed precision training**
+- **Flexible architecture selection**
+- **Pre-tokenized memory-mapped datasets**
+- **Multiple attention variants**
+- **Multiple FFN architectures**
+- **Weight tying support**
+- **Orbax checkpointing**
+- **Optax optimizers**
+- **Config-driven experiments**
 
-* Model hyperparameters → `configs/model/`
-* Training hyperparameters → `configs/training/`
-* Dataset parameters → `configs/data/`
-* System assumptions → `configs/system/`
-* Experimental toggles → `configs/experiment/`
+Supported architecture features:
 
-YAML is parsed into validated dataclasses.
-The model is a pure function of structured config objects.
-
-* No hidden defaults
-* No runtime dimension inference
-* No magic constants
+- MHA / MQA / GQA attention
+- RoPE positional encoding
+- SwiGLU / GEGLU / GELU MLP
+- RMSNorm / LayerNorm
+- configurable residual scaling
+- multiple LR schedulers
+- masked weight decay
 
 ---
 
-## Project Structure
-
+# Project Structure:
 ```text
-LaughLM/
-├── configs/          # All YAML configuration
-├── config/           # Schema, loader, resolver
-├── model/            # Transformer architecture
-├── training/         # Optimizer, scheduler, trainer
-├── data/             # Dataset and tokenizer logic
-├── distributed/      # TPU/GPU parallelism utilities
-├── utils/            # Logging, metrics, reproducibility
-├── evaluation/       # Evaluation framework
-├── scripts/          # Entrypoints
-├── checkpoints/      # Saved training state
-└── logs/             # Training logs
+.
+├── configs
+│   ├── gpu_test.yaml
+│   └── test.yaml
+├── LaughLM
+│   ├── config
+│   │   ├── loader.py
+│   │   ├── schema.py
+│   │   └── validation.py
+│   ├── data
+│   │   ├── domain_sampler.py
+│   │   ├── memmap_loader.py
+│   │   ├── shard_writer.py
+│   │   ├── tokenizer.py
+│   │   └── tokenizer_train.py
+│   ├── model
+│   │   ├── gpt.py
+│   │   ├── layers
+│   │   │   ├── attention.py
+│   │   │   ├── mlp.py
+│   │   │   ├── normalization.py
+│   │   │   ├── positional.py
+│   │   │   └── residual.py
+│   │   ├── parameter_utils.py
+│   │   └── transformer_block.py
+│   ├── training
+│   │   ├── checkpoint.py
+│   │   ├── logger.py
+│   │   ├── loss.py
+│   │   ├── optimizer.py
+│   │   ├── scheduler.py
+│   │   ├── trainer.py
+│   │   ├── train_state.py
+│   │   └── train_step.py
+│   └── utils
+│       └── rng.py
+├── LICENSE
+├── log.txt
+├── pyproject.toml
+├── README.md
+├── requirements.txt
+└── scripts
+    ├── build_shard.py
+    └── train_gpu_test.py
 ```
 
 ---
 
-## Development Phases
+# Installation
 
-### Phase A — Vanilla GPT Baseline
-
-* Learned token + positional embeddings
-* Multi-head scaled dot-product attention
-* GELU MLP
-* LayerNorm
-* Adam optimizer
-* Deterministic training
-* Resume-safe checkpointing
-
-**No architectural tricks.**
-
-**Goal:** Stable, reproducible baseline.
-
----
-
-### Phase B — Parity-Oriented Refinement (PAR)
-
-Config-controlled upgrades:
-
-* RoPE vs. learned positional embeddings
-* RMSNorm vs. LayerNorm
-* SwiGLU vs. GELU
-* Bias removal
-* Residual scaling strategies
-
-Each change must include:
-
-* Mathematical derivation
-* Stability analysis
-* Throughput comparison
-* Memory comparison
-* Convergence comparison
-
----
-
-### Phase C — Controlled Experimentation
-
-* Attention variants
-* KV cache design
-* Mixed precision strategies
-* Microbatch scaling
-* Architecture ablations
-
-Experiments must be:
-
-* Toggleable via config
-* Isolated
-* Baseline-compatible
-
----
-
-## Hardware Targets
-
-### Pretraining
-
-* TPU v5e-8
-* 16 GB HBM per chip
-* bf16 precision
-
-### Fine-Tuning
-
-* 2× T4 or 2× P100 GPUs
-
----
-
-## Running Training
-
-### Train
+Clone the repository:
 
 ```bash
-python scripts/train.py --config configs/
+git clone https://github.com/your-org/LaughLM.git
+cd LaughLM
 ```
 
-### Resume from Checkpoint
+Create environment:
+```bash
+python -m venv venv
+source venv/bin/activate
+```
+Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+For TPU environments install JAX:
 
 ```bash
-python scripts/resume.py --checkpoint checkpoints/pretrain/step_XXXXX
+pip install --upgrade "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 ```
 
-### Evaluate
+---
 
+Configuration
+
+Experiments are fully defined via YAML configs.
+
+Example:
+
+configs/test.yaml
+
+Configuration sections include:
+
+model architecture
+
+optimizer
+
+scheduler
+
+runtime parameters
+
+dataset sources
+
+tokenizer settings
+
+hardware configuration
+
+
+Example snippet:
+```yaml
+model:
+  d_model: 768
+  num_layers: 12
+  num_heads: 12
+  vocab_size: 32000
+  max_seq_len: 2048
+```
+
+---
+
+Dataset Pipeline
+
+LaughLM uses a pre-tokenized dataset pipeline for maximum throughput.
+
+Training datasets are converted into binary token shards.
+
+Advantages:
+
+high throughput
+
+minimal CPU overhead
+
+memory-mapped streaming
+
+scalable to large datasets
+
+
+
+---
+
+Step 1 — Train Tokenizer
+
+Train a tokenizer using streaming datasets.
 ```bash
-python scripts/evaluate.py --checkpoint path_to_checkpoint
+python -m LaughLM.data.tokenizer_train
+```
+Output:
+
+tokenizer.json
+
+
+---
+
+Step 2 — Build Token Shards
+
+Convert raw text into token shards.
+```bash
+python scripts/build_shard.py
+```
+Output:
+
+dataset_shard.bin
+
+Shards contain:
+
+uint16 token stream
+
+
+---
+
+Step 3 — Training
+
+Run training:
+```bash
+python scripts/train_gpu_test.py
+```
+Training automatically handles:
+
+optimizer
+
+scheduler
+
+logging
+
+checkpointing
+
+
+Example output:
+
+STEP   PROGRESS │ LOSS   PPL │ LR │ TOK/S │ MFU
+
+
+---
+
+Checkpointing
+
+Checkpoints are saved using Orbax.
+
+Default directory:
+
+checkpoints/
+
+Resume training automatically if checkpoints exist.
+
+
+---
+
+Benchmarking Performance
+
+Benchmark raw training throughput:
+
+python scripts/benchmark_train_step.py
+
+This measures:
+
+compile time
+
+step time
+
+tokens/sec
+
+MFU
+
+
+Example output:
+
+Compile time: 18.2s
+Step time: 0.048s
+Tokens/sec: 430000
+
+
+---
+
+Monitoring
+
+Training logger displays:
+
+loss
+
+perplexity
+
+gradient norm
+
+tokens/sec
+
+MFU
+
+ETA
+
+
+Example:
+
+STEP  PROGRESS │ LOSS │ LR │ TOK/S │ MFU │ ETA
+
+
+---
+
+Optimization Roadmap
+
+LaughLM is designed to progressively reach high TPU utilization.
+
+Target MFU:
+
+50–60% MFU on TPU v5e
+
+Optimization phases:
+
+Phase	Goal
+
+Baseline	establish benchmark
+Data pipeline	remove input bottlenecks
+Graph optimization	eliminate Python overhead
+Kernel fusion	maximize MXU utilization
+Flash attention	reduce memory traffic
+
+
+
+---
+
+Development Workflow
+
+Recommended workflow:
+
+1. Create branch
+2. Implement change
+3. Run benchmark
+4. Compare tokens/sec
+5. Merge if improvement
+
+Example:
+```bash
+git checkout -b optimize_attention
 ```
 
 ---
 
-## Reproducibility Guarantees
+Contributing
 
-Each checkpoint stores:
+Pull requests should include:
 
-* Model parameters
-* Optimizer state
-* Scheduler state
-* RNG state
-* Global step
-* Full config snapshot
+clear description
 
-Training is deterministic across:
+performance impact
 
-* TPU reallocation
-* Resume events
-* Host restarts
+benchmark results
+
+
 
 ---
 
-## Design Constraints
+License
 
-* No hardcoded dimensions inside model code
-* No direct YAML access outside config loader
-* No experiment logic inside baseline implementation
-* All parallelism strategies must be config-driven
+MIT License
+
 
 ---
 
-## License
+Acknowledgements
+
+LaughLM builds on ideas from:
+
+GPT
+
+LLaMA
+
+PaLM
+
+DeepSeek
+
+MiniCPM
 
 
-Research / educational use.
+and the JAX / Flax ecosystem.
+
+
+---
+
+Future Work
+
+Planned improvements:
+
+Flash Attention
+
+Activation checkpointing
+
+MoE layers
+
+PJIT sharding
+
+distributed training
