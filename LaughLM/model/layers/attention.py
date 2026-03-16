@@ -165,14 +165,19 @@ class MultiQueryAttention(nn.Module):
 
         head_dim = self.d_model // self.num_heads
 
-        q = nn.Dense(self.d_model, use_bias=self.use_bias)(x)     # [B, T, D]
-        k = nn.Dense(head_dim,     use_bias=self.use_bias)(x)     # [B, T, Dh] — single head
-        v = nn.Dense(head_dim,     use_bias=self.use_bias)(x)
+        proj_dim = self.d_model + 2 * head_dim
 
-        q = split_heads(q, self.num_heads)                         # [B, T, H, Dh]
+        qkv = nn.Dense(
+            proj_dim,
+            use_bias=self.use_bias,
+        )(x)
 
-        # Single KV head: expand dims for broadcasting
-        k = k[:, :, None, :]                                       # [B, T, 1, Dh]
+        q, kv = jnp.split(qkv, [self.d_model], axis=-1)
+        k, v = jnp.split(kv, 2, axis=-1)
+
+        q = split_heads(q, self.num_heads)
+
+        k = k[:, :, None, :]
         v = v[:, :, None, :]
 
         if rope_tables is not None:
@@ -223,12 +228,19 @@ class GroupedQueryAttention(nn.Module):
         head_dim = self.d_model // self.num_heads
         kv_dim   = self.num_kv_heads * head_dim
 
-        q = nn.Dense(self.d_model, use_bias=self.use_bias)(x)   # [B, T, D]
-        k = nn.Dense(kv_dim,       use_bias=self.use_bias)(x)   # [B, T, kv_dim]
-        v = nn.Dense(kv_dim,       use_bias=self.use_bias)(x)
+        proj_dim = self.d_model + 2 * kv_dim
 
-        q = split_heads(q, self.num_heads)       # [B, T, H,   Dh]
-        k = split_heads(k, self.num_kv_heads)    # [B, T, Hkv, Dh]
+        qkv = nn.Dense(
+            proj_dim,
+            use_bias=self.use_bias,
+        )(x)
+
+        q, kv = jnp.split(qkv, [self.d_model], axis=-1)
+
+        k, v = jnp.split(qkv, [self.d_model], axis=-1)
+
+        q = split_heads(q, self.num_heads)
+        k = split_heads(k, self.num_kv_heads)
         v = split_heads(v, self.num_kv_heads)
 
         # Apply RoPE to Q and K BEFORE expanding KV groups
