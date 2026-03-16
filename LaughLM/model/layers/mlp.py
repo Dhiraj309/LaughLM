@@ -98,17 +98,6 @@ class SwiGLU(nn.Module):
         down_proj:  ffn_dim → d_model
 
         output = down_proj(swish(gate_proj(x)) * up_proj(x))
-
-    CRITICAL — ffn_dim sizing:
-        SwiGLU has THREE weight matrices vs GELU's TWO.
-        To keep total FFN parameters equal to a standard 4× MLP:
-            standard MLP: 2 × (d_model × 4×d_model) = 8×d_model²
-            SwiGLU:        3 × (d_model × ffn_dim)  = 8×d_model²  →  ffn_dim = 8/3 × d_model
-
-        For d_model=768: ffn_dim = int(8/3 × 768) = 2048 (already multiple of 64, no rounding needed).
-        For d_model=1024: ffn_dim = int(8/3 × 1024) = 2730 → round up to 2752 (next multiple of 64).
-
-        FIX: was ffn_dim = 4 × d_model, which DOUBLED parameter count.
     """
 
     d_model:  int
@@ -117,10 +106,22 @@ class SwiGLU(nn.Module):
 
     @nn.compact
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        gate  = nn.Dense(self.ffn_dim, use_bias=self.use_bias)(x)   # gate branch
-        value = nn.Dense(self.ffn_dim, use_bias=self.use_bias)(x)   # value branch
+
+        # Fused gate/value projection
+
+        proj = nn.Dense(
+            2 * self.ffn_dim,
+            use_bias=self.use_bias
+        )(x)
+
+        gate, value  = jnp.split(proj, 2, axis=-1)   # gate branch value branch
+
         x = swish(gate) * value                                      # gated activation
-        x = nn.Dense(self.d_model, use_bias=self.use_bias)(x)       # project back
+
+        x = nn.Dense(
+            self.d_model,
+            use_bias=self.use_bias
+            )(x)       # project back
         return x
 
 
