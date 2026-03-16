@@ -1,26 +1,22 @@
 import jax
 import jax.numpy as jnp
 import optax
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Tuple
 
 from LaughLM.training.loss import shift_tokens, compute_loss
 
 
-Params = Any
+Params   = Any
 OptState = Any
-Batch = jnp.ndarray
-Metrics = Dict[str, jnp.ndarray]
+Batch    = jnp.ndarray
+Metrics  = Dict[str, jnp.ndarray]
 
 
 # ------------------------------------------------------------
-# Train step with compiled gradient accumulation
+# Forward + backward (no optimizer step)
 # ------------------------------------------------------------
 
-def create_train_step(
-    model,
-    optimizer: optax.GradientTransformation,
-    grad_accum_steps: int,
-) -> Callable:
+def create_train_step(model) -> Callable:
 
     def loss_fn(params: Params, batch: Batch):
 
@@ -33,60 +29,31 @@ def create_train_step(
         return loss, metrics
 
 
-    def train_step(params: Params, opt_state: OptState, batch: Batch):
+    def train_step(params: Params, batch: Batch):
 
-        # ----------------------------------------------------
-        # reshape batch into microbatches for accumulation
-        # ----------------------------------------------------
-        B, T = batch.shape
+        (loss, metrics), grads = jax.value_and_grad(
+            loss_fn,
+            has_aux=True,
+        )(params, batch)
 
-        micro_batches = batch.reshape(
-            grad_accum_steps,
-            B // grad_accum_steps,
-            T,
-        )
+        metrics["loss"] = loss
 
-        # ----------------------------------------------------
-        # accumulation body
-        # ----------------------------------------------------
-        def accumulate(grads, micro_batch):
+        return grads, metrics
 
-            (loss, metrics), step_grads = jax.value_and_grad(
-                loss_fn,
-                has_aux=True,
-            )(params, micro_batch)
 
-            grads = jax.tree_util.tree_map(
-                lambda g, sg: g + sg,
-                grads,
-                step_grads,
-            )
+    return jax.jit(train_step)
 
-            return grads, (loss, metrics)
 
-        # ----------------------------------------------------
-        # initialize grad accumulator
-        # ----------------------------------------------------
-        grads_init = jax.tree_util.tree_map(
-            jnp.zeros_like,
-            params,
-        )
+# ------------------------------------------------------------
+# Optimizer application
+# ------------------------------------------------------------
 
-        grads, outputs = jax.lax.scan(
-            accumulate,
-            grads_init,
-            micro_batches,
-        )
+def apply_optimizer(
+    optimizer: optax.GradientTransformation,
+) -> Callable:
 
-        # average gradients
-        grads = jax.tree_util.tree_map(
-            lambda g: g / grad_accum_steps,
-            grads,
-        )
+    def step(params, opt_state, grads):
 
-        # ----------------------------------------------------
-        # optimizer update
-        # ----------------------------------------------------
         updates, new_opt_state = optimizer.update(
             grads,
             opt_state,
@@ -95,18 +62,13 @@ def create_train_step(
 
         new_params = optax.apply_updates(params, updates)
 
-        loss, metrics = outputs
+        return new_params, new_opt_state
 
-        metrics["loss"] = loss
-
-        return new_params, new_opt_state, metrics
-
-
-    return jax.jit(train_step)
+    return jax.jit(step)
 
 
 # ------------------------------------------------------------
-# Evaluation step (unchanged from original)
+# Evaluation step
 # ------------------------------------------------------------
 
 def create_eval_step(model) -> Callable:

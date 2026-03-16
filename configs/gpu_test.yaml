@@ -3,14 +3,14 @@ model:
   d_model: 256
   num_layers: 4
   num_heads: 4
-  num_kv_heads: null
+  num_kv_heads: 2
   max_seq_len: 128
 
 architecture:
   positional: learned
   normalization: layer_norm
   norm_placement: post
-  attention_variant: mha
+  attention_variant: gqa
   attention_impl: standard
   ffn_type: gelu_mlp
   residual: standard
@@ -43,7 +43,7 @@ scheduler:
 runtime:
   seq_len: 128
   micro_batch_per_device: 4
-  gradient_accumulation: 1
+  gradient_accumulation: 4
   total_tokens: 1000000
 
   eval_interval: 100
