@@ -82,7 +82,11 @@ class Trainer:
         # ------------------------------------------------------------
         # JIT steps
         # ------------------------------------------------------------
-        self.train_step = create_train_step(self.model, self.optimizer)
+        self.train_step = create_train_step(
+            self.model,
+            self.optimizer,
+            config.runtime.gradient_accumulation,
+            )
         self.eval_step = create_eval_step(self.model)
 
         # ------------------------------------------------------------
