@@ -1,21 +1,21 @@
 model:
   vocab_size: 50257
-  d_model: 256
-  num_layers: 4
-  num_heads: 4
-  num_kv_heads: 2
-  max_seq_len: 128
+  d_model: 768
+  num_layers: 12
+  num_heads: 12
+  num_kv_heads: 1
+  max_seq_len: 512
 
 architecture:
-  positional: learned
-  normalization: layer_norm
-  norm_placement: post
+  positional: rope
+  normalization: rms_norm
+  norm_placement: pre
   attention_variant: gqa
   attention_impl: standard
-  ffn_type: gelu_mlp
+  ffn_type: swiglu
   residual: standard
-  embeddings: standard
-  bias: true
+  embeddings: tied
+  bias: false
   weight_tying: true
 
 initialization:
@@ -41,21 +41,21 @@ scheduler:
   min_lr_ratio: 0.1
 
 runtime:
-  seq_len: 128
-  micro_batch_per_device: 32
+  seq_len: 512
+  micro_batch_per_device: 16
   gradient_accumulation: 1
-  total_tokens: 1000000
+  total_tokens: 100000000
 
-  eval_interval: 100
-  log_interval: 10
+  eval_interval: 500
+  log_interval: 20
 
-  checkpoint_interval: 40
+  checkpoint_interval: 500
   checkpoint_max_to_keep: 3
   checkpoint_dir: checkpoints
 
 data:
   sources: []
-  max_seq_len: 128
+  max_seq_len: 512
   packing: false
   eos_between_docs: true
   pad_to_multiple: 128
@@ -69,13 +69,13 @@ tokenizer:
 
 hardware:
   accelerator: gpu
-  type: local
+  type: t4
 
 parallelism:
   data_parallel: 1
   model_parallel: 1
-  compute_dtype: float16
-  param_dtype: float32
+  compute_dtype: bfloat16
+  param_dtype: bfloat16
 
 monitoring:
   tensorboard: false

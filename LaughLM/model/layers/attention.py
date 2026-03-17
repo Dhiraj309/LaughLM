@@ -22,43 +22,42 @@ def merge_heads(x: jnp.ndarray) -> jnp.ndarray:
 
 
 # ------------------------------------------------------------
-# Causal mask (dtype-safe)
+# Stable Causal Mask (NO NaNs, bf16-safe)
 # ------------------------------------------------------------
 
-def build_causal_mask(seq_len, dtype, doc_ids=None):
-    neg_inf = jnp.finfo(dtype).min / 2
+def build_causal_mask(seq_len, dtype):
+    # 🚨 DO NOT use -inf → causes NaNs in bf16
+    neg_large = -1e9
 
     causal = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))
+    mask = causal[None, None, :, :]  # [1,1,T,T]
 
-    if doc_ids is not None:
-        same_doc = doc_ids[:, :, None] == doc_ids[:, None, :]
-        mask = causal[None, :, :] & same_doc
-        mask = mask[:, None, :, :]
-    else:
-        mask = causal[None, None, :, :]
-
-    return jnp.where(mask, 0.0, neg_inf).astype(dtype)
+    return jnp.where(mask, 0.0, neg_large).astype(dtype)
 
 
 # ------------------------------------------------------------
-# Core Attention Call (XLA fused)
+# Attention Core (STABLE)
 # ------------------------------------------------------------
 
-def attention_core(q, k, v, mask):
+def attention(q, k, v, seq_len):
     """
-    Wrapper over XLA fused attention.
+    Always uses bias-based masking.
+    Avoids unstable is_causal fast path.
     """
+
+    mask = build_causal_mask(seq_len, q.dtype)
+
     return jax.nn.dot_product_attention(
         q,
         k,
         v,
         bias=mask,
-        is_causal=False,  # we already provide mask
+        is_causal=False,  # 🚨 important for stability
     )
 
 
 # ------------------------------------------------------------
-# MHA
+# Multi-Head Attention (MHA)
 # ------------------------------------------------------------
 
 class MultiHeadAttention(nn.Module):
@@ -81,16 +80,14 @@ class MultiHeadAttention(nn.Module):
             q = apply_rope(q, sin, cos)
             k = apply_rope(k, sin, cos)
 
-        mask = build_causal_mask(x.shape[1], q.dtype, doc_ids)
-
-        out = attention_core(q, k, v, mask)
+        out = attention(q, k, v, x.shape[1])
         out = merge_heads(out)
 
         return nn.Dense(self.d_model, use_bias=self.use_bias)(out)
 
 
 # ------------------------------------------------------------
-# MQA
+# Multi-Query Attention (MQA)
 # ------------------------------------------------------------
 
 class MultiQueryAttention(nn.Module):
@@ -102,8 +99,8 @@ class MultiQueryAttention(nn.Module):
     def __call__(self, x, rope_tables=None, doc_ids=None):
 
         head_dim = self.d_model // self.num_heads
-
         proj_dim = self.d_model + 2 * head_dim
+
         qkv = nn.Dense(proj_dim, use_bias=self.use_bias)(x)
 
         q, kv = jnp.split(qkv, [self.d_model], axis=-1)
@@ -111,7 +108,7 @@ class MultiQueryAttention(nn.Module):
 
         q = split_heads(q, self.num_heads)
 
-        # single KV head → broadcast across Q heads
+        # KV broadcast (no memory copy)
         k = k[:, :, None, :]
         v = v[:, :, None, :]
 
@@ -120,16 +117,14 @@ class MultiQueryAttention(nn.Module):
             q = apply_rope(q, sin, cos)
             k = apply_rope(k, sin, cos)
 
-        mask = build_causal_mask(x.shape[1], q.dtype, doc_ids)
-
-        out = attention_core(q, k, v, mask)
+        out = attention(q, k, v, x.shape[1])
         out = merge_heads(out)
 
         return nn.Dense(self.d_model, use_bias=self.use_bias)(out)
 
 
 # ------------------------------------------------------------
-# GQA (broadcast, no repeat)
+# Grouped Query Attention (GQA)
 # ------------------------------------------------------------
 
 class GroupedQueryAttention(nn.Module):
@@ -145,6 +140,7 @@ class GroupedQueryAttention(nn.Module):
         kv_dim = self.num_kv_heads * head_dim
 
         qkv = nn.Dense(self.d_model + 2 * kv_dim, use_bias=self.use_bias)(x)
+
         q, kv = jnp.split(qkv, [self.d_model], axis=-1)
         k, v = jnp.split(kv, 2, axis=-1)
 
@@ -157,7 +153,7 @@ class GroupedQueryAttention(nn.Module):
             q = apply_rope(q, sin, cos)
             k = apply_rope(k, sin, cos)
 
-        # Broadcast KV → match Q heads (no memory duplication)
+        # Broadcast KV → Q heads (no memory duplication)
         repeat = self.num_heads // self.num_kv_heads
 
         k = jnp.broadcast_to(
@@ -170,9 +166,7 @@ class GroupedQueryAttention(nn.Module):
             (v.shape[0], v.shape[1], self.num_kv_heads, repeat, head_dim),
         ).reshape(v.shape[0], v.shape[1], self.num_heads, head_dim)
 
-        mask = build_causal_mask(x.shape[1], q.dtype, doc_ids)
-
-        out = attention_core(q, k, v, mask)
+        out = attention(q, k, v, x.shape[1])
         out = merge_heads(out)
 
         return nn.Dense(self.d_model, use_bias=self.use_bias)(out)
