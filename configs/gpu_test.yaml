@@ -42,8 +42,8 @@ scheduler:
 
 runtime:
   seq_len: 128
-  micro_batch_per_device: 4
-  gradient_accumulation: 4
+  micro_batch_per_device: 32
+  gradient_accumulation: 1
   total_tokens: 1000000
 
   eval_interval: 100
