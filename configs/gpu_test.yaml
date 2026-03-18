@@ -69,7 +69,7 @@ tokenizer:
 
 hardware:
   accelerator: gpu
-  type: t4
+  type: p100
 
 parallelism:
   data_parallel: 1
