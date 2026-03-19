@@ -11,7 +11,7 @@ from LaughLM.model.layers.residual import build_residual
 
 
 # ------------------------------------------------------------
-# 🔥 PURE FUNCTION (NO BOUND SELF)
+# Forward block (NO remat, fully fusible)
 # ------------------------------------------------------------
 def forward_block(module, x, rope_tables, doc_ids):
 
@@ -41,7 +41,11 @@ def forward_block(module, x, rope_tables, doc_ids):
 
     if module.norm_placement == "sandwich":
 
-        h = module.attn(module.norm1(x), rope_tables=rope_tables, doc_ids=doc_ids)
+        h = module.attn(
+            module.norm1(x),
+            rope_tables=rope_tables,
+            doc_ids=doc_ids,
+        )
         x = module.residual1(x, h)
         x = module.norm2(x)
 
@@ -63,7 +67,7 @@ class TransformerBlock(nn.Module):
         self.norm2 = build_normalization(self.config)
 
         self.attn = build_attention(self.config)
-        self.mlp  = build_mlp(self.config)
+        self.mlp = build_mlp(self.config)
 
         self.residual1 = build_residual(self.config)
         self.residual2 = build_residual(self.config)
@@ -77,7 +81,5 @@ class TransformerBlock(nn.Module):
         doc_ids: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
 
-        # ✅ Wrap PURE function (module passed explicitly)
-        remat_block = nn.remat(forward_block)
-
-        return remat_block(self, x, rope_tables, doc_ids)
+        # 🚀 Direct call → allows full XLA fusion
+        return forward_block(self, x, rope_tables, doc_ids)
