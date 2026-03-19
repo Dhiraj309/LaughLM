@@ -13,7 +13,6 @@ from LaughLM.training.scheduler import build_scheduler, compute_total_steps
 from LaughLM.training.train_step import (
     create_train_step,
     create_eval_step,
-    apply_optimizer,
 )
 from LaughLM.training.logger import TrainingLogger
 from LaughLM.training.checkpoint import CheckpointManager
@@ -65,11 +64,17 @@ class Trainer:
         opt_state = self.optimizer.init(params)
 
         # ------------------------------------------------------------
-        # JIT steps
+        # ✅ NEW: fused train step
         # ------------------------------------------------------------
 
-        self.train_step = create_train_step(self.model)
-        self.apply_optimizer = apply_optimizer(self.optimizer)
+        self.grad_accum = config.runtime.gradient_accumulation
+
+        self.train_step = create_train_step(
+            self.model,
+            self.optimizer,
+            self.grad_accum,
+        )
+
         self.eval_step = create_eval_step(self.model)
 
         # ------------------------------------------------------------
@@ -130,57 +135,42 @@ class Trainer:
             cfg.runtime.seq_len
             * cfg.runtime.micro_batch_per_device
             * cfg.parallelism.data_parallel
+            * cfg.runtime.gradient_accumulation
         )
-
-        grad_accum = cfg.runtime.gradient_accumulation
 
         print("\n" + "=" * 60)
         print(f"Training for {total_steps:,} optimizer steps")
         print(f"Effective tokens per step: {tokens_per_step:,}")
         print("=" * 60 + "\n")
 
-        prefetched_loader = prefetch_to_device(iter(dataloader), size=2)
+        # 🚀 increase prefetch depth
+        prefetched_loader = prefetch_to_device(iter(dataloader), size=8)
 
-        grad_buffer = None
-        micro_step = 0
+        data_iter = iter(prefetched_loader)
 
-        for batch in prefetched_loader:
+        for _ in range(total_steps):
 
-            batch = jnp.asarray(batch, dtype=jnp.int32)
+            # ------------------------------------------------------------
+            # ✅ collect micro-batches
+            # ------------------------------------------------------------
+            micro_batches = []
 
-            grads, metrics = self.train_step(
-                self.state.params,
-                batch,
-            )
+            for _ in range(self.grad_accum):
+                batch = next(data_iter)
+                batch = jnp.asarray(batch, dtype=jnp.int32)
+                micro_batches.append(batch)
 
-            if grad_buffer is None:
-                grad_buffer = grads
-            else:
-                grad_buffer = jax.tree_util.tree_map(
-                    lambda a, b: a + b,
-                    grad_buffer,
-                    grads,
-                )
+            # stack → [grad_accum, B, T]
+            batch = jnp.stack(micro_batches)
 
-            micro_step += 1
-
-            if micro_step < grad_accum:
-                continue
-
-            # average gradients
-            grad_buffer = jax.tree_util.tree_map(
-                lambda g: g / grad_accum,
-                grad_buffer,
-            )
-
-            new_params, new_opt_state = self.apply_optimizer(
+            # ------------------------------------------------------------
+            # ✅ fused train step
+            # ------------------------------------------------------------
+            new_params, new_opt_state, metrics = self.train_step(
                 self.state.params,
                 self.state.opt_state,
-                grad_buffer,
+                batch,
             )
-
-            grad_buffer = None
-            micro_step = 0
 
             metrics = jax.device_get(metrics)
 
@@ -195,6 +185,9 @@ class Trainer:
                 rng_key=self.rng.key,
             )
 
+            # ------------------------------------------------------------
+            # Logging
+            # ------------------------------------------------------------
             if self.state.step % cfg.runtime.log_interval == 0:
 
                 lr = _scalar(self.schedule(self.state.step))
@@ -212,14 +205,14 @@ class Trainer:
                     tokens_seen=self.state.tokens_processed,
                 )
 
+            # ------------------------------------------------------------
+            # Checkpointing
+            # ------------------------------------------------------------
             if self.state.step % self.checkpoint_interval == 0:
 
                 print(f"[checkpoint] saving step {self.state.step}")
 
                 self.checkpoints.save(self.state.step, self.state)
-
-            if self.state.step >= total_steps:
-                break
 
         self.checkpoints.save(self.state.step, self.state)
 
