@@ -22,38 +22,51 @@ def merge_heads(x: jnp.ndarray) -> jnp.ndarray:
 
 
 # ------------------------------------------------------------
-# Stable Causal Mask (NO NaNs, bf16-safe)
-# ------------------------------------------------------------
-
-def build_causal_mask(seq_len, dtype):
-    # 🚨 DO NOT use -inf → causes NaNs in bf16
-    neg_large = -1e9
-
-    causal = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))
-    mask = causal[None, None, :, :]  # [1,1,T,T]
-
-    return jnp.where(mask, 0.0, neg_large).astype(dtype)
-
-
-# ------------------------------------------------------------
 # Attention Core (STABLE)
 # ------------------------------------------------------------
 
-def attention(q, k, v, seq_len):
+def attention(q, k, v):
     """
-    Always uses bias-based masking.
-    Avoids unstable is_causal fast path.
+    Hardware-aware attention:
+
+    TPU → use fast causal path
+    GPU (bf16) → use stable mask path
     """
 
-    mask = build_causal_mask(seq_len, q.dtype)
+    backend = jax.default_backend()
 
-    return jax.nn.dot_product_attention(
-        q,
-        k,
-        v,
-        bias=mask,
-        is_causal=False,  # 🚨 important for stability
-    )
+    # ------------------------------------------------------------
+    # TPU → fast path (safe)
+    # ------------------------------------------------------------
+    if backend == "tpu":
+        return jax.nn.dot_product_attention(
+            q,
+            k,
+            v,
+            is_causal=True,
+        )
+
+    # ------------------------------------------------------------
+    # GPU → stable path (avoid NaNs)
+    # ------------------------------------------------------------
+    else:
+        seq_len = q.shape[1]
+
+        # bf16-safe mask
+        neg_large = -1e9
+
+        causal = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))
+        mask = causal[None, None, :, :]
+
+        bias = jnp.where(mask, 0.0, neg_large).astype(q.dtype)
+
+        return jax.nn.dot_product_attention(
+            q,
+            k,
+            v,
+            bias=bias,
+            is_causal=False,
+        )
 
 
 # ------------------------------------------------------------
@@ -80,7 +93,7 @@ class MultiHeadAttention(nn.Module):
             q = apply_rope(q, sin, cos)
             k = apply_rope(k, sin, cos)
 
-        out = attention(q, k, v, x.shape[1])
+        out = attention(q, k, v)
         out = merge_heads(out)
 
         return nn.Dense(self.d_model, use_bias=self.use_bias)(out)
@@ -117,7 +130,7 @@ class MultiQueryAttention(nn.Module):
             q = apply_rope(q, sin, cos)
             k = apply_rope(k, sin, cos)
 
-        out = attention(q, k, v, x.shape[1])
+        out = attention(q, k, v)
         out = merge_heads(out)
 
         return nn.Dense(self.d_model, use_bias=self.use_bias)(out)
@@ -166,7 +179,7 @@ class GroupedQueryAttention(nn.Module):
             (v.shape[0], v.shape[1], self.num_kv_heads, repeat, head_dim),
         ).reshape(v.shape[0], v.shape[1], self.num_heads, head_dim)
 
-        out = attention(q, k, v, x.shape[1])
+        out = attention(q, k, v)
         out = merge_heads(out)
 
         return nn.Dense(self.d_model, use_bias=self.use_bias)(out)
