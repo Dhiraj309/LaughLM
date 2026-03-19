@@ -1,3 +1,4 @@
+
 import jax
 import jax.numpy as jnp
 import optax
@@ -6,26 +7,24 @@ from typing import Any, Callable, Dict
 from LaughLM.training.loss import shift_tokens, compute_loss
 
 
-Params   = Any
+Params = Any
 OptState = Any
-Batch    = jnp.ndarray
-Metrics  = Dict[str, jnp.ndarray]
+Batch = jnp.ndarray
+Metrics = Dict[str, jnp.ndarray]
 
 
 # ------------------------------------------------------------
 # FUSED TRAIN STEP (scan-based)
 # ------------------------------------------------------------
 
+
 def create_train_step(model, optimizer, grad_accum: int) -> Callable:
 
-    def loss_fn(params: Params, batch: Batch):
-
+    def loss_on_batch(params: Params, batch: Batch):
         inputs, targets = shift_tokens(batch)
         logits = model.apply({"params": params}, inputs)
-
-        loss, metrics = compute_loss(logits, targets)
-
-        return loss, metrics
+        loss, _ = compute_loss(logits, targets)
+        return loss
 
 
     def train_step(params: Params, opt_state: OptState, batch: Batch):
@@ -35,31 +34,41 @@ def create_train_step(model, optimizer, grad_accum: int) -> Callable:
             [grad_accum, micro_batch, seq_len]
         """
 
-        def micro_step(carry, micro_batch):
-            params, opt_state = carry
+        # ------------------------------
+------------------------------
 
-            (loss, metrics), grads = jax.value_and_grad(
-                loss_fn,
-                has_aux=True,
-            )(params, micro_batch)
-
-            return (params, opt_state), (grads, loss)
+        # Flatten batch → avoid scan/JVP
+        # ------------------------------
+------------------------------
 
 
-        # scan over micro-batches
-        (_, _), (grads, losses) = jax.lax.scan(
-            micro_step,
-            (params, opt_state),
-            batch,
+        batch = batch.reshape(
+            batch.shape[0] * batch.shape[1],
+            batch.shape[2],
         )
 
-        # average gradients across micro-steps
-        grads = jax.tree_util.tree_map(
-            lambda g: jnp.mean(g, axis=0),
-            grads,
-        )
+        # ------------------------------
+------------------------------
 
-        # optimizer update
+        # Single backward pass (CRITICAL)
+        # ------------------------------
+------------------------------
+
+        def loss_fn(params):
+            losses = jax.vmap(lambda b: loss_on_batch(params, b[None, :]))(batch)
+
+            return jnp.mean(losses)
+
+        loss, grads = jax.value_and_grad(loss_fn)(
+params)
+
+        # ------------------------------------------------------------
+
+        # Optimizer step
+        # ------------------------------
+------------------------------
+
+
         updates, new_opt_state = optimizer.update(
             grads,
             opt_state,
@@ -67,9 +76,6 @@ def create_train_step(model, optimizer, grad_accum: int) -> Callable:
         )
 
         new_params = optax.apply_updates(params, updates)
-
-        # average loss
-        loss = jnp.mean(losses)
 
         metrics = {
             "loss": loss,
@@ -88,6 +94,7 @@ def create_train_step(model, optimizer, grad_accum: int) -> Callable:
 def create_eval_step(model) -> Callable:
 
     def eval_step(params: Params, batch: Batch):
+
 
         inputs, targets = shift_tokens(batch)
 

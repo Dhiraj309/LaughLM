@@ -1,6 +1,8 @@
+
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
+
 from typing import Optional, Tuple
 
 from LaughLM.config.schema import LaughLMConfig
@@ -27,46 +29,20 @@ def merge_heads(x: jnp.ndarray) -> jnp.ndarray:
 
 def attention(q, k, v):
     """
-    Hardware-aware attention:
+    TPU-Optimized Flash Attention
 
-    TPU → use fast causal path
-    GPU (bf16) → use stable mask path
+    Important:
+    - No backend branching inside JIT
+    - No bias / mask
+    - Enables true Flash Attention (O(T) memory)
     """
 
-    backend = jax.default_backend()
-
-    # ------------------------------------------------------------
-    # TPU → fast path (safe)
-    # ------------------------------------------------------------
-    if backend == "tpu":
-        return jax.nn.dot_product_attention(
-            q,
-            k,
-            v,
-            is_causal=True,
-        )
-
-    # ------------------------------------------------------------
-    # GPU → stable path (avoid NaNs)
-    # ------------------------------------------------------------
-    else:
-        seq_len = q.shape[1]
-
-        # bf16-safe mask
-        neg_large = -1e9
-
-        causal = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))
-        mask = causal[None, None, :, :]
-
-        bias = jnp.where(mask, 0.0, neg_large).astype(q.dtype)
-
-        return jax.nn.dot_product_attention(
-            q,
-            k,
-            v,
-            bias=bias,
-            is_causal=False,
-        )
+    return jax.nn.dot_product_attention(
+        q,
+        k,
+        v,
+        is_causal=True,
+    )
 
 
 # ------------------------------------------------------------
