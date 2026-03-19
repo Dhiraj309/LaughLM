@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import optax
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable, Dict
 
 from LaughLM.training.loss import shift_tokens, compute_loss
 
@@ -13,15 +13,14 @@ Metrics  = Dict[str, jnp.ndarray]
 
 
 # ------------------------------------------------------------
-# Forward + backward (no optimizer step)
+# FUSED TRAIN STEP (scan-based)
 # ------------------------------------------------------------
 
-def create_train_step(model) -> Callable:
+def create_train_step(model, optimizer, grad_accum: int) -> Callable:
 
     def loss_fn(params: Params, batch: Batch):
 
         inputs, targets = shift_tokens(batch)
-
         logits = model.apply({"params": params}, inputs)
 
         loss, metrics = compute_loss(logits, targets)
@@ -29,31 +28,38 @@ def create_train_step(model) -> Callable:
         return loss, metrics
 
 
-    def train_step(params: Params, batch: Batch):
+    def train_step(params: Params, opt_state: OptState, batch: Batch):
 
-        (loss, metrics), grads = jax.value_and_grad(
-            loss_fn,
-            has_aux=True,
-        )(params, batch)
+        """
+        batch shape:
+            [grad_accum, micro_batch, seq_len]
+        """
 
-        metrics["loss"] = loss
+        def micro_step(carry, micro_batch):
+            params, opt_state = carry
 
-        return grads, metrics
+            (loss, metrics), grads = jax.value_and_grad(
+                loss_fn,
+                has_aux=True,
+            )(params, micro_batch)
+
+            return (params, opt_state), (grads, loss)
 
 
-    return jax.jit(train_step)
+        # scan over micro-batches
+        (_, _), (grads, losses) = jax.lax.scan(
+            micro_step,
+            (params, opt_state),
+            batch,
+        )
 
+        # average gradients across micro-steps
+        grads = jax.tree_util.tree_map(
+            lambda g: jnp.mean(g, axis=0),
+            grads,
+        )
 
-# ------------------------------------------------------------
-# Optimizer application
-# ------------------------------------------------------------
-
-def apply_optimizer(
-    optimizer: optax.GradientTransformation,
-) -> Callable:
-
-    def step(params, opt_state, grads):
-
+        # optimizer update
         updates, new_opt_state = optimizer.update(
             grads,
             opt_state,
@@ -62,13 +68,21 @@ def apply_optimizer(
 
         new_params = optax.apply_updates(params, updates)
 
-        return new_params, new_opt_state
+        # average loss
+        loss = jnp.mean(losses)
 
-    return jax.jit(step)
+        metrics = {
+            "loss": loss,
+        }
+
+        return new_params, new_opt_state, metrics
+
+
+    return jax.jit(train_step)
 
 
 # ------------------------------------------------------------
-# Evaluation step
+# EVAL STEP (unchanged)
 # ------------------------------------------------------------
 
 def create_eval_step(model) -> Callable:

@@ -1,3 +1,4 @@
+
 """
 LaughLM/training/logger.py
 """
@@ -11,6 +12,53 @@ from typing import Dict, Optional
 import jax
 
 from LaughLM.config.schema import LaughLMConfig
+
+
+# ─────────────────────────────────────────────────────────────
+# Hardware FLOPs estimation
+# ─────────────────────────────────────────────────────────────
+
+def estimate_hardware_flops(config: LaughLMConfig) -> float:
+    """
+    Estimate usable hardware FLOPs/sec based on accelerator.
+    """
+
+    accel = config.hardware.accelerator
+    hw_type = config.hardware.type.lower()
+    devices = config.parallelism.data_parallel
+
+    # ---------------- TPU ----------------
+    if accel == "tpu":
+
+        if "v5e" in hw_type:
+            per_chip = 197e12
+        elif "v4" in hw_type:
+            per_chip = 275e12
+        else:
+            raise ValueError(f"Unknown TPU type: {hw_type}")
+
+        total = per_chip * devices
+
+        # realistic utilization
+        return total * 0.70
+
+    # ---------------- GPU ----------------
+    if accel == "gpu":
+
+        GPU_FLOPS = {
+            "t4": 65e12,
+            "a100": 312e12,
+            "h100": 989e12,
+        }
+
+        if hw_type not in GPU_FLOPS:
+            raise ValueError(f"Unknown GPU type: {hw_type}")
+
+        total = GPU_FLOPS[hw_type] * devices
+
+        return total * 0.60
+
+    raise ValueError(f"Unknown accelerator: {accel}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -201,17 +249,20 @@ class TrainingLogger:
         )
 
         self._tokens_total = self.total_steps * self._tps
-        self._hw_flops     = 1.576e15
+
+        # ✅ NEW: hardware-aware FLOPs
+        self._hw_flops = estimate_hardware_flops(config)
+        print(f"[MFU] Estimated usable FLOPs: {self._hw_flops / 1e12:.2f} TFLOPs")
 
         self.start_time = time.time()
 
         self._last_t    = time.time()
         self._last_step = 0
 
-        self._window = deque(maxlen=100)
+        # ✅ faster stabilization
+        self._window = deque(maxlen=50)
 
         self._best_loss = float("inf")
-
         self._detector = InstabilityDetector()
 
         warmup = config.scheduler.warmup_steps
@@ -220,7 +271,6 @@ class TrainingLogger:
         self._warmup_end = warmup
         self._stable_end = warmup + stable
 
-        # Header management
         self._printed_header = False
         self._lines_since_header = 0
         self._header_every = 50
@@ -235,6 +285,10 @@ class TrainingLogger:
     def log_step(self, step, metrics, lr, grad_norm=None, tokens_seen=None):
 
         if step % self.config.runtime.log_interval != 0:
+            return
+
+        # ✅ ignore unstable warmup steps
+        if step < 10:
             return
 
         loss = _scalar(metrics.get("loss", float("nan")))
@@ -259,7 +313,9 @@ class TrainingLogger:
 
         eta = fmt_time(remaining / avg_toks)
 
+        # ✅ MFU calculation (clamped)
         mfu = (6 * self.total_params * avg_toks) / self._hw_flops * 100
+        mfu = max(0.0, min(mfu, 100.0))
 
         pct = 100 * step / self.total_steps
 
@@ -305,7 +361,6 @@ class TrainingLogger:
             + c_seen + "  " + c_rem + "  " + c_eta
         )
 
-        # Header printing
         if not self._printed_header:
             print(_HEADER)
             print(_RULE)
@@ -324,10 +379,6 @@ class TrainingLogger:
         if warning:
             print(f"         {warning}")
 
-
-    # ─────────────────────────────────────────────────────────
-    # Training summary
-    # ─────────────────────────────────────────────────────────
 
     def log_summary(self, step: int, tokens: int):
 
