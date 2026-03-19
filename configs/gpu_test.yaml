@@ -43,14 +43,14 @@ scheduler:
 
 runtime:
   seq_len: 1024
-  micro_batch_per_device: 2
+  micro_batch_per_device: 4
   gradient_accumulation: 4
   total_tokens: 100000000
 
   eval_interval: 100
   log_interval: 10
 
-  checkpoint_interval: 20
+  checkpoint_interval: 200
   checkpoint_max_to_keep: 3
   checkpoint_dir: checkpoints
 
@@ -75,7 +75,7 @@ hardware:
 parallelism:
   data_parallel: 1
   model_parallel: 1
-  compute_dtype: bfloat16
+  compute_dtype: float16
   param_dtype: float32
 
 monitoring:
