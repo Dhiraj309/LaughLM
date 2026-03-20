@@ -35,8 +35,26 @@ def attention(q, k, v):
         k,
         v,
         is_causal=True,
-        # precision=jax.lax.Precision.HIGHEST,
     )
+
+
+# ------------------------------------------------------------
+# RoPE Helper (layout-safe)
+# ------------------------------------------------------------
+
+def apply_rope_safe(q, k, sin, cos, compute_dtype):
+    # (B, H, T, D) → (B, T, H, D)
+    q = jnp.transpose(q, (0, 2, 1, 3))
+    k = jnp.transpose(k, (0, 2, 1, 3))
+
+    q = apply_rope(q, sin, cos)
+    k = apply_rope(k, sin, cos)
+
+    # back to (B, H, T, D)
+    q = jnp.transpose(q, (0, 2, 1, 3))
+    k = jnp.transpose(k, (0, 2, 1, 3))
+
+    return q.astype(compute_dtype), k.astype(compute_dtype)
 
 
 # ------------------------------------------------------------
@@ -70,16 +88,14 @@ class MultiHeadAttention(nn.Module):
         k = split_heads(k, self.num_heads).astype(compute_dtype)
         v = split_heads(v, self.num_heads).astype(compute_dtype)
 
-        # scale for stability
         q = q * (head_dim ** -0.5)
 
         if rope_tables is not None:
             sin, cos = rope_tables
-            q = apply_rope(q, sin, cos)
-            k = apply_rope(k, sin, cos)
+            q, k = apply_rope_safe(q, k, sin, cos, compute_dtype)
 
         out = attention(q, k, v)
-        out = merge_heads(out)
+        out = merge_heads(out).astype(compute_dtype)
 
         out = nn.Dense(
             self.d_model,
@@ -121,10 +137,10 @@ class MultiQueryAttention(nn.Module):
         k, v = jnp.split(kv, 2, axis=-1)
 
         q = split_heads(q, self.num_heads).astype(compute_dtype)
-        k = k[:, :, None, :].astype(compute_dtype)  # (b, t, 1, d)
+
+        k = k[:, :, None, :].astype(compute_dtype)
         v = v[:, :, None, :].astype(compute_dtype)
 
-        # transpose to (b, h, t, d)
         k = jnp.transpose(k, (0, 2, 1, 3))
         v = jnp.transpose(v, (0, 2, 1, 3))
 
@@ -132,11 +148,10 @@ class MultiQueryAttention(nn.Module):
 
         if rope_tables is not None:
             sin, cos = rope_tables
-            q = apply_rope(q, sin, cos)
-            k = apply_rope(k, sin, cos)
+            q, k = apply_rope_safe(q, k, sin, cos, compute_dtype)
 
         out = attention(q, k, v)
-        out = merge_heads(out)
+        out = merge_heads(out).astype(compute_dtype)
 
         out = nn.Dense(
             self.d_model,
@@ -186,16 +201,14 @@ class GroupedQueryAttention(nn.Module):
 
         if rope_tables is not None:
             sin, cos = rope_tables
-            q = apply_rope(q, sin, cos)
-            k = apply_rope(k, sin, cos)
+            q, k = apply_rope_safe(q, k, sin, cos, compute_dtype)
 
-        # repeat instead of broadcast_to (more XLA-friendly)
         repeat = self.num_heads // self.num_kv_heads
         k = jnp.repeat(k, repeat, axis=1)
         v = jnp.repeat(v, repeat, axis=1)
 
         out = attention(q, k, v)
-        out = merge_heads(out)
+        out = merge_heads(out).astype(compute_dtype)
 
         out = nn.Dense(
             self.d_model,
