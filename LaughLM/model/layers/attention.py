@@ -1,8 +1,7 @@
-
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
-from typing import Optional, Tuple
+from typing import Optional
 
 from LaughLM.config.schema import LaughLMConfig
 from LaughLM.model.layers.positional import apply_rope
@@ -15,16 +14,19 @@ from LaughLM.utils.dtype import get_dtype
 
 def split_heads(x: jnp.ndarray, num_heads: int) -> jnp.ndarray:
     b, t, d = x.shape
-    return x.reshape(b, t, num_heads, d // num_heads)
+    head_dim = d // num_heads
+    x = x.reshape(b, t, num_heads, head_dim)
+    return jnp.transpose(x, (0, 2, 1, 3))  # (b, h, t, d)
 
 
 def merge_heads(x: jnp.ndarray) -> jnp.ndarray:
-    b, t, h, d = x.shape
+    b, h, t, d = x.shape
+    x = jnp.transpose(x, (0, 2, 1, 3))  # (b, t, h, d)
     return x.reshape(b, t, h * d)
 
 
 # ------------------------------------------------------------
-# Attention Core (Flash Attention)
+# Attention Core
 # ------------------------------------------------------------
 
 def attention(q, k, v):
@@ -33,6 +35,7 @@ def attention(q, k, v):
         k,
         v,
         is_causal=True,
+        # precision=jax.lax.Precision.HIGHEST,
     )
 
 
@@ -52,6 +55,8 @@ class MultiHeadAttention(nn.Module):
         compute_dtype = get_dtype(self.config.parallelism.compute_dtype)
         param_dtype = get_dtype(self.config.parallelism.param_dtype)
 
+        head_dim = self.d_model // self.num_heads
+
         qkv = nn.Dense(
             3 * self.d_model,
             use_bias=self.use_bias,
@@ -61,9 +66,12 @@ class MultiHeadAttention(nn.Module):
 
         q, k, v = jnp.split(qkv, 3, axis=-1)
 
-        q = split_heads(q, self.num_heads)
-        k = split_heads(k, self.num_heads)
-        v = split_heads(v, self.num_heads)
+        q = split_heads(q, self.num_heads).astype(compute_dtype)
+        k = split_heads(k, self.num_heads).astype(compute_dtype)
+        v = split_heads(v, self.num_heads).astype(compute_dtype)
+
+        # scale for stability
+        q = q * (head_dim ** -0.5)
 
         if rope_tables is not None:
             sin, cos = rope_tables
@@ -73,12 +81,14 @@ class MultiHeadAttention(nn.Module):
         out = attention(q, k, v)
         out = merge_heads(out)
 
-        return nn.Dense(
+        out = nn.Dense(
             self.d_model,
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
         )(out)
+
+        return out
 
 
 # ------------------------------------------------------------
@@ -110,10 +120,15 @@ class MultiQueryAttention(nn.Module):
         q, kv = jnp.split(qkv, [self.d_model], axis=-1)
         k, v = jnp.split(kv, 2, axis=-1)
 
-        q = split_heads(q, self.num_heads)
+        q = split_heads(q, self.num_heads).astype(compute_dtype)
+        k = k[:, :, None, :].astype(compute_dtype)  # (b, t, 1, d)
+        v = v[:, :, None, :].astype(compute_dtype)
 
-        k = k[:, :, None, :]
-        v = v[:, :, None, :]
+        # transpose to (b, h, t, d)
+        k = jnp.transpose(k, (0, 2, 1, 3))
+        v = jnp.transpose(v, (0, 2, 1, 3))
+
+        q = q * (head_dim ** -0.5)
 
         if rope_tables is not None:
             sin, cos = rope_tables
@@ -123,12 +138,14 @@ class MultiQueryAttention(nn.Module):
         out = attention(q, k, v)
         out = merge_heads(out)
 
-        return nn.Dense(
+        out = nn.Dense(
             self.d_model,
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
         )(out)
+
+        return out
 
 
 # ------------------------------------------------------------
@@ -161,36 +178,33 @@ class GroupedQueryAttention(nn.Module):
         q, kv = jnp.split(qkv, [self.d_model], axis=-1)
         k, v = jnp.split(kv, 2, axis=-1)
 
-        q = split_heads(q, self.num_heads)
-        k = split_heads(k, self.num_kv_heads)
-        v = split_heads(v, self.num_kv_heads)
+        q = split_heads(q, self.num_heads).astype(compute_dtype)
+        k = split_heads(k, self.num_kv_heads).astype(compute_dtype)
+        v = split_heads(v, self.num_kv_heads).astype(compute_dtype)
+
+        q = q * (head_dim ** -0.5)
 
         if rope_tables is not None:
             sin, cos = rope_tables
             q = apply_rope(q, sin, cos)
             k = apply_rope(k, sin, cos)
 
+        # repeat instead of broadcast_to (more XLA-friendly)
         repeat = self.num_heads // self.num_kv_heads
-
-        k = jnp.broadcast_to(
-            k[:, :, :, None, :],
-            (k.shape[0], k.shape[1], self.num_kv_heads, repeat, head_dim),
-        ).reshape(k.shape[0], k.shape[1], self.num_heads, head_dim)
-
-        v = jnp.broadcast_to(
-            v[:, :, :, None, :],
-            (v.shape[0], v.shape[1], self.num_kv_heads, repeat, head_dim),
-        ).reshape(v.shape[0], v.shape[1], self.num_heads, head_dim)
+        k = jnp.repeat(k, repeat, axis=1)
+        v = jnp.repeat(v, repeat, axis=1)
 
         out = attention(q, k, v)
         out = merge_heads(out)
 
-        return nn.Dense(
+        out = nn.Dense(
             self.d_model,
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
         )(out)
+
+        return out
 
 
 # ------------------------------------------------------------

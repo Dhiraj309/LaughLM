@@ -5,6 +5,8 @@ from LaughLM.config.loader import load_config
 from LaughLM.training.trainer import Trainer
 from LaughLM.data.memmap_loader import MemmapDataset
 
+import jax
+jax.config.update("jax_default_matmul_precision", "high")
 
 def main():
 
