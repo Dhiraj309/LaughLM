@@ -7,19 +7,23 @@ from LaughLM.utils.dtype import get_dtype
 
 
 # ------------------------------------------------------------
-# Activations
+# Stability: activation clamp (prevents bf16 overflow)
+# ------------------------------------------------------------
+
+def clamp(x: jnp.ndarray, limit: float = 30.0) -> jnp.ndarray:
+    return jnp.clip(x, -limit, limit)
+
+
+# ------------------------------------------------------------
+# Activations (optimized JAX versions)
 # ------------------------------------------------------------
 
 def gelu(x: jnp.ndarray) -> jnp.ndarray:
-    return 0.5 * x * (
-        1.0 + jnp.tanh(
-            jnp.sqrt(2.0 / jnp.pi) * (x + 0.044715 * x ** 3)
-        )
-    )
+    return jax.nn.gelu(x, approximate=True)
 
 
 def swish(x: jnp.ndarray) -> jnp.ndarray:
-    return x * jax.nn.sigmoid(x)
+    return jax.nn.silu(x)
 
 
 # ------------------------------------------------------------
@@ -36,29 +40,31 @@ class GELUMLP(nn.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
 
         compute_dtype = get_dtype(self.config.parallelism.compute_dtype)
-        param_dtype = get_dtype(self.config.parallelism.param_dtype)
+        param_dtype   = get_dtype(self.config.parallelism.param_dtype)
 
         x = nn.Dense(
             self.ffn_dim,
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
-        )(x).astype(compute_dtype)
+            precision=jax.lax.Precision.HIGH,
+        )(x)
 
-        x = gelu(x).astype(compute_dtype)
+        x = gelu(clamp(x))
 
         x = nn.Dense(
             self.d_model,
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
-        )(x).astype(compute_dtype)
+            precision=jax.lax.Precision.HIGH,
+        )(x)
 
         return x
 
 
 # ------------------------------------------------------------
-# FFN: GEGLU (fused)
+# FFN: GEGLU
 # ------------------------------------------------------------
 
 class GEGLU(nn.Module):
@@ -71,27 +77,28 @@ class GEGLU(nn.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
 
         compute_dtype = get_dtype(self.config.parallelism.compute_dtype)
-        param_dtype = get_dtype(self.config.parallelism.param_dtype)
+        param_dtype   = get_dtype(self.config.parallelism.param_dtype)
 
         proj = nn.Dense(
             2 * self.ffn_dim,
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
-        )(x).astype(compute_dtype)
+            precision=jax.lax.Precision.HIGH,
+        )(x)
 
         gate, value = jnp.split(proj, 2, axis=-1)
 
-        x = gelu(gate).astype(compute_dtype) * value
-
-        x = x.astype(compute_dtype)
+        gate = clamp(gate)
+        x = gelu(gate) * value
 
         x = nn.Dense(
             self.d_model,
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
-        )(x).astype(compute_dtype)
+            precision=jax.lax.Precision.HIGH,
+        )(x)
 
         return x
 
@@ -110,26 +117,28 @@ class SwiGLU(nn.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
 
         compute_dtype = get_dtype(self.config.parallelism.compute_dtype)
-        param_dtype = get_dtype(self.config.parallelism.param_dtype)
+        param_dtype   = get_dtype(self.config.parallelism.param_dtype)
 
         proj = nn.Dense(
             2 * self.ffn_dim,
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
-        )(x).astype(compute_dtype)
+            precision=jax.lax.Precision.HIGH,
+        )(x)
 
         gate, value = jnp.split(proj, 2, axis=-1)
 
-        x = swish(gate).astype(compute_dtype) * value
-        x = x.astype(compute_dtype)
+        gate = clamp(gate)
+        x = swish(gate) * value
 
         x = nn.Dense(
             self.d_model,
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
-        )(x).astype(compute_dtype)
+            precision=jax.lax.Precision.HIGH,
+        )(x)
 
         return x
 

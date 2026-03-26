@@ -1,15 +1,14 @@
 
 from huggingface_hub import hf_hub_download
-
 from LaughLM.config.loader import load_config
 from LaughLM.training.trainer import Trainer
 from LaughLM.data.memmap_loader import MemmapDataset
-
 import jax
+
 jax.config.update("jax_default_matmul_precision", "high")
 
-def main():
 
+def main():
     # ------------------------------------------------------------
     # Download dataset shard
     # ------------------------------------------------------------
@@ -26,7 +25,6 @@ def main():
 
     # ------------------------------------------------------------
     # Dataset
-    #
     # IMPORTANT:
     # The dataset should produce MICRO batches.
     # Gradient accumulation is handled inside the Trainer.
