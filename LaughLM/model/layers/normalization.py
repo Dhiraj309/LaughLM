@@ -42,18 +42,24 @@ class RMSNorm(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-
+        dtype = x.dtype
         scale = self.param(
             "scale",
             nn.initializers.ones,
             (self.hidden_size,),
         )
 
-        rms = jnp.sqrt(jnp.mean(x ** 2, axis=-1, keepdims=True))
+        x_32 = x.astype(Jax.float32)
 
-        x = x / (rms + self.eps)
+        mean_sq =jnp.mean(x_32* x_32, axis=-1, keepdims=True)
 
-        return scale * x
+        inv_rms = Jax.lax.rsqrt(mean_sq + self.eps)
+
+        y = (x_32 * inv_rms).astype(dtype)
+
+        scale = scale.astype(dtype)
+
+        return y * scale
 
 
 def build_normalization(config):
