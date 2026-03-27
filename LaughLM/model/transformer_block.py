@@ -1,5 +1,5 @@
-
 from typing import Optional, Tuple
+import jax
 import jax.numpy as jnp
 from flax import linen as nn
 
@@ -8,53 +8,6 @@ from LaughLM.model.layers.normalization import build_normalization
 from LaughLM.model.layers.attention import build_attention
 from LaughLM.model.layers.mlp import build_mlp
 from LaughLM.model.layers.residual import build_residual
-
-
-# ------------------------------------------------------------
-# Forward block (NO remat, fully fusible)
-# ------------------------------------------------------------
-def forward_block(module, x, rope_tables, doc_ids):
-
-    if module.norm_placement == "pre":
-
-        h = module.attn(
-            module.norm1(x),
-            rope_tables=rope_tables,
-            doc_ids=doc_ids,
-        )
-        x = module.residual1(x, h)
-
-        h = module.mlp(module.norm2(x))
-        x = module.residual2(x, h)
-
-        return x
-
-    if module.norm_placement == "post":
-
-        h = module.attn(x, rope_tables=rope_tables, doc_ids=doc_ids)
-        x = module.norm1(module.residual1(x, h))
-
-        h = module.mlp(x)
-        x = module.norm2(module.residual2(x, h))
-
-        return x
-
-    if module.norm_placement == "sandwich":
-
-        h = module.attn(
-            module.norm1(x),
-            rope_tables=rope_tables,
-            doc_ids=doc_ids,
-        )
-        x = module.residual1(x, h)
-        x = module.norm2(x)
-
-        h = module.mlp(x)
-        x = module.residual2(x, h)
-
-        return x
-
-    raise ValueError(f"Unknown norm_placement: {module.norm_placement}")
 
 
 class TransformerBlock(nn.Module):
@@ -73,6 +26,58 @@ class TransformerBlock(nn.Module):
         self.residual2 = build_residual(self.config)
 
         self.norm_placement = self.config.architecture.norm_placement
+        self.use_remat = getattr(self.config.runtime, "remat_blocks", False)
+
+    def _forward(self, x, rope_tables, doc_ids):
+
+        # ------------------------------------------------------------
+        # PRE-NORM (best for fusion)
+        # ------------------------------------------------------------
+        if self.norm_placement == "pre":
+            x = self.residual1(
+                x,
+                self.attn(self.norm1(x), rope_tables=rope_tables, doc_ids=doc_ids),
+            )
+            x = self.residual2(
+                x,
+                self.mlp(self.norm2(x)),
+            )
+            return x
+
+        # ------------------------------------------------------------
+        # POST-NORM
+        # ------------------------------------------------------------
+        if self.norm_placement == "post":
+            x = self.norm1(
+                self.residual1(
+                    x,
+                    self.attn(x, rope_tables=rope_tables, doc_ids=doc_ids),
+                )
+            )
+            x = self.norm2(
+                self.residual2(
+                    x,
+                    self.mlp(x),
+                )
+            )
+            return x
+
+        # ------------------------------------------------------------
+        # SANDWICH
+        # ------------------------------------------------------------
+        if self.norm_placement == "sandwich":
+            x = self.residual1(
+                x,
+                self.attn(self.norm1(x), rope_tables=rope_tables, doc_ids=doc_ids),
+            )
+            x = self.norm2(x)
+            x = self.residual2(
+                x,
+                self.mlp(x),
+            )
+            return x
+
+        raise ValueError(f"Unknown norm_placement: {self.norm_placement}")
 
     def __call__(
         self,
@@ -81,5 +86,7 @@ class TransformerBlock(nn.Module):
         doc_ids: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
 
-        # 🚀 Direct call → allows full XLA fusion
-        return forward_block(self, x, rope_tables, doc_ids)
+        if self.use_remat:
+            return nn.remat(self._forward)(x, rope_tables, doc_ids)
+        else:
+            return self._forward(x, rope_tables, doc_ids)
