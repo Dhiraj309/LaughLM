@@ -5,7 +5,6 @@ LaughLM/training/logger.py
 import time
 import math
 import sys
-from collections import deque
 from typing import Dict
 
 import jax
@@ -78,9 +77,7 @@ def dim(t):    return _ansi("2", t)
 def grey(t):   return _ansi("90", t)
 def white(t):  return _ansi("1;37", t)
 def green(t):  return _ansi("32", t)
-def yellow(t): return _ansi("33", t)
 def cyan(t):   return _ansi("36", t)
-def red(t):    return _ansi("31", t)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -190,7 +187,6 @@ class TrainingLogger:
 
         self._last_t    = time.time()
         self._last_step = 0
-        self._window = deque(maxlen=50)
 
         self._best_loss = float("inf")
 
@@ -219,30 +215,32 @@ class TrainingLogger:
         dt = now - self._last_t
         dsteps = step - self._last_step
 
-        if dt > 0 and dsteps > 0:
-            self._window.append((dsteps * self._tps) / dt)
-
         self._last_t = now
         self._last_step = step
 
-        avg_toks = sum(self._window)/len(self._window) if self._window else 1
-
-        eta = fmt_time(remaining / avg_toks)
-        elapsed = fmt_time(now - self.start_time)
-
         # ------------------------------------------------------------
-        # REAL MFU (based on step time)
+        # REAL STEP TIME
         # ------------------------------------------------------------
         step_time = dt / max(dsteps, 1)
+
+        if step_time > 0:
+            toks_per_sec = self._tps / step_time
+        else:
+            toks_per_sec = 0.0
+
+        # FLOPs per step
         flops_per_step = 6 * self.total_params * self._tps
 
         if step_time > 0:
-            real_flops_per_sec = flops_per_step / step_time
-            mfu = (real_flops_per_sec / self._hw_flops) * 100
+            flops_per_sec = flops_per_step / step_time
+            mfu = (flops_per_sec / self._hw_flops) * 100
         else:
             mfu = 0.0
 
         mfu = max(0.0, min(mfu, 100.0))
+
+        eta = fmt_time(remaining / max(toks_per_sec, 1))
+        elapsed = fmt_time(now - self.start_time)
 
         pct = 100 * step / self.total_steps
 
@@ -266,7 +264,7 @@ class TrainingLogger:
         lr_val = fmt_lr(lr).rjust(_W['lr']-2)
         c_lr = dim(lr_val)
 
-        c_toks = dim(f"{int(avg_toks):,}".rjust(_W['toks']))
+        c_toks = dim(f"{int(toks_per_sec):,}".rjust(_W['toks']))
         c_mfu  = dim(fmt_mfu(mfu).rjust(_W['mfu']))
 
         c_seen = dim(fmt_tokens(tokens_seen).rjust(_W['seen']))
