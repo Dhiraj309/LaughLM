@@ -6,7 +6,7 @@ import time
 import math
 import sys
 from collections import deque
-from typing import Dict, Optional
+from typing import Dict
 
 import jax
 
@@ -14,7 +14,7 @@ from LaughLM.config.schema import LaughLMConfig
 
 
 # ─────────────────────────────────────────────────────────────
-# Hardware FLOPs estimation
+# Hardware Peak FLOPs (THEORETICAL, 100%)
 # ─────────────────────────────────────────────────────────────
 
 def estimate_hardware_flops(config: LaughLMConfig) -> float:
@@ -29,9 +29,7 @@ def estimate_hardware_flops(config: LaughLMConfig) -> float:
             per_chip = 275e12
         else:
             raise ValueError(f"Unknown TPU type: {hw_type}")
-
-        total = per_chip * devices
-        return total * 0.70
+        return per_chip * devices
 
     if accel == "gpu":
         GPU_FLOPS = {
@@ -43,8 +41,7 @@ def estimate_hardware_flops(config: LaughLMConfig) -> float:
         if hw_type not in GPU_FLOPS:
             raise ValueError(f"Unknown GPU type: {hw_type}")
 
-        total = GPU_FLOPS[hw_type] * devices
-        return total * 0.60
+        return GPU_FLOPS[hw_type] * devices
 
     raise ValueError(f"Unknown accelerator: {accel}")
 
@@ -84,7 +81,6 @@ def green(t):  return _ansi("32", t)
 def yellow(t): return _ansi("33", t)
 def cyan(t):   return _ansi("36", t)
 def red(t):    return _ansi("31", t)
-def blue(t):   return _ansi("34", t)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -138,7 +134,7 @@ _W = dict(
     seen=8,
     rem=9,
     eta=10,
-    elapsed=9,   # NEW
+    elapsed=9,
 )
 
 SEP = "  " + dim("│") + "  "
@@ -164,38 +160,6 @@ _RULE         = dim("─" * len(_HEADER_PLAIN))
 
 
 # ─────────────────────────────────────────────────────────────
-# Instability detector
-# ─────────────────────────────────────────────────────────────
-
-class InstabilityDetector:
-
-    def __init__(self, window=50):
-        self._loss_buf = deque(maxlen=window)
-        self._norm_buf = deque(maxlen=window)
-
-    def check(self, loss, grad_norm):
-
-        if math.isnan(loss):
-            return red("⚠ NaN loss detected")
-
-        warnings = []
-
-        if grad_norm and len(self._norm_buf) > 10:
-            avg = sum(self._norm_buf) / len(self._norm_buf)
-            if grad_norm > 3 * avg:
-                warnings.append(
-                    yellow(f"grad norm spike: {grad_norm:.3f}")
-                )
-
-        self._loss_buf.append(loss)
-
-        if grad_norm:
-            self._norm_buf.append(grad_norm)
-
-        return "\n".join(warnings) if warnings else None
-
-
-# ─────────────────────────────────────────────────────────────
 # Main Logger
 # ─────────────────────────────────────────────────────────────
 
@@ -217,8 +181,10 @@ class TrainingLogger:
         )
 
         self._tokens_total = self.total_steps * self._tps
+
+        # Theoretical peak FLOPs
         self._hw_flops = estimate_hardware_flops(config)
-        print(f"[MFU] Estimated usable FLOPs: {self._hw_flops / 1e12:.2f} TFLOPs")
+        print(f"[MFU] Theoretical peak FLOPs: {self._hw_flops / 1e12:.2f} TFLOPs")
 
         self.start_time = time.time()
 
@@ -227,23 +193,10 @@ class TrainingLogger:
         self._window = deque(maxlen=50)
 
         self._best_loss = float("inf")
-        self._detector = InstabilityDetector()
-
-        warmup = config.scheduler.warmup_steps
-        stable = int(self.total_steps * getattr(config.scheduler, "stable_fraction", 0.88))
-
-        self._warmup_end = warmup
-        self._stable_end = warmup + stable
 
         self._printed_header = False
         self._lines_since_header = 0
         self._header_every = 50
-
-
-    def _get_phase(self, step):
-        if step <= self._warmup_end: return "warmup"
-        if step <= self._stable_end: return "stable"
-        return "decay"
 
 
     def log_step(self, step, metrics, lr, grad_norm=None, tokens_seen=None):
@@ -277,7 +230,18 @@ class TrainingLogger:
         eta = fmt_time(remaining / avg_toks)
         elapsed = fmt_time(now - self.start_time)
 
-        mfu = (6 * self.total_params * avg_toks) / self._hw_flops * 100
+        # ------------------------------------------------------------
+        # REAL MFU (based on step time)
+        # ------------------------------------------------------------
+        step_time = dt / max(dsteps, 1)
+        flops_per_step = 6 * self.total_params * self._tps
+
+        if step_time > 0:
+            real_flops_per_sec = flops_per_step / step_time
+            mfu = (real_flops_per_sec / self._hw_flops) * 100
+        else:
+            mfu = 0.0
+
         mfu = max(0.0, min(mfu, 100.0))
 
         pct = 100 * step / self.total_steps
@@ -336,10 +300,6 @@ class TrainingLogger:
 
         print(row)
         self._lines_since_header += 1
-
-        warning = self._detector.check(loss, grad_norm)
-        if warning:
-            print(f"         {warning}")
 
 
     def log_summary(self, step: int, tokens: int):
