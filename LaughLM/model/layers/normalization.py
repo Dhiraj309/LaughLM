@@ -1,5 +1,5 @@
-
 import jax.numpy as jnp
+import jax
 from flax import linen as nn
 
 class LayerNorm(nn.Module):
@@ -39,21 +39,28 @@ class RMSNorm(nn.Module):
 
     hidden_size: int
     eps: float = 1e-6
+    compute_dtype: jnp.dtype = jnp.float32
 
     @nn.compact
     def __call__(self, x):
-
+        in_dtype = x.dtype
         scale = self.param(
             "scale",
             nn.initializers.ones,
             (self.hidden_size,),
         )
 
-        rms = jnp.sqrt(jnp.mean(x ** 2, axis=-1, keepdims=True))
+        x_norm = x.astype(self.compute_dtype)
 
-        x = x / (rms + self.eps)
+        mean_sq = jnp.mean(x_norm * x_norm, axis=-1, keepdims=True)
 
-        return scale * x
+        inv_rms = jax.lax.rsqrt(mean_sq + self.eps)
+
+        y = (x_norm * inv_rms).astype(in_dtype)
+
+        scale = scale.astype(in_dtype)
+
+        return y * scale
 
 
 def build_normalization(config):
