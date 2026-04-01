@@ -1,192 +1,300 @@
-  
-import json  
-import os  
-from typing import Iterable, List, Optional  
-from multiprocessing import Process, Queue, cpu_count  
-  
-from datasets import load_dataset  
-from tokenizers import Tokenizer  
-from tokenizers.models import BPE  
-from tokenizers.trainers import BpeTrainer  
-from tokenizers.pre_tokenizers import ByteLevel, Digits, Punctuation, Sequence  
-from tokenizers.normalizers import (  
-    NFKC,  
-    Replace,  
-    Sequence as NormSequence,  
-    Strip,  
-)  
-  
-# ── MAX CPU UTILIZATION ──────────────────────────────────────  
-os.environ["TOKENIZERS_PARALLELISM"] = "true"  
-os.environ["RAYON_RS_NUM_CPUS"] = str(cpu_count())  
-  
-# ── Special tokens ───────────────────────────────────────────  
-SPECIAL_TOKENS = ["<pad>", "<eos>", "<bos>", "<unk>"]  
-PAD_ID, EOS_ID, BOS_ID, UNK_ID = 0, 1, 2, 3  
-  
-_MAX_WORD_LEN = 50  
-  
-  
-# ─────────────────────────────────────────────────────────────  
-# Utils  
-# ─────────────────────────────────────────────────────────────  
-  
-def _validate_vocab_size(vocab_size: int):  
-    assert vocab_size % 128 == 0, "vocab_size must be divisible by 128"  
-  
-  
-def _truncate_long_words(text: str, max_len: int = _MAX_WORD_LEN) -> str:  
-    return " ".join(  
-        w if len(w) <= max_len else w[:max_len]  
-        for w in text.split()  
-    )  
-  
-  
-# ─────────────────────────────────────────────────────────────  
-# 🚀 Parallel streaming iterator  
-# ─────────────────────────────────────────────────────────────  
-  
-def _producer_worker(queue, dataset_name, max_samples, min_text_len, worker_id):  
-    ds = load_dataset(dataset_name, split="train", streaming=True)  
-  
-    for i, sample in enumerate(ds):  
-        if max_samples and i >= max_samples:  
-            break  
-  
-        text = sample.get("text", "")  
-        if not text or len(text) < min_text_len:  
-            continue  
-  
-        text = _truncate_long_words(text)  
-        queue.put(text)  
-  
-    queue.put(None)  
-  
-  
-def hf_text_batch_iterator_parallel(  
-    dataset_name: str,  
-    batch_size: int = 10_000,  
-    max_samples: Optional[int] = None,  
-    min_text_len: int = 50,  
-    num_workers: int = 4,  
-) -> Iterable[List[str]]:  
-  
-    queue = Queue(maxsize=50_000)  
-  
-    workers = []  
-    for i in range(num_workers):  
-        p = Process(  
-            target=_producer_worker,  
-            args=(queue, dataset_name, max_samples, min_text_len, i),  
-        )  
-        p.start()  
-        workers.append(p)  
-  
-    batch = []  
-    finished_workers = 0  
-    yielded = 0  
-  
-    while True:  
-        item = queue.get()  
-  
-        if item is None:  
-            finished_workers += 1  
-            if finished_workers == num_workers:  
-                break  
-            continue  
-  
-        batch.append(item)  
-        yielded += 1  
-  
-        if len(batch) >= batch_size:  
-            yield batch  
-            batch = []  
-  
-        if yielded % 100_000 == 0:  
-            print(f" [iterator] {yielded:,} samples", flush=True)  
-  
-    if batch:  
-        yield batch  
-  
-    for p in workers:  
-        p.join()  
-  
-    print(f" [iterator] done — {yielded:,} total samples", flush=True)  
-  
-  
-# ─────────────────────────────────────────────────────────────  
-# Training  
-# ─────────────────────────────────────────────────────────────  
-  
-def train_tokenizer(  
-    dataset_name: str,  
-    vocab_size: int = 32_000,  
-    output_path: str = "tokenizer/tokenizer.json",  
-    min_frequency: int = 2,  
-    batch_size: int = 10_000,  
-    max_samples: Optional[int] = None,  
-    min_text_len: int = 50,  
-    num_workers: int = 4,  
-):  
-  
-    _validate_vocab_size(vocab_size)  
-  
-    print("\n── Optimized Tokenizer Training ─────────────────────")  
-    print(f" Dataset : {dataset_name}")  
-    print(f" Batch size : {batch_size:,}")  
-    print(f" Workers : {num_workers}")  
-    print(f" Max samples : {max_samples}")  
-    print("─────────────────────────────────────────────────────\n")  
-  
-    tokenizer = Tokenizer(BPE(unk_token="<unk>"))  
-  
-    # Normalizer  
-    tokenizer.normalizer = NormSequence([  
-        Replace("\u2018", "'"),  
-        Replace("\u2019", "'"),  
-        Replace("\u201c", '"'),  
-        Replace("\u201d", '"'),  
-        Replace("\u2013", "-"),  
-        Replace("\u2014", "-"),  
-        NFKC(),  
-        Strip(),  
-    ])  
-  
-    # Pre-tokenizer  
-    tokenizer.pre_tokenizer = Sequence([  
-        Digits(individual_digits=True),  
-        Punctuation(),  
-        ByteLevel(add_prefix_space=False),  
-    ])  
-  
-    # Trainer  
-    trainer = BpeTrainer(  
-        vocab_size=vocab_size,  
-        min_frequency=min_frequency,  
-        special_tokens=SPECIAL_TOKENS,  
-        initial_alphabet=ByteLevel.alphabet(),  
-        show_progress=True,  
-        continuing_subword_prefix="",  
-    )  
-  
-    print("🚀 Training started...")  
-  
-    tokenizer.train_from_iterator(  
-        hf_text_batch_iterator_parallel(  
-            dataset_name=dataset_name,  
-            batch_size=batch_size,  
-            max_samples=max_samples,  
-            min_text_len=min_text_len,  
-            num_workers=num_workers,  
-        ),  
-        trainer=trainer,  
-    )  
-  
-    # Save  
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)  
-    tokenizer.save(output_path)  
-  
-    print("\n✅ Training complete!")  
-    print(f" Vocab size: {tokenizer.get_vocab_size():,}")  
-  
+import json
+import os
+import shutil
+import tempfile
+import random
+import numpy as np
+from typing import List
+from multiprocessing import Process, Queue, cpu_count
+
+from datasets import load_dataset
+from huggingface_hub import HfApi
+from tokenizers import Tokenizer
+from tokenizers.models import BPE
+from tokenizers.trainers import BpeTrainer
+from tokenizers.pre_tokenizers import ByteLevel
+from tokenizers.normalizers import (
+    NFKC,
+    Replace,
+    Sequence as NormSequence,
+    Strip,
+)
+from tokenizers.decoders import ByteLevel as ByteLevelDecoder
+
+
+# ── CPU SETTINGS ─────────────────────────────────────────────
+NUM_CPUS = cpu_count()
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
+os.environ["RAYON_RS_NUM_CPUS"] = str(NUM_CPUS)
+
+# ── Special tokens ───────────────────────────────────────────
+SPECIAL_TOKENS = ["<pad>", "<eos>", "<bos>", "<unk>"]
+PAD_ID, EOS_ID, BOS_ID, UNK_ID = 0, 1, 2, 3
+
+_MAX_WORD_LEN = 200  # increased from 50 → prevents LaTeX/code truncation
+
+
+# ─────────────────────────────────────────────────────────────
+# Utils
+# ─────────────────────────────────────────────────────────────
+
+def _validate_vocab_size(vocab_size: int):
+    assert vocab_size % 128 == 0, "vocab_size must be divisible by 128"
+
+
+def _truncate_long_words(text: str, max_len: int = _MAX_WORD_LEN) -> str:
+    return " ".join(
+        w if len(w) <= max_len else w[:max_len]
+        for w in text.split()
+    )
+
+
+def _get_parquet_files(dataset_name: str) -> List[str]:
+    api = HfApi()
+    all_files = api.list_repo_files(dataset_name, repo_type="dataset")
+    parquet_files = sorted(f for f in all_files if f.endswith(".parquet"))
+    print(f"Found {len(parquet_files)} parquet files")
+    return parquet_files
+
+
+def _split_files(files: List[str], num_workers: int) -> List[List[str]]:
+    chunks = [[] for _ in range(num_workers)]
+    for i, f in enumerate(files):
+        chunks[i % num_workers].append(f)
+    return chunks
+
+
+# ─────────────────────────────────────────────────────────────
+# Worker
+# ─────────────────────────────────────────────────────────────
+
+def _producer_worker(
+    result_queue: Queue,
+    dataset_name: str,
+    file_list: List[str],
+    worker_id: int,
+    per_worker: int,
+    min_text_len: int,
+    tmp_path: str,
+):
+    written = 0
+    skipped = 0
+
+    try:
+        with open(tmp_path, "w", encoding="utf-8", buffering=4 * 1024 * 1024) as f:
+            for filename in file_list:
+                if written >= per_worker:
+                    break
+
+                ds = load_dataset(
+                    dataset_name,
+                    split="train",
+                    data_files=filename,
+                    streaming=False,
+                    num_proc=1,
+                )
+
+                for sample in ds:
+                    if written >= per_worker:
+                        break
+
+                    text = sample["text"] if "text" in sample else ""
+                    if not text or len(text) < min_text_len:
+                        skipped += 1
+                        continue
+
+                    if len(text) > _MAX_WORD_LEN:
+                        text = _truncate_long_words(text)
+
+                    text = text.replace("\n", " ")
+                    text = text.strip()
+                    f.write(text + "\n")
+                    written += 1
+
+    except Exception as e:
+        print(f"[worker {worker_id}] error: {e}", flush=True)
+
+    finally:
+        result_queue.put({
+            "worker_id": worker_id,
+            "tmp_path": tmp_path,
+            "written": written,
+            "skipped": skipped,
+        })
+
+
+# ─────────────────────────────────────────────────────────────
+# Stage 1 — Collect text
+# ─────────────────────────────────────────────────────────────
+
+def _collect_to_files(
+    dataset_name: str,
+    total_samples: int,
+    num_workers: int,
+    min_text_len: int,
+    work_dir: str,
+) -> List[str]:
+
+    # Reuse cached files
+    if os.path.exists(work_dir):
+        files = [
+            f for f in os.listdir(work_dir)
+            if f.startswith("worker_") and f.endswith(".txt")
+        ]
+        if len(files) > 0:
+            print("\n[Stage 1] Using cached text files...")
+            return [os.path.join(work_dir, f) for f in sorted(files)]
+
+    parquet_files = _get_parquet_files(dataset_name)
+    file_chunks = _split_files(parquet_files, num_workers)
+    per_worker = (total_samples + num_workers - 1) // num_workers
+
+    print(f"\n[Stage 1] Collecting {total_samples:,} samples")
+
+    os.makedirs(work_dir, exist_ok=True)
+
+    result_queue = Queue()
+    processes = []
+
+    for worker_id in range(num_workers):
+        tmp_path = os.path.join(work_dir, f"worker_{worker_id:02d}.txt")
+        p = Process(
+            target=_producer_worker,
+            args=(
+                result_queue,
+                dataset_name,
+                file_chunks[worker_id],
+                worker_id,
+                per_worker,
+                min_text_len,
+                tmp_path,
+            ),
+        )
+        p.start()
+        processes.append(p)
+
+    results = []
+    for _ in range(num_workers):
+        result = result_queue.get()
+        results.append(result)
+        print(f"Worker {result['worker_id']}: {result['written']:,} written")
+
+    for p in processes:
+        p.join()
+
+    return [r["tmp_path"] for r in results if r["written"] > 0]
+
+
+# ─────────────────────────────────────────────────────────────
+# Stage 2 — Train tokenizer
+# ─────────────────────────────────────────────────────────────
+
+def _build_tokenizer(text_files, vocab_size, min_frequency):
+
+    tokenizer = Tokenizer(BPE(unk_token="<unk>"))
+
+    tokenizer.normalizer = NormSequence([
+        Replace("\u2018", "'"),
+        Replace("\u2019", "'"),
+        Replace("\u201c", '"'),
+        Replace("\u201d", '"'),
+        Replace("\u2013", "-"),
+        Replace("\u2014", "-"),
+        NFKC(),
+        Strip(),
+    ])
+
+    tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
+    tokenizer.decoder = ByteLevelDecoder()
+
+    trainer = BpeTrainer(
+        vocab_size=vocab_size,
+        min_frequency=min_frequency,
+        special_tokens=SPECIAL_TOKENS,
+        initial_alphabet=ByteLevel.alphabet(),
+        continuing_subword_prefix="",
+        show_progress=True,
+    )
+
+    tokenizer.train(text_files, trainer)
+    return tokenizer
+
+
+# ─────────────────────────────────────────────────────────────
+# Verify + Save
+# ─────────────────────────────────────────────────────────────
+
+def _verify_tokenizer(tokenizer):
+    actual = {t: tokenizer.token_to_id(t) for t in SPECIAL_TOKENS}
+    expected = {"<pad>": 0, "<eos>": 1, "<bos>": 2, "<unk>": 3}
+    assert actual == expected, f"Token ID mismatch! {actual}"
+
+    print("✓ Special tokens verified")
+    print("✓ Vocab size:", tokenizer.get_vocab_size())
+
+    # Byte fallback test
+    unk_id = tokenizer.token_to_id("<unk>")
+    test_strings = [
+        "Hello world!",
+        "∫∑√≤≥",
+        "def func(x): return x",
+        "中文测试",
+        "🎉🔥",
+        "\x00\x01\x02",
+    ]
+
+    for s in test_strings:
+        if unk_id in tokenizer.encode(s).ids:
+            print("⚠ UNK found in:", s)
+            return
+
+    print("✓ Byte fallback working (no UNK)")
+
+
+def _save_tokenizer(tokenizer, output_path):
+    tmp_file = tempfile.mktemp(suffix=".json")
+    tokenizer.save(tmp_file)
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    shutil.move(tmp_file, output_path)
+
+    print(f"✓ Saved tokenizer → {output_path}")
+
+
+# ─────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────
+
+def train_tokenizer(
+    dataset_name: str,
+    vocab_size: int = 32_000,
+    output_path: str = "/tmp/tokenizer.json",
+    min_frequency: int = 2,
+    max_samples: int = 2_000_000,
+    min_text_len: int = 5,
+    num_workers: int = cpu_count(),
+    work_dir: str = "/tmp/tok_work",
+):
+    import time
+
+    # Reproducibility
+    random.seed(42)
+    np.random.seed(42)
+
+    _validate_vocab_size(vocab_size)
+    t0 = time.time()
+
+    text_files = _collect_to_files(
+        dataset_name,
+        max_samples,
+        num_workers,
+        min_text_len,
+        work_dir,
+    )
+
+    tokenizer = _build_tokenizer(text_files, vocab_size, min_frequency)
+    _verify_tokenizer(tokenizer)
+    _save_tokenizer(tokenizer, output_path)
+
+    print(f"\nTraining finished in {(time.time()-t0)/60:.2f} min")
     return tokenizer
