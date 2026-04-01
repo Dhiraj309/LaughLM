@@ -10,17 +10,16 @@ from LaughLM.model.gpt import GPTModel
 from LaughLM.model.parameter_utils import generate_preflight_report, estimate_parameters
 from LaughLM.training.optimizer import build_optimizer
 from LaughLM.training.scheduler import build_scheduler, compute_total_steps
-from LaughLM.training.train_step import create_train_step, create_eval_step
+from LaughLM.training.train_step import (
+    create_train_step,
+    create_eval_step,
+)
 from LaughLM.training.logger import TrainingLogger
 from LaughLM.training.checkpoint import CheckpointManager
 from LaughLM.training.train_state import TrainState
 from LaughLM.utils.rng import create_rng
 from LaughLM.utils.prefetch import prefetch_to_device
 
-
-# ------------------------------------------------------------
-# Safe scalar conversion
-# ------------------------------------------------------------
 
 def _scalar(x):
     if x is None:
@@ -35,27 +34,15 @@ def _scalar(x):
 
 
 class Trainer:
-    """
-    LaughLM training orchestration with Orbax checkpointing.
-    """
 
     def __init__(self, config: LaughLMConfig, resume_dir: str | None = None):
 
         self.config = config
 
-        # ------------------------------------------------------------
-        # RNG
-        # ------------------------------------------------------------
         self.rng = create_rng(seed=42)
 
-        # ------------------------------------------------------------
-        # Preflight report
-        # ------------------------------------------------------------
         generate_preflight_report(config)
 
-        # ------------------------------------------------------------
-        # Model
-        # ------------------------------------------------------------
         self.model = GPTModel(config=config)
 
         dummy = jnp.zeros(
@@ -71,23 +58,29 @@ class Trainer:
             dummy,
         )["params"]
 
-        # ------------------------------------------------------------
-        # Optimizer + scheduler
-        # ------------------------------------------------------------
         self.schedule = build_scheduler(config)
         self.optimizer = build_optimizer(config, self.schedule)
 
         opt_state = self.optimizer.init(params)
 
         # ------------------------------------------------------------
-        # JIT steps
+        # ✅ NEW: fused train step
         # ------------------------------------------------------------
-        self.train_step = create_train_step(self.model, self.optimizer)
+
+        self.grad_accum = config.runtime.gradient_accumulation
+
+        self.train_step = create_train_step(
+            self.model,
+            self.optimizer,
+            self.grad_accum,
+        )
+
         self.eval_step = create_eval_step(self.model)
 
         # ------------------------------------------------------------
-        # Training state
+        # State
         # ------------------------------------------------------------
+
         self.state = TrainState(
             params=params,
             opt_state=opt_state,
@@ -96,9 +89,6 @@ class Trainer:
             rng_key=self.rng.key,
         )
 
-        # ------------------------------------------------------------
-        # Logger
-        # ------------------------------------------------------------
         total_params = estimate_parameters(config)["total_params"]
 
         self.logger = TrainingLogger(
@@ -106,9 +96,6 @@ class Trainer:
             total_params=total_params,
         )
 
-        # ------------------------------------------------------------
-        # Checkpoint manager
-        # ------------------------------------------------------------
         ckpt_dir = resume_dir or config.runtime.checkpoint_dir
 
         self.checkpoints = CheckpointManager(
@@ -118,18 +105,12 @@ class Trainer:
 
         self.checkpoint_interval = config.runtime.checkpoint_interval
 
-        # ------------------------------------------------------------
-        # Save config once
-        # ------------------------------------------------------------
         config_path = Path(ckpt_dir) / "config.json"
 
         if not config_path.exists():
             with open(config_path, "w") as f:
                 json.dump(self.config.model_dump(), f, indent=2)
 
-        # ------------------------------------------------------------
-        # Restore checkpoint if available
-        # ------------------------------------------------------------
         restored = self.checkpoints.restore_latest(self.state)
 
         if restored is not None:
@@ -154,6 +135,7 @@ class Trainer:
             cfg.runtime.seq_len
             * cfg.runtime.micro_batch_per_device
             * cfg.parallelism.data_parallel
+            * cfg.runtime.gradient_accumulation
         )
 
         print("\n" + "=" * 60)
@@ -161,16 +143,29 @@ class Trainer:
         print(f"Effective tokens per step: {tokens_per_step:,}")
         print("=" * 60 + "\n")
 
+        # 🚀 increase prefetch depth
+        prefetched_loader = prefetch_to_device(iter(dataloader), size=8)
 
-        prefetched_loader = prefetch_to_device(iter(dataloader), size=2)
+        data_iter = iter(prefetched_loader)
 
-        for batch in prefetched_loader:
+        for _ in range(total_steps):
 
-            batch = jnp.asarray(batch, dtype=jnp.int32)
+            # ------------------------------------------------------------
+            # ✅ collect micro-batches
+            # ------------------------------------------------------------
+            micro_batches = []
 
-            # --------------------------------------------------------
-            # Training step
-            # --------------------------------------------------------
+            for _ in range(self.grad_accum):
+                batch = next(data_iter)
+                batch = jnp.asarray(batch, dtype=jnp.int32)
+                micro_batches.append(batch)
+
+            # stack → [grad_accum, B, T]
+            batch = jnp.stack(micro_batches)
+
+            # ------------------------------------------------------------
+            # ✅ fused train step
+            # ------------------------------------------------------------
             new_params, new_opt_state, metrics = self.train_step(
                 self.state.params,
                 self.state.opt_state,
@@ -190,9 +185,9 @@ class Trainer:
                 rng_key=self.rng.key,
             )
 
-            # --------------------------------------------------------
+            # ------------------------------------------------------------
             # Logging
-            # --------------------------------------------------------
+            # ------------------------------------------------------------
             if self.state.step % cfg.runtime.log_interval == 0:
 
                 lr = _scalar(self.schedule(self.state.step))
@@ -210,37 +205,21 @@ class Trainer:
                     tokens_seen=self.state.tokens_processed,
                 )
 
-            # --------------------------------------------------------
-            # Evaluation
-            # --------------------------------------------------------
-            if self.state.step % cfg.runtime.eval_interval == 0:
-                self._run_eval()
-
-            # --------------------------------------------------------
-            # Checkpoint
-            # --------------------------------------------------------
+            # ------------------------------------------------------------
+            # Checkpointing
+            # ------------------------------------------------------------
             if self.state.step % self.checkpoint_interval == 0:
 
                 print(f"[checkpoint] saving step {self.state.step}")
 
                 self.checkpoints.save(self.state.step, self.state)
 
-            if self.state.step >= total_steps:
-                break
-
-        # ------------------------------------------------------------
-        # Final checkpoint
-        # ------------------------------------------------------------
         self.checkpoints.save(self.state.step, self.state)
 
         self.logger.log_summary(
             self.state.step,
             self.state.tokens_processed,
         )
-
-    # ------------------------------------------------------------
-    # Eval placeholder
-    # ------------------------------------------------------------
 
     def _run_eval(self):
 
