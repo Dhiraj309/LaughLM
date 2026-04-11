@@ -5,7 +5,7 @@ model:
   num_layers: 12
   num_heads: 16
   num_kv_heads: null
-  max_seq_len: 2048
+  max_seq_len: 1024
 
 architecture:
   positional: learned
@@ -43,7 +43,7 @@ scheduler:
 
 runtime:
   seq_len: 1024
-  micro_batch_per_device: 8
+  micro_batch_per_device: 4
   gradient_accumulation: 2
   total_tokens: 100000000
 
