@@ -1,70 +1,13 @@
-"""
-LaughLM/training/logger.py
-"""
-
 import time
 import math
 import sys
-from typing import Dict
-
 import jax
-
 from LaughLM.config.schema import LaughLMConfig
 
 
-# ─────────────────────────────────────────────────────────────
-# Hardware Peak FLOPs (THEORETICAL, 100%)
-# ─────────────────────────────────────────────────────────────
-
-def estimate_hardware_flops(config: LaughLMConfig) -> float:
-    accel = config.hardware.accelerator
-    hw_type = config.hardware.type.lower()
-    devices = config.parallelism.data_parallel
-
-    if accel == "tpu":
-        if "v5e" in hw_type:
-            per_chip = 197e12
-        elif "v4" in hw_type:
-            per_chip = 275e12
-        else:
-            raise ValueError(f"Unknown TPU type: {hw_type}")
-        return per_chip * devices
-
-    if accel == "gpu":
-        GPU_FLOPS = {
-            "t4": 65e12,
-            "a100": 312e12,
-            "h100": 989e12,
-        }
-
-        if hw_type not in GPU_FLOPS:
-            raise ValueError(f"Unknown GPU type: {hw_type}")
-
-        return GPU_FLOPS[hw_type] * devices
-
-    raise ValueError(f"Unknown accelerator: {accel}")
-
-
-# ─────────────────────────────────────────────────────────────
-# Scalar safety
-# ─────────────────────────────────────────────────────────────
-
-def _scalar(x):
-    if x is None:
-        return None
-    try:
-        return float(x)
-    except Exception:
-        try:
-            return float(jax.device_get(x))
-        except Exception:
-            return float("nan")
-
-
-# ─────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
 # ANSI helpers
-# ─────────────────────────────────────────────────────────────
-
+# ------------------------------------------------------------
 def _tty():
     return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 
@@ -80,45 +23,39 @@ def green(t):  return _ansi("32", t)
 def cyan(t):   return _ansi("36", t)
 
 
-# ─────────────────────────────────────────────────────────────
-# Formatting utilities
-# ─────────────────────────────────────────────────────────────
-
-def fmt_tokens(n):
-    if n >= 1_000_000_000: return f"{n/1_000_000_000:.3f}B"
-    if n >= 1_000_000:     return f"{n/1_000_000:.1f}M"
-    if n >= 1_000:         return f"{n/1_000:.1f}K"
-    return str(int(n))
-
+# ------------------------------------------------------------
+# Formatting
+# ------------------------------------------------------------
 def fmt_time(sec):
-    sec = max(0, int(sec))
+    if sec is None or not math.isfinite(sec):
+        return "--"
+    sec = int(max(sec, 0))
     h, rem = divmod(sec, 3600)
-    m, s   = divmod(rem, 60)
-    if h:  return f"{h}h{m:02d}m"
-    if m:  return f"{m}m{s:02d}s"
+    m, s = divmod(rem, 60)
+    if h: return f"{h}h{m:02d}m"
+    if m: return f"{m}m{s:02d}s"
     return f"{s}s"
 
-def fmt_lr(lr):
-    return f"{lr:.2e}"
+
+def fmt_tokens(n):
+    if n >= 1e9: return f"{n/1e9:.1f}B"
+    if n >= 1e6: return f"{n/1e6:.1f}M"
+    if n >= 1e3: return f"{n/1e3:.1f}K"
+    return str(int(n))
+
 
 def fmt_ppl(loss):
-    p = math.exp(min(loss, math.log(9_999_999)))
-    if p >= 100_000: return f"{p/1000:.1f}K"
-    if p >= 10_000:  return f"{p/1000:.1f}K"
-    if p >= 1_000:   return f"{p:.0f}"
-    if p >= 100:     return f"{p:.1f}"
-    return f"{p:.2f}"
-
-def fmt_mfu(mfu):
-    if mfu >= 10: return f"{mfu:.1f}%"
-    if mfu >= 1:  return f"{mfu:.2f}%"
-    return        f"{mfu:.3f}%"
+    try:
+        p = math.exp(min(loss, 20))
+        if p >= 1000: return f"{p:.0f}"
+        return f"{p:.2f}"
+    except:
+        return "--"
 
 
-# ─────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
 # Column widths
-# ─────────────────────────────────────────────────────────────
-
+# ------------------------------------------------------------
 _W = dict(
     step=6,
     prog=8,
@@ -126,8 +63,7 @@ _W = dict(
     ppl=7,
     gnorm=7,
     lr=12,
-    toks=7,
-    mfu=7,
+    toks=9,
     seen=8,
     rem=9,
     eta=10,
@@ -137,7 +73,7 @@ _W = dict(
 SEP = "  " + dim("│") + "  "
 
 
-def _header_plain():
+def _header():
     return (
         " "
         + f"{'STEP':>{_W['step']}}  {'PROGRESS':>{_W['prog']}}"
@@ -146,131 +82,126 @@ def _header_plain():
         f"  │  "
         f"{'LR':>{_W['lr']}}"
         f"  │  "
-        f"{'TOK/S':>{_W['toks']}}  {'MFU':>{_W['mfu']}}"
+        f"{'TOK/S':>{_W['toks']}}"
         f"  │  "
         f"{'SEEN':>{_W['seen']}}  {'REMAINING':>{_W['rem']}}  {'ETA':>{_W['eta']}}  {'ELAPSED':>{_W['elapsed']}}"
     )
 
-_HEADER_PLAIN = _header_plain()
-_HEADER       = grey(_HEADER_PLAIN)
-_RULE         = dim("─" * len(_HEADER_PLAIN))
 
-
-# ─────────────────────────────────────────────────────────────
-# Main Logger
-# ─────────────────────────────────────────────────────────────
-
+# ------------------------------------------------------------
+# LOGGER
+# ------------------------------------------------------------
 class TrainingLogger:
 
     def __init__(self, config: LaughLMConfig, total_params: int):
-
-        self.config       = config
+        self.config = config
         self.total_params = total_params
 
         from LaughLM.training.scheduler import compute_total_steps
         self.total_steps = compute_total_steps(config)
 
-        self._tps = (
+        self.tokens_per_step = (
             config.runtime.seq_len
             * config.runtime.micro_batch_per_device
             * config.parallelism.data_parallel
             * config.runtime.gradient_accumulation
         )
 
-        self._tokens_total = self.total_steps * self._tps
+        self.total_tokens = self.tokens_per_step * self.total_steps
 
-        # Theoretical peak FLOPs
-        self._hw_flops = estimate_hardware_flops(config)
-        print(f"[MFU] Theoretical peak FLOPs: {self._hw_flops / 1e12:.2f} TFLOPs")
+        print(f"[Logger] Tokens/step: {self.tokens_per_step:,}")
 
         self.start_time = time.time()
+        self.last_time = time.time()
+        self.last_step = 0
 
-        self._last_t    = time.time()
-        self._last_step = 0
-
-        self._best_loss = float("inf")
+        self.step_time_window = []
+        self.best_loss = float("inf")
 
         self._printed_header = False
-        self._lines_since_header = 0
-        self._header_every = 50
 
 
-    def log_step(self, step, metrics, lr, grad_norm=None, tokens_seen=None):
+    def log_step(self, step, metrics, lr=None, grad_norm=None, tokens_seen=None):
 
-        if step % self.config.runtime.log_interval != 0:
+        if step % self.config.runtime.log_interval != 0 or step < 10:
             return
 
-        if step < 10:
-            return
+        # -------------------------
+        # FORCE TPU SYNC (CRITICAL)
+        # -------------------------
+        # jax.tree_util.tree_map(
+        #     lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
+        #     metrics
+        # )
 
-        loss = _scalar(metrics.get("loss", float("nan")))
-        grad_norm = _scalar(grad_norm)
-
-        if tokens_seen is None:
-            tokens_seen = step * self._tps
-
-        remaining = max(0, self._tokens_total - tokens_seen)
+        # loss = float(jax.device_get(metrics["loss"]))
+        
+        metrics = jax.device_get(metrics)
+        loss = float(metrics["loss"])
 
         now = time.time()
-        dt = now - self._last_t
-        dsteps = step - self._last_step
+        dt = now - self.last_time
+        ds = step - self.last_step
 
-        self._last_t = now
-        self._last_step = step
+        self.last_time = now
+        self.last_step = step
 
-        # ------------------------------------------------------------
-        # REAL STEP TIME
-        # ------------------------------------------------------------
-        step_time = dt / max(dsteps, 1)
+        # -------------------------
+        # Stable step time
+        # -------------------------
+        step_time = dt / max(ds, 1)
+        self.step_time_window.append(step_time)
 
-        if step_time > 0:
-            toks_per_sec = self._tps / step_time
-        else:
-            toks_per_sec = 0.0
+        if len(self.step_time_window) > 5:
+            self.step_time_window.pop(0)
 
-        # FLOPs per step
-        flops_per_step = 6 * self.total_params * self._tps
+        avg_step_time = sum(self.step_time_window) / len(self.step_time_window)
 
-        if step_time > 0:
-            flops_per_sec = flops_per_step / step_time
-            mfu = (flops_per_sec / self._hw_flops) * 100
-        else:
-            mfu = 0.0
+        # prevent crazy spikes
+        avg_step_time = max(avg_step_time, 1e-4)
 
-        mfu = max(0.0, min(mfu, 100.0))
+        toks_per_sec = self.tokens_per_step / avg_step_time
 
-        eta = fmt_time(remaining / max(toks_per_sec, 1))
-        elapsed = fmt_time(now - self.start_time)
+        # -------------------------
+        # Tokens tracking
+        # -------------------------
+        if tokens_seen is None:
+            tokens_seen = step * self.tokens_per_step
 
-        pct = 100 * step / self.total_steps
+        remaining = max(0, self.total_tokens - tokens_seen)
+        progress = 100 * step / self.total_steps
 
-        is_best = loss < self._best_loss
+        eta = remaining / toks_per_sec if toks_per_sec > 0 else float("nan")
+        elapsed = now - self.start_time
+
+        # -------------------------
+        # Best marker
+        # -------------------------
+        is_best = loss < self.best_loss
         if is_best:
-            self._best_loss = loss
+            self.best_loss = loss
 
         marker = green("*") if is_best else " "
 
+        # -------------------------
+        # Formatting
+        # -------------------------
         c_step = dim(str(step).rjust(_W['step']))
-        c_prog = grey(f"{pct:.1f}%".rjust(_W['prog']))
+        c_prog = grey(f"{progress:.1f}%".rjust(_W['prog']))
 
         c_loss = white(f"{loss:.4f}".rjust(_W['loss']))
         c_ppl  = dim(fmt_ppl(loss).rjust(_W['ppl']))
+        c_gnorm = grey("n/a".rjust(_W['gnorm']))
 
-        if grad_norm is None:
-            c_gnorm = grey("n/a".rjust(_W['gnorm']))
-        else:
-            c_gnorm = dim(f"{grad_norm:.3f}".rjust(_W['gnorm']))
-
-        lr_val = fmt_lr(lr).rjust(_W['lr']-2)
-        c_lr = dim(lr_val)
+        lr_val = lr if lr is not None else 0.0
+        c_lr = dim(f"{lr_val:.2e}".rjust(_W['lr']))
 
         c_toks = dim(f"{int(toks_per_sec):,}".rjust(_W['toks']))
-        c_mfu  = dim(fmt_mfu(mfu).rjust(_W['mfu']))
 
         c_seen = dim(fmt_tokens(tokens_seen).rjust(_W['seen']))
         c_rem  = dim(fmt_tokens(remaining).rjust(_W['rem']))
-        c_eta  = grey(eta.rjust(_W['eta']))
-        c_elapsed = cyan(elapsed.rjust(_W['elapsed']))
+        c_eta  = grey(fmt_time(eta).rjust(_W['eta']))
+        c_elapsed = cyan(fmt_time(elapsed).rjust(_W['elapsed']))
 
         row = (
             marker
@@ -280,30 +211,25 @@ class TrainingLogger:
             + SEP
             + c_lr
             + SEP
-            + c_toks + "  " + c_mfu
+            + c_toks
             + SEP
             + c_seen + "  " + c_rem + "  " + c_eta + "  " + c_elapsed
         )
 
+        # -------------------------
+        # Header print
+        # -------------------------
         if not self._printed_header:
-            print(_HEADER)
-            print(_RULE)
+            h = _header()
+            print(grey(h))
+            print(dim("─" * len(h)))
             self._printed_header = True
 
-        elif self._lines_since_header >= self._header_every:
-            print()
-            print(_HEADER)
-            print(_RULE)
-            self._lines_since_header = 0
-
         print(row)
-        self._lines_since_header += 1
 
 
-    def log_summary(self, step: int, tokens: int):
-
+    def log_summary(self, step, tokens):
         elapsed = time.time() - self.start_time
-        hrs = elapsed / 3600
 
         print("\n" + "=" * 60)
         print("Training Summary")
@@ -311,6 +237,6 @@ class TrainingLogger:
 
         print(f"Final step:        {step:,}")
         print(f"Tokens processed:  {tokens:,}")
-        print(f"Wall time:         {hrs:.2f} hours")
+        print(f"Wall time:         {elapsed/3600:.2f} hours")
 
-        print("=" * 60)
+        print("=" * 60) 
