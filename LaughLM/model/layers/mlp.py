@@ -47,8 +47,9 @@ class GELUMLP(nn.Module):
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
-            precision=jax.lax.Precision.HIGH,
         )(x)
+        
+        x = x.astype(compute_dtype)
 
         x = gelu(clamp(x))
 
@@ -57,7 +58,6 @@ class GELUMLP(nn.Module):
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
-            precision=jax.lax.Precision.HIGH,
         )(x)
 
         return x
@@ -84,8 +84,9 @@ class GEGLU(nn.Module):
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
-            precision=jax.lax.Precision.HIGH,
         )(x)
+        
+        proj = proj.astype(compute_dtype)
 
         gate, value = jnp.split(proj, 2, axis=-1)
 
@@ -97,7 +98,6 @@ class GEGLU(nn.Module):
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
-            precision=jax.lax.Precision.HIGH,
         )(x)
 
         return x
@@ -124,8 +124,9 @@ class SwiGLU(nn.Module):
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
-            precision=jax.lax.Precision.HIGH,
         )(x)
+        
+        proj = proj.astype(compute_dtype)
 
         gate, value = jnp.split(proj, 2, axis=-1)
 
@@ -137,7 +138,6 @@ class SwiGLU(nn.Module):
             use_bias=self.use_bias,
             dtype=compute_dtype,
             param_dtype=param_dtype,
-            precision=jax.lax.Precision.HIGH,
         )(x)
 
         return x
