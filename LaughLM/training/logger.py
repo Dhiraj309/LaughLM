@@ -170,14 +170,21 @@ class TrainingLogger:
         from LaughLM.training.scheduler import compute_total_steps
         self.total_steps = compute_total_steps(config)
 
-        self._tps = (
-            config.runtime.seq_len
-            * config.runtime.micro_batch_per_device
-            * config.parallelism.data_parallel
-            * config.runtime.gradient_accumulation
-        )
+        # self._tps = (
+        #     config.runtime.seq_len
+        #     * config.runtime.micro_batch_per_device
+        #     * config.parallelism.data_parallel
+        #     * config.runtime.gradient_accumulation
+        # )
 
-        self._tokens_total = self.total_steps * self._tps
+        # self._tokens_total = self.total_steps * self._tps
+        
+        self._tokens_total = config.runtime.total_tokens
+        config.runtime.total_tokens
+        
+        self._ema_toks_per_sec = None
+        self._ema_mfu = None
+        self._ema_decay = 0.9
 
         # Theoretical peak FLOPs
         self._hw_flops = estimate_hardware_flops(config)
@@ -195,7 +202,7 @@ class TrainingLogger:
         self._header_every = 50
 
 
-    def log_step(self, step, metrics, lr, grad_norm=None, tokens_seen=None):
+    def log_step(self, step, metrics, lr, grad_norm=None, tokens_seen=None, tokens_in_step=None):
 
         if step % self.config.runtime.log_interval != 0:
             return
@@ -207,7 +214,10 @@ class TrainingLogger:
         grad_norm = _scalar(grad_norm)
 
         if tokens_seen is None:
-            tokens_seen = step * self._tps
+            tokens_seen = 0
+        
+        if tokens_in_step is None:
+            return
 
         remaining = max(0, self._tokens_total - tokens_seen)
 
@@ -223,10 +233,24 @@ class TrainingLogger:
         # ------------------------------------------------------------
         step_time = dt / max(dsteps, 1)
 
+        # if step_time > 0:
+        #     toks_per_sec = self._tps / step_time
+        # else:
+        #     toks_per_sec = 0.0
+        
         if step_time > 0:
-            toks_per_sec = self._tps / step_time
+            toks_per_sec = tokens_in_step / step_time
+            
+        else: toks_per_sec = 0.0
+        
+        if self._ema_toks_per_sec is None:
+            self._ema_toks_per_sec = toks_per_sec
         else:
-            toks_per_sec = 0.0
+            self._ema_toks_per_sec = (
+                self._ema_decay * self._ema_toks_per_sec + (1 - self._ema_decay) * toks_per_sec
+            )
+            
+        toks_per_sec = self._ema_toks_per_sec
 
         # FLOPs per step
         flops_per_step = 6 * self.total_params * self._tps

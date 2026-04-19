@@ -131,7 +131,7 @@ class Trainer:
 
         total_steps = compute_total_steps(cfg)
 
-        tokens_per_step = (
+        tokens_per_step_estimate = (
             cfg.runtime.seq_len
             * cfg.runtime.micro_batch_per_device
             * cfg.parallelism.data_parallel
@@ -140,7 +140,7 @@ class Trainer:
 
         print("\n" + "=" * 60)
         print(f"Training for {total_steps:,} optimizer steps")
-        print(f"Effective tokens per step: {tokens_per_step:,}")
+        print(f"Effective tokens per step: {tokens_per_step_estimate:,}")
         print("=" * 60 + "\n")
 
         # 🚀 increase prefetch depth
@@ -162,6 +162,8 @@ class Trainer:
 
             # stack → [grad_accum, B, T]
             batch = jnp.stack(micro_batches)
+            
+            tokens_in_step = batch.size
 
             # ------------------------------------------------------------
             # ✅ fused train step
@@ -175,7 +177,7 @@ class Trainer:
             metrics = jax.device_get(metrics)
 
             new_step = self.state.step + 1
-            new_tokens = self.state.tokens_processed + tokens_per_step
+            new_tokens = self.state.tokens_processed + tokens_in_step
 
             self.state = TrainState(
                 params=new_params,
@@ -203,6 +205,7 @@ class Trainer:
                     lr=lr,
                     grad_norm=None,
                     tokens_seen=self.state.tokens_processed,
+                    tokens_in_step=tokens_in_step,
                 )
 
             # ------------------------------------------------------------
