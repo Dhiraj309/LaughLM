@@ -13,6 +13,11 @@ class MemmapDataset:
     • multi-shard support
     • infinite iterator
     • vectorized batch sampling (no Python loops)
+
+    IMPORTANT
+    ---------
+    batch_size MUST be GLOBAL batch size:
+        = micro_batch_per_device * num_devices
     """
 
     def __init__(
@@ -26,54 +31,75 @@ class MemmapDataset:
         if isinstance(paths, str):
             paths = [paths]
 
-        arrays = [
+        self.shards = [
             np.memmap(p, dtype=np.uint16, mode="r")
             for p in paths
         ]
 
-        # NOTE: keeping existing behavior for now to avoid changing
-        # dataset semantics. Later optimization phases may replace this
-        # with true shard indexing instead of concatenation.
-        self.tokens = np.concatenate(arrays)
+        self.shard_lengths = [len(s) for s in self.shards]
+        self.total_tokens = sum(self.shard_lengths)
 
         self.seq_len = seq_len
         self.batch_size = batch_size
 
         self.rng = np.random.default_rng(seed)
 
-        # Precompute sequence offsets to avoid repeated allocations
+        # ✅ PRECOMPUTE OFFSETS (avoid realloc every step)
         self._seq_offsets = np.arange(self.seq_len)
 
-        print(f"Loaded dataset with {len(self.tokens):,} tokens")
+        # ✅ SANITY CHECK (prevents silent TPU underfeeding bug)
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
+
+        print(
+            f"Loaded dataset with {self.total_tokens:,} tokens "
+            f"across {len(self.shards)} shards"
+        )
+        print(f"[dataset] batch_size (GLOBAL): {self.batch_size:,}")
 
     # ------------------------------------------------------------
     # Sample batch
     # ------------------------------------------------------------
 
     def sample_batch(self):
-        """
-        Sample a batch of sequences using vectorized indexing.
 
-        This removes the Python loop previously used for slicing
-        and allows NumPy to perform the operation in optimized C code.
-        """
-
-        # Random starting positions
-        ix = self.rng.integers(
+        # ✅ SAMPLE WHICH SHARD EACH ROW COMES FROM
+        shard_ids = self.rng.integers(
             0,
-            len(self.tokens) - self.seq_len - 1,
-            size=self.batch_size
+            len(self.shards),
+            size=self.batch_size,
         )
 
-        # Build index matrix
-        # shape: [batch_size, seq_len]
+        lengths = np.take(self.shard_lengths, shard_ids)
+
+        # ✅ FIX: avoid negative offsets (edge-case safety)
+        max_offsets = lengths - self.seq_len - 1
+        max_offsets = np.maximum(max_offsets, 1)
+
+        # ✅ VECTORISED RANDOM START POSITIONS
+        ix = (self.rng.random(self.batch_size) * max_offsets).astype(np.int64)
+
+        # ✅ BUILD FULL SEQUENCE INDICES
         indices = ix[:, None] + self._seq_offsets[None, :]
 
-        # Vectorized gather
-        x = self.tokens[indices]
+        # GROUP BY SHARD (minimise random IO)
+        unique_shards, inverse = np.unique(shard_ids, return_inverse=True)
 
-        # Convert dtype for JAX embedding lookup
-        return x.astype(np.int32)
+        x = np.empty((self.batch_size, self.seq_len), dtype=np.uint16)
+
+        for shard_idx, shard_id in enumerate(unique_shards):
+            mask = (inverse == shard_idx)
+
+            if not np.any(mask):
+                continue
+
+            shard_indices = indices[mask]
+
+            # ✅ FAST GATHER FROM MEMMAP
+            x[mask] = self.shards[shard_id][shard_indices]
+
+        # ✅ CRITICAL: contiguous + int32 for JAX
+        return np.ascontiguousarray(x, dtype=np.int32)
 
     # ------------------------------------------------------------
     # Infinite iterator

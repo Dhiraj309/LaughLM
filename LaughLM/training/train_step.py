@@ -16,53 +16,72 @@ Metrics = Dict[str, jnp.ndarray]
 # TRUE GRADIENT ACCUMULATION (SCAN-BASED, OPTIMIZED)
 # ------------------------------------------------------------
 
-def create_train_step(model, optimizer, grad_accum: int) -> Callable:
+def create_train_step(model, optimizer, grad_accum: int, axis_name="batch") -> Callable:
 
-    def loss_fn(params: Params, batch: Batch):
-        inputs, targets = shift_tokens(batch)
+    def loss_fn(params: Params, micro_batch: Batch):
+        """
+        micro_batch shape: (micro_batch_size, seq_len)
+        """
+        inputs, targets = shift_tokens(micro_batch)
         logits = model.apply({"params": params}, inputs)
         loss, _ = compute_loss(logits, targets)
         return loss
 
-
-    def micro_step(carry, micro_batch):
-        params, grads_accum = carry
-
-        loss, grads = jax.value_and_grad(loss_fn)(params, micro_batch)
-
-        grads_accum = jax.tree_util.tree_map(
-            lambda g_acc, g: g_acc + g,
-            grads_accum,
-            grads,
-        )
-
-        return (params, grads_accum), loss
-
-
     def train_step(params: Params, opt_state: OptState, batch: Batch):
-
         """
-        batch shape:
-            [grad_accum, micro_batch, seq_len]
+        batch shape (AFTER trainer swapaxes):
+            (num_devices, grad_accum, micro_batch, seq_len)
+
+        Inside pmap each device sees:
+            (grad_accum, micro_batch, seq_len)
         """
 
-        # Initialize gradient accumulator
-        grads_init = jax.tree_util.tree_map(jnp.zeros_like, params)
+        # --------------------------------------------------------
+        # INIT gradient accumulator
+        # --------------------------------------------------------
+        grads_accum = jax.tree_util.tree_map(jnp.zeros_like, params)
 
-        # Scan over micro-batches
-        (_, grads), losses = jax.lax.scan(
-            micro_step,
-            (params, grads_init),
+        # --------------------------------------------------------
+        # SCAN over micro-batches (true accumulation)
+        # --------------------------------------------------------
+        def scan_fn(carry, micro_batch):
+            grads_accum = carry
+
+            loss, grads = jax.value_and_grad(loss_fn)(params, micro_batch)
+
+            grads_accum = jax.tree_util.tree_map(
+                lambda g_acc, g: g_acc + g,
+                grads_accum,
+                grads,
+            )
+
+            return grads_accum, loss
+
+        grads_accum, losses = jax.lax.scan(
+            scan_fn,
+            grads_accum,
             batch,
         )
 
-        # Average gradients
+        # --------------------------------------------------------
+        # AVERAGE gradients
+        # --------------------------------------------------------
         grads = jax.tree_util.tree_map(
             lambda g: g / grad_accum,
-            grads,
+            grads_accum,
         )
 
-        # Optimizer step
+        loss = jnp.mean(losses)
+
+        # --------------------------------------------------------
+        # CROSS-DEVICE SYNC
+        # --------------------------------------------------------
+        grads = jax.lax.pmean(grads, axis_name)
+        loss = jax.lax.pmean(loss, axis_name)
+
+        # --------------------------------------------------------
+        # OPTIMIZER STEP
+        # --------------------------------------------------------
         updates, new_opt_state = optimizer.update(
             grads,
             opt_state,
@@ -71,20 +90,19 @@ def create_train_step(model, optimizer, grad_accum: int) -> Callable:
 
         new_params = optax.apply_updates(params, updates)
 
-        loss = jnp.mean(losses)
-
         metrics = {
             "loss": loss,
         }
 
         return new_params, new_opt_state, metrics
 
-
-    # 🚀 CRITICAL: donate buffers for MFU
-    return jax.jit(
+    # ------------------------------------------------------------
+    # PMAP (multi-device)
+    # ------------------------------------------------------------
+    return jax.pmap(
         train_step,
+        axis_name=axis_name,
         donate_argnums=(0, 1),
-        static_argnums=(),
     )
 
 
@@ -97,11 +115,9 @@ def create_eval_step(model) -> Callable:
     def eval_step(params: Params, batch: Batch):
 
         inputs, targets = shift_tokens(batch)
-
         logits = model.apply({"params": params}, inputs)
-
         _, metrics = compute_loss(logits, targets)
 
         return metrics
 
-    return jax.jit(eval_step)
+    return jax.pmap(eval_step, axis_name="batch")
