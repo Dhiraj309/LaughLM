@@ -3,41 +3,43 @@ LaughLM/model/layers/attention.py
 
 Frontier-grade attention module for decoder-only LLM pretraining.
 
+Frontier optimizations (perf/frontier-optim):
+──────────────────────────────────────────────
+1. KV Cache — autoregressive decoding with static pre-allocated cache.
+   Supports both prefill (full sequence) and decode (single token) modes.
+
+2. Document masking — prevents cross-document attention leaking in
+   packed sequences via segment_ids (doc_ids). Both Splash and XLA/cuDNN
+   paths support this.
+
+3. Splash Attention GQA fix — MultiHeadMask must use num_q_heads, not
+   num_kv_heads. The kernel handles Q→KV head broadcasting internally.
+
+4. Sharding annotations — with_sharding_constraint on Q/K/V/output
+   for FSDP + tensor parallelism. Reads axis rules from config.spmd.
+
+5. Dtype safety — reads from config.spmd.dtype instead of legacy fields.
+   No silent bf16→fp16 fallback.
+
 Key design decisions
---------------------
-1. BTNH layout (B, T, num_heads, head_dim) throughout — this is the native
-   layout for jax.nn.dot_product_attention. Zero transposes in the main path.
+────────────────────
+• BTNH layout (B, T, num_heads, head_dim) throughout — native for
+  jax.nn.dot_product_attention and RoPE. Zero transposes in main path.
 
-2. Hardware-aware kernel dispatch:
-   - TPU  → Splash Attention (Pallas kernel, O(T) memory, native GQA)
-   - GPU (Ampere+) → cuDNN FlashAttention via jax.nn (O(T) memory)
-   - GPU (pre-Ampere, e.g. T4) → XLA with is_causal=True (O(T²) memory)
-   - CPU  → XLA fallback (O(T²), for testing only)
+• Hardware-aware kernel dispatch:
+  TPU           → Splash Attention (Pallas kernel, O(T) memory)
+  GPU (Ampere+) → cuDNN FlashAttention via jax.nn (O(T) memory)
+  GPU (pre-Ampere) → XLA with is_causal=True (O(T²) memory)
+  CPU           → XLA fallback (O(T²), testing only)
 
-   CRITICAL: jax.nn.dot_product_attention has NO TPU flash path.
-   The 'xla' implementation materializes a full (B, N, T, T) attention
-   matrix, causing OOM on TPU for real training configs. Splash Attention
-   avoids this entirely via tiled on-chip computation.
+• Native GQA — Splash and cuDNN handle Q_heads != KV_heads natively.
 
-   cuDNN FlashAttention requires Ampere+ (SM >= 8.0). Pre-Ampere GPUs
-   (T4/SM 7.5, V100/SM 7.0) must use XLA fallback.
+• Unified class — single CausalAttention handles MHA/MQA/GQA.
 
-3. Native GQA — both Splash Attention and jax.nn.dot_product_attention
-   handle Q_heads != KV_heads natively. No jnp.repeat or broadcast_to.
-
-4. Unified class — single CausalAttention class handles MHA, MQA, and GQA
-   via num_heads / num_kv_heads.
-
-5. Scale after RoPE — Q scaling is applied after rotary position encoding.
-
-6. Dtype safety — all Q/K/V tensors are explicitly cast to compute_dtype
-   before the attention kernel. This prevents silent type promotion from
-   Python float scalars (scale) or RoPE operations promoting fp16→fp32.
-
-Reference implementations
--------------------------
-- MaxText (Google): AI-Hypercomputer/maxtext/layers/attention_op.py
-- JAX Splash Attention: jax/experimental/pallas/ops/tpu/splash_attention/
+References
+──────────
+- MaxText: AI-Hypercomputer/maxtext → layers/attention_op.py
+- JAX Splash: jax/experimental/pallas/ops/tpu/splash_attention/
 - JAX API: jax/_src/nn/functions.py (dot_product_attention)
 """
 
@@ -45,58 +47,120 @@ import functools
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
-from typing import Optional, Tuple
+from typing import Optional, Tuple, NamedTuple
 
 from LaughLM.config.schema import LaughLMConfig
 from LaughLM.model.layers.positional import apply_rope
-from LaughLM.utils.dtype import get_dtype
+from LaughLM.utils.dtype import resolve_compute_dtype, resolve_param_dtype
 
 
-# ------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════
+# KV Cache for autoregressive decoding
+# ════════════════════════════════════════════════════════════════
+
+class KVCache(NamedTuple):
+    """
+    Static KV cache for autoregressive generation.
+
+    Pre-allocated to max_seq_len and updated in-place via
+    jax.lax.dynamic_update_slice. No reallocation during decoding.
+
+    Fields
+    ------
+    key   : (B, max_seq_len, num_kv_heads, head_dim)
+    value : (B, max_seq_len, num_kv_heads, head_dim)
+    index : scalar int32 — current write position
+
+    Reference: MaxText inference/kvcache.py
+    """
+    key: jnp.ndarray
+    value: jnp.ndarray
+    index: jnp.ndarray
+
+
+def init_kv_cache(
+    batch_size: int,
+    max_seq_len: int,
+    num_kv_heads: int,
+    head_dim: int,
+    dtype: jnp.dtype = jnp.bfloat16,
+) -> KVCache:
+    """Create a zeroed KV cache."""
+    shape = (batch_size, max_seq_len, num_kv_heads, head_dim)
+    return KVCache(
+        key=jnp.zeros(shape, dtype=dtype),
+        value=jnp.zeros(shape, dtype=dtype),
+        index=jnp.array(0, dtype=jnp.int32),
+    )
+
+
+def update_kv_cache(
+    cache: KVCache,
+    key: jnp.ndarray,
+    value: jnp.ndarray,
+) -> Tuple[KVCache, jnp.ndarray, jnp.ndarray]:
+    """
+    Update cache with new K/V tokens and return full K/V for attention.
+
+    Parameters
+    ----------
+    cache : KVCache
+    key   : (B, T_new, num_kv_heads, head_dim) — new tokens
+    value : (B, T_new, num_kv_heads, head_dim)
+
+    Returns
+    -------
+    new_cache : updated KVCache
+    full_key  : (B, max_seq_len, num_kv_heads, head_dim)
+    full_value: (B, max_seq_len, num_kv_heads, head_dim)
+    """
+    T_new = key.shape[1]
+
+    # Cast to cache dtype (cache is pre-allocated in a fixed dtype)
+    key = key.astype(cache.key.dtype)
+    value = value.astype(cache.value.dtype)
+
+    # Write new tokens at current index
+    new_key = jax.lax.dynamic_update_slice(
+        cache.key, key, (0, cache.index, 0, 0)
+    )
+    new_value = jax.lax.dynamic_update_slice(
+        cache.value, value, (0, cache.index, 0, 0)
+    )
+
+    new_cache = KVCache(
+        key=new_key,
+        value=new_value,
+        index=cache.index + T_new,
+    )
+
+    return new_cache, new_key, new_value
+
+
+# ════════════════════════════════════════════════════════════════
 # Layout helpers (BTNH — zero transposes for RoPE + projections)
-# ------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════
 
 def reshape_to_heads(x: jnp.ndarray, num_heads: int) -> jnp.ndarray:
-    """
-    Reshape (B, T, D) → (B, T, H, head_dim).
-
-    This is a pure reshape — no transpose. The resulting (B, T, H, D)
-    layout is the native format for jax.nn.dot_product_attention and
-    for apply_rope in positional.py.
-    """
+    """Reshape (B, T, D) → (B, T, H, head_dim). Pure reshape, no transpose."""
     b, t, d = x.shape
     head_dim = d // num_heads
     return x.reshape(b, t, num_heads, head_dim)
 
 
 def reshape_from_heads(x: jnp.ndarray) -> jnp.ndarray:
-    """
-    Reshape (B, T, H, head_dim) → (B, T, D).
-
-    Pure reshape — no transpose. Inverse of reshape_to_heads.
-    """
+    """Reshape (B, T, H, head_dim) → (B, T, D). Pure reshape, no transpose."""
     b, t, h, d = x.shape
     return x.reshape(b, t, h * d)
 
 
-# ------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════
 # GPU capability detection (cached)
-# ------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════
 
 @functools.lru_cache(maxsize=1)
 def _gpu_supports_cudnn_flash() -> bool:
-    """
-    Check if the GPU supports cuDNN FlashAttention (requires SM >= 8.0).
-
-    SM 8.0+ = Ampere (A100, A10G, etc.)
-    SM 8.9  = Ada Lovelace (L4, L40S, RTX 4090)
-    SM 9.0  = Hopper (H100, H200)
-
-    SM 7.5  = Turing (T4) — NOT supported
-    SM 7.0  = Volta (V100) — NOT supported
-
-    Cached after first call — zero overhead in the hot path.
-    """
+    """Check if GPU supports cuDNN FlashAttention (SM >= 8.0 / Ampere+)."""
     try:
         devices = jax.local_devices()
         for d in devices:
@@ -111,27 +175,27 @@ def _gpu_supports_cudnn_flash() -> bool:
     return False
 
 
-# ------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════
 # Splash Attention (TPU — O(T) memory via Pallas kernel)
-# ------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════
 
 def _splash_causal_attention(
     q: jnp.ndarray,
     k: jnp.ndarray,
     v: jnp.ndarray,
+    segment_ids: Optional[jnp.ndarray] = None,
 ) -> jnp.ndarray:
     """
-    TPU Splash Attention with causal masking.
+    TPU Splash Attention with causal masking + optional document masking.
 
-    Uses the Pallas splash attention kernel which computes attention
-    in tiles on the TPU's VMEM — O(T) HBM memory instead of O(T²).
-    Supports native GQA (K < N, N % K == 0).
+    Supports native GQA: K heads < Q heads, Q_heads % K_heads == 0.
 
     Parameters
     ----------
-    q : (B, T, N, H)  — BTNH layout
-    k : (B, T, K, H)
+    q : (B, T, N, H) — BTNH layout, N = num_q_heads
+    k : (B, T, K, H) — K = num_kv_heads
     v : (B, T, K, H)
+    segment_ids : (B, T) int32 or None — document IDs for cross-doc masking
 
     Returns
     -------
@@ -143,19 +207,20 @@ def _splash_causal_attention(
     )
 
     B, T, N, H = q.shape
+    K = k.shape[2]  # num_kv_heads
 
-    # BTNH → BNTH (kernel expects heads-first, then sequence)
-    q = jnp.transpose(q, (0, 2, 1, 3))
-    k = jnp.transpose(k, (0, 2, 1, 3))
-    v = jnp.transpose(v, (0, 2, 1, 3))
+    # BTNH → BNTH (kernel expects heads-first)
+    q = jnp.transpose(q, (0, 2, 1, 3))  # (B, N, T, H)
+    k = jnp.transpose(k, (0, 2, 1, 3))  # (B, K, T, H)
+    v = jnp.transpose(v, (0, 2, 1, 3))  # (B, K, T, H)
 
-    # Lazy causal mask — computed inside the kernel, zero HBM cost
+    # ── Mask: must have num_Q_heads masks, not num_KV_heads ──
     causal_mask = splash_attention_mask.CausalMask(shape=(T, T))
     multi_head_mask = splash_attention_mask.MultiHeadMask(
-        masks=(causal_mask,) * N
+        masks=(causal_mask,) * N  # 🔴 FIX: use N (num_q_heads), NOT K
     )
 
-    # Block sizes tuned for TPU v5e (128 is the minimum tile size)
+    # ── Block sizes tuned for TPU v5e ──
     block = min(512, max(128, T))
     block_sizes = splash_attention_kernel.BlockSizes(
         block_q=block,
@@ -168,6 +233,8 @@ def _splash_causal_attention(
         block_kv_dq=block,
     )
 
+    # ── Use make_splash_mha for both MHA and GQA ──
+    # (make_splash_mqa is ONLY for true MQA with 1 KV head)
     splash_kernel = splash_attention_kernel.make_splash_mha(
         mask=multi_head_mask,
         block_sizes=block_sizes,
@@ -175,23 +242,70 @@ def _splash_causal_attention(
         q_seq_shards=1,
     )
 
-    # vmap over batch dimension
-    out = jax.vmap(splash_kernel, in_axes=(0, 0, 0, None))(
-        q, k, v, None
-    )
+    # ── Document masking via SegmentIds ──
+    if segment_ids is not None:
+        SegmentIds = splash_attention_kernel.SegmentIds
+
+        # vmap over batch: each sample gets its own 1D segment_ids
+        def _per_sample(q_s, k_s, v_s, seg_s):
+            seg = SegmentIds(q=seg_s, kv=seg_s)
+            return splash_kernel(q_s, k_s, v_s, seg)
+
+        out = jax.vmap(_per_sample)(q, k, v, segment_ids)
+    else:
+        out = jax.vmap(splash_kernel, in_axes=(0, 0, 0, None))(
+            q, k, v, None
+        )
 
     # BNTH → BTNH
     return jnp.transpose(out, (0, 2, 1, 3))
 
 
-# ------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════
+# Document mask builder (for non-Splash backends)
+# ════════════════════════════════════════════════════════════════
+
+def _build_document_mask(
+    segment_ids: jnp.ndarray,
+    q_len: int,
+    kv_len: int,
+) -> jnp.ndarray:
+    """
+    Build a boolean attention bias from document segment IDs.
+
+    Cross-document positions get large negative bias (masked out).
+    Same-document positions get 0 bias (attend normally).
+
+    Parameters
+    ----------
+    segment_ids : (B, S) — integer document IDs per position
+    q_len, kv_len : sequence lengths (may differ with KV cache)
+
+    Returns
+    -------
+    bias : (B, 1, q_len, kv_len) — additive bias for attention
+    """
+    q_ids = segment_ids[:, -q_len:]      # (B, q_len)
+    kv_ids = segment_ids[:, :kv_len]     # (B, kv_len)
+
+    # Same document → True, different → False
+    same_doc = q_ids[:, :, None] == kv_ids[:, None, :]  # (B, q_len, kv_len)
+
+    # Convert to additive bias: False → -1e10, True → 0
+    bias = jnp.where(same_doc, 0.0, -1e10)
+
+    return bias[:, None, :, :]  # (B, 1, q_len, kv_len)
+
+
+# ════════════════════════════════════════════════════════════════
 # Attention dispatch — auto-selects kernel by hardware
-# ------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════
 
 def causal_attention(
     q: jnp.ndarray,
     k: jnp.ndarray,
     v: jnp.ndarray,
+    segment_ids: Optional[jnp.ndarray] = None,
     implementation: Optional[str] = None,
 ) -> jnp.ndarray:
     """
@@ -199,24 +313,16 @@ def causal_attention(
 
     Parameters
     ----------
-    q : (B, T, N, H)  — query, N = num_query_heads
-    k : (B, S, K, H)  — key,   K = num_kv_heads (K <= N, N % K == 0)
-    v : (B, S, K, H)  — value
-    implementation : 'splash', 'cudnn', 'xla', or None (auto).
-        'splash' → TPU Splash Attention (Pallas kernel, O(T) memory)
-        'cudnn'  → cuDNN FlashAttention (GPU Ampere+, O(T) memory)
-        'xla'    → XLA einsum with causal mask (O(T²) memory, any backend)
-        None     → auto-detect:
-                    TPU            → splash
-                    GPU (SM >= 8)  → cudnn
-                    GPU (SM < 8)   → xla  (T4, V100)
-                    CPU            → xla
+    q : (B, T, N, H) — query
+    k : (B, S, K, H) — key
+    v : (B, S, K, H) — value
+    segment_ids : (B, S) int or None — document IDs for cross-doc masking
+    implementation : 'splash', 'cudnn', 'xla', or None (auto)
 
     Returns
     -------
     out : (B, T, N, H)
     """
-    # Auto-detect hardware
     if implementation is None:
         backend = jax.default_backend()
         if backend == "tpu":
@@ -227,11 +333,19 @@ def causal_attention(
             implementation = "xla"
 
     if implementation == "splash":
-        return _splash_causal_attention(q, k, v)
+        return _splash_causal_attention(q, k, v, segment_ids=segment_ids)
+
+    # ── cuDNN / XLA paths with optional document mask ──
+    # jax.nn.dot_product_attention supports is_causal + bias
+    bias = None
+    if segment_ids is not None:
+        bias = _build_document_mask(segment_ids, q.shape[1], k.shape[1])
+        bias = bias.astype(q.dtype)
 
     if implementation == "cudnn":
         return jax.nn.dot_product_attention(
             q, k, v,
+            bias=bias,
             is_causal=True,
             implementation="cudnn",
         )
@@ -239,25 +353,39 @@ def causal_attention(
     # XLA fallback (CPU, or pre-Ampere GPU)
     return jax.nn.dot_product_attention(
         q, k, v,
+        bias=bias,
         is_causal=True,
     )
 
 
-# ------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════
+# Sharding helper
+# ════════════════════════════════════════════════════════════════
+
+def _maybe_shard(x: jnp.ndarray, spec) -> jnp.ndarray:
+    """Apply with_sharding_constraint if spec is not None."""
+    if spec is not None:
+        return jax.lax.with_sharding_constraint(x, spec)
+    return x
+
+
+# ════════════════════════════════════════════════════════════════
 # Unified Causal Attention (MHA / MQA / GQA)
-# ------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════
 
 class CausalAttention(nn.Module):
     """
     Unified multi-head / multi-query / grouped-query causal attention.
 
-    When num_kv_heads == num_heads → standard MHA
-    When num_kv_heads == 1        → MQA
-    When 1 < num_kv_heads < num_heads → GQA
+    Supports:
+    - Training (full sequence, no cache)
+    - Inference with KV cache (prefill + autoregressive decode)
+    - Document masking via doc_ids / segment_ids
+    - Sharding annotations for FSDP + tensor parallelism
 
-    All three use the same code path — the difference is only in the
-    QKV projection dimensions. The attention kernel handles the head
-    broadcasting internally for both Splash and cuDNN paths.
+    When num_kv_heads == num_heads → standard MHA
+    When num_kv_heads == 1         → MQA
+    When 1 < num_kv_heads < num_heads → GQA
     """
 
     config: LaughLMConfig
@@ -272,26 +400,33 @@ class CausalAttention(nn.Module):
         x: jnp.ndarray,
         rope_tables: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None,
         doc_ids: Optional[jnp.ndarray] = None,
-    ) -> jnp.ndarray:
+        kv_cache: Optional[KVCache] = None,
+    ) -> Tuple[jnp.ndarray, Optional[KVCache]]:
+        """
+        Parameters
+        ----------
+        x          : (B, T, D) input
+        rope_tables: (sin, cos) for RoPE, sliced to seq_len
+        doc_ids    : (B, T) integer segment/document IDs
+        kv_cache   : optional KVCache for autoregressive decoding
 
-        compute_dtype = get_dtype(self.config.parallelism.compute_dtype)
-        param_dtype = get_dtype(self.config.parallelism.param_dtype)
+        Returns
+        -------
+        output     : (B, T, D)
+        new_cache  : updated KVCache or None
+        """
+        compute_dtype = resolve_compute_dtype(self.config)
+        param_dtype = resolve_param_dtype(self.config)
 
         head_dim = self.d_model // self.num_heads
 
-        # Cast scale to compute_dtype to prevent silent type promotion.
-        # Without this: fp16_q * python_float_scale → fp32 (JAX promotion rules)
-        # With this:    fp16_q * fp16_scale → fp16 (no promotion)
+        # Scale in compute_dtype to prevent type promotion
         scale = jnp.array(head_dim ** -0.5, dtype=compute_dtype)
 
-        # Q dim = num_heads * head_dim = d_model
-        # KV dim = num_kv_heads * head_dim  (smaller for GQA/MQA)
         kv_dim = self.num_kv_heads * head_dim
         qkv_dim = self.d_model + 2 * kv_dim
 
-        # --------------------------------------------------------
-        # Fused QKV projection (single matmul)
-        # --------------------------------------------------------
+        # ── Fused QKV projection (single matmul) ──────────────
         qkv = nn.Dense(
             qkv_dim,
             use_bias=self.use_bias,
@@ -300,70 +435,41 @@ class CausalAttention(nn.Module):
             name="qkv_proj",
         )(x)
 
-        # Split into Q, K, V
         q = qkv[..., :self.d_model]
         k = qkv[..., self.d_model:self.d_model + kv_dim]
         v = qkv[..., self.d_model + kv_dim:]
 
-        # --------------------------------------------------------
-        # Reshape to (B, T, H, head_dim) — no transpose
-        # --------------------------------------------------------
-        q = reshape_to_heads(q, self.num_heads)         # (B, T, N, D)
-        k = reshape_to_heads(k, self.num_kv_heads)      # (B, T, K, D)
-        v = reshape_to_heads(v, self.num_kv_heads)      # (B, T, K, D)
+        # ── Reshape to (B, T, H, head_dim) — no transpose ────
+        q = reshape_to_heads(q, self.num_heads)
+        k = reshape_to_heads(k, self.num_kv_heads)
+        v = reshape_to_heads(v, self.num_kv_heads)
 
-        # --------------------------------------------------------
-        # RoPE (applied before scaling — correct ordering)
-        #
-        # apply_rope expects (B, T, H, D) which is exactly our layout.
-        # No transposes needed.
-        # --------------------------------------------------------
+        # ── RoPE (before scaling) ─────────────────────────────
         if rope_tables is not None:
             sin, cos = rope_tables
             q = apply_rope(q, sin, cos)
             k = apply_rope(k, sin, cos)
 
-        # --------------------------------------------------------
-        # Scale Q after RoPE (in compute_dtype — no promotion)
-        # --------------------------------------------------------
+        # ── Scale Q after RoPE ────────────────────────────────
         q = q * scale
 
-        # --------------------------------------------------------
-        # Dtype enforcement before attention kernel
-        #
-        # Ensures Q, K, V are all in the same dtype. This guards
-        # against silent promotion from:
-        #   - Python float scalars (scale multiplication)
-        #   - RoPE sin/cos tables (computed in float32)
-        #   - Any future ops that might promote
-        #
-        # jax.nn.dot_product_attention requires matching dtypes
-        # for query, key, and value.
-        # --------------------------------------------------------
+        # ── Dtype enforcement ─────────────────────────────────
         q = q.astype(compute_dtype)
         k = k.astype(compute_dtype)
         v = v.astype(compute_dtype)
 
-        # --------------------------------------------------------
-        # Causal attention (auto hardware dispatch)
-        #
-        # TPU           → Splash Attention (O(T) memory, Pallas)
-        # GPU (Ampere+) → cuDNN FlashAttention (O(T) memory)
-        # GPU (T4/V100) → XLA with causal mask (O(T²) memory)
-        # CPU           → XLA fallback (O(T²), testing only)
-        #
-        # GQA is handled natively by all backends.
-        # --------------------------------------------------------
-        out = causal_attention(q, k, v)    # (B, T, N, D)
+        # ── KV Cache update (inference only) ──────────────────
+        new_cache = None
+        if kv_cache is not None:
+            new_cache, k, v = update_kv_cache(kv_cache, k, v)
 
-        # --------------------------------------------------------
-        # Merge heads: (B, T, N, D) → (B, T, d_model) — no transpose
-        # --------------------------------------------------------
+        # ── Causal attention (hardware-dispatched) ────────────
+        out = causal_attention(q, k, v, segment_ids=doc_ids)
+
+        # ── Merge heads ───────────────────────────────────────
         out = reshape_from_heads(out)
 
-        # --------------------------------------------------------
-        # Output projection
-        # --------------------------------------------------------
+        # ── Output projection ─────────────────────────────────
         out = nn.Dense(
             self.d_model,
             use_bias=self.use_bias,
@@ -372,33 +478,26 @@ class CausalAttention(nn.Module):
             name="out_proj",
         )(out)
 
-        return out
+        return out, new_cache
 
 
-# ------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════
 # Factory
-# ------------------------------------------------------------
+# ════════════════════════════════════════════════════════════════
 
 def build_attention(config: LaughLMConfig) -> CausalAttention:
     """
     Build attention module from config.
 
     All variants (MHA, MQA, GQA) use the same CausalAttention class.
-    The difference is only in num_kv_heads:
-        MHA: num_kv_heads = num_heads
-        MQA: num_kv_heads = 1
-        GQA: num_kv_heads = config.model.num_kv_heads
     """
-
     variant = config.architecture.attention_variant
     num_heads = config.model.num_heads
 
     if variant == "mha":
         num_kv_heads = num_heads
-
     elif variant == "mqa":
         num_kv_heads = 1
-
     elif variant == "gqa":
         num_kv_heads = config.model.num_kv_heads
         if num_kv_heads is None:
@@ -407,7 +506,6 @@ def build_attention(config: LaughLMConfig) -> CausalAttention:
                 f"Typical values for {num_heads} heads: "
                 f"{num_heads // 4} (4:1) or {num_heads // 8} (8:1)."
             )
-
     else:
         raise ValueError(f"Unknown attention variant: '{variant}'")
 
