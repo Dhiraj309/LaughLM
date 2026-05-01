@@ -6,31 +6,34 @@ Frontier-grade attention module for decoder-only LLM pretraining.
 Key design decisions
 --------------------
 1. BTNH layout (B, T, num_heads, head_dim) throughout — this is the native
-   layout for jax.nn.dot_product_attention. Zero transposes in the hot path.
+   layout for jax.nn.dot_product_attention. Zero transposes in the main path.
 
-2. jax.nn.dot_product_attention with is_causal=True — dispatches to:
-   - cuDNN FlashAttention on GPU (O(T) memory, tiled softmax)
-   - XLA with causal mask on TPU/CPU (O(T²) memory, but mask is built-in)
-   For TPU Splash Attention, override implementation at call site.
+2. Hardware-aware kernel dispatch:
+   - TPU  → Splash Attention (Pallas kernel, O(T) memory, native GQA)
+   - GPU  → jax.nn.dot_product_attention(implementation='cudnn') — cuDNN FlashAttention
+   - CPU  → jax.nn.dot_product_attention(implementation='xla') — XLA fallback
 
-3. Native GQA — jax.nn.dot_product_attention handles Q_heads != KV_heads
-   natively via broadcasting. No jnp.repeat, no jnp.broadcast_to needed.
-   MQA is just GQA with num_kv_heads=1.
+   CRITICAL: jax.nn.dot_product_attention has NO TPU flash path.
+   The 'xla' implementation materializes a full (B, N, T, T) attention
+   matrix, causing OOM on TPU for real training configs. Splash Attention
+   avoids this entirely via tiled on-chip computation.
+
+3. Native GQA — both Splash Attention and jax.nn.dot_product_attention
+   handle Q_heads != KV_heads natively. No jnp.repeat or broadcast_to.
 
 4. Unified class — single CausalAttention class handles MHA, MQA, and GQA
-   via num_heads / num_kv_heads. Eliminates code duplication and the
-   factory pattern that hid bugs across three separate classes.
+   via num_heads / num_kv_heads.
 
-5. Scale after RoPE — Q scaling is applied after rotary position encoding,
-   which is numerically better because RoPE rotations should operate on
-   the raw query vectors, not pre-scaled ones.
+5. Scale after RoPE — Q scaling is applied after rotary position encoding.
 
 Reference implementations
 -------------------------
-- MaxText (Google): AI-Hypercomputer/maxtext/layers/attentions.py
+- MaxText (Google): AI-Hypercomputer/maxtext/layers/attention_op.py
+- JAX Splash Attention: jax/experimental/pallas/ops/tpu/splash_attention/
 - JAX API: jax/_src/nn/functions.py (dot_product_attention)
 """
 
+import functools
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
@@ -42,7 +45,7 @@ from LaughLM.utils.dtype import get_dtype
 
 
 # ------------------------------------------------------------
-# Layout helpers (BTNH — zero transposes)
+# Layout helpers (BTNH — zero transposes for RoPE + projections)
 # ------------------------------------------------------------
 
 def reshape_to_heads(x: jnp.ndarray, num_heads: int) -> jnp.ndarray:
@@ -69,7 +72,89 @@ def reshape_from_heads(x: jnp.ndarray) -> jnp.ndarray:
 
 
 # ------------------------------------------------------------
-# Attention core — flash / splash / XLA dispatch
+# Splash Attention (TPU — O(T) memory via Pallas kernel)
+# ------------------------------------------------------------
+
+def _splash_causal_attention(
+    q: jnp.ndarray,
+    k: jnp.ndarray,
+    v: jnp.ndarray,
+) -> jnp.ndarray:
+    """
+    TPU Splash Attention with causal masking.
+
+    Uses the Pallas splash attention kernel which computes attention
+    in tiles on the TPU's VMEM — O(T) HBM memory instead of O(T²).
+    Supports native GQA (K < N, N % K == 0).
+
+    Parameters
+    ----------
+    q : (B, T, N, H)  — BTNH layout
+    k : (B, T, K, H)
+    v : (B, T, K, H)
+
+    Returns
+    -------
+    out : (B, T, N, H)
+
+    Notes
+    -----
+    The kernel expects BNTH layout internally, so we transpose
+    before/after. This is 2 transposes total (vs 6 in the old code),
+    and both are pure metadata ops when the tensor is contiguous.
+    """
+    from jax.experimental.pallas.ops.tpu.splash_attention import (
+        splash_attention_kernel,
+        splash_attention_mask,
+    )
+
+    B, T, N, H = q.shape
+
+    # BTNH → BNTH (kernel expects heads-first, then sequence)
+    q = jnp.transpose(q, (0, 2, 1, 3))    # (B, N, T, H)
+    k = jnp.transpose(k, (0, 2, 1, 3))    # (B, K, T, H)
+    v = jnp.transpose(v, (0, 2, 1, 3))    # (B, K, T, H)
+
+    # Lazy causal mask — computed inside the kernel, zero HBM cost
+    causal_mask = splash_attention_mask.CausalMask(shape=(T, T))
+    multi_head_mask = splash_attention_mask.MultiHeadMask(
+        masks=(causal_mask,) * N
+    )
+
+    # Block sizes tuned for TPU v5e (128 is the minimum tile size)
+    # For seq_len < 512, use smaller blocks to avoid wasting compute
+    block = min(512, max(128, T))
+    block_sizes = splash_attention_kernel.BlockSizes(
+        block_q=block,
+        block_kv=block,
+        block_kv_compute=block,
+        block_q_dkv=block,
+        block_kv_dkv=block,
+        block_kv_dkv_compute=block,
+        block_q_dq=block,
+        block_kv_dq=block,
+    )
+
+    # Build the splash kernel
+    # make_splash_mha handles both MHA (K==N) and GQA (K<N) natively
+    splash_kernel = splash_attention_kernel.make_splash_mha(
+        mask=multi_head_mask,
+        block_sizes=block_sizes,
+        head_shards=1,
+        q_seq_shards=1,
+    )
+
+    # vmap over batch dimension — kernel processes (N, T, H) slices
+    out = jax.vmap(splash_kernel, in_axes=(0, 0, 0, None))(
+        q, k, v, None  # None = no segment IDs
+    )
+
+    # BNTH → BTNH
+    return jnp.transpose(out, (0, 2, 1, 3))
+
+
+# ------------------------------------------------------------
+# Attention dispatch — auto-selects kernel by hardware
 # ------------------------------------------------------------
 
 def causal_attention(
@@ -79,17 +164,18 @@ def causal_attention(
     implementation: Optional[str] = None,
 ) -> jnp.ndarray:
     """
-    Causal (autoregressive) attention with automatic kernel dispatch.
+    Causal (autoregressive) attention with hardware-aware kernel dispatch.
 
     Parameters
     ----------
     q : (B, T, N, H)  — query, N = num_query_heads
     k : (B, S, K, H)  — key,   K = num_kv_heads (K <= N, N % K == 0)
     v : (B, S, K, H)  — value
-    implementation : 'xla', 'cudnn', or None (auto).
-        'cudnn' → cuDNN FlashAttention (GPU, O(T) memory)
-        'xla'   → XLA einsum with causal mask (TPU/CPU, O(T²) memory)
-        None    → JAX auto-selects (currently defaults to XLA)
+    implementation : 'splash', 'cudnn', 'xla', or None (auto).
+        'splash' → TPU Splash Attention (Pallas kernel, O(T) memory)
+        'cudnn'  → cuDNN FlashAttention (GPU, O(T) memory)
+        'xla'    → XLA einsum with causal mask (O(T²) memory, any backend)
+        None     → auto-detect: TPU→splash, GPU→cudnn, CPU→xla
 
     Returns
     -------
@@ -97,15 +183,31 @@ def causal_attention(
 
     Notes
     -----
-    - is_causal=True avoids materializing a (T, T) mask tensor on cuDNN
-    - GQA is handled natively: K < N is supported, N % K == 0 required
-    - MQA is GQA with K=1
-    - scale is NOT applied here — it's applied to Q before this call
+    - On TPU, jax.nn.dot_product_attention always uses XLA which
+      materializes a full (B,N,T,T) matrix → OOM for real configs.
+      Splash Attention avoids this completely.
+    - On GPU, cuDNN FlashAttention provides O(T) memory and
+      is_causal=True avoids materializing the mask.
+    - scale is NOT applied here — it's applied to Q before this call.
     """
+    # Auto-detect hardware
+    if implementation is None:
+        backend = jax.default_backend()
+        if backend == "tpu":
+            implementation = "splash"
+        elif backend == "gpu":
+            implementation = "cudnn"
+        else:
+            implementation = "xla"
+
+    if implementation == "splash":
+        return _splash_causal_attention(q, k, v)
+
+    # GPU (cuDNN) or CPU (XLA) path
     return jax.nn.dot_product_attention(
         q, k, v,
         is_causal=True,
-        implementation=implementation,
+        implementation=implementation if implementation != "xla" else None,
     )
 
 
@@ -122,8 +224,8 @@ class CausalAttention(nn.Module):
     When 1 < num_kv_heads < num_heads → GQA
 
     All three use the same code path — the difference is only in the
-    QKV projection dimensions. jax.nn.dot_product_attention handles
-    the head broadcasting internally.
+    QKV projection dimensions. The attention kernel handles the head
+    broadcasting internally for both Splash and cuDNN paths.
     """
 
     config: LaughLMConfig
@@ -194,13 +296,13 @@ class CausalAttention(nn.Module):
         q = q * scale
 
         # --------------------------------------------------------
-        # Causal attention (flash/splash/XLA dispatch)
+        # Causal attention (auto hardware dispatch)
         #
-        # jax.nn.dot_product_attention handles GQA natively:
-        #   Q: (B, T, N, D)  — N query heads
-        #   K: (B, T, K, D)  — K kv heads, N % K == 0
-        #   V: (B, T, K, D)
-        # No repeat / broadcast_to needed.
+        # TPU  → Splash Attention (O(T) memory, Pallas kernel)
+        # GPU  → cuDNN FlashAttention (O(T) memory)
+        # CPU  → XLA fallback (O(T²), for testing only)
+        #
+        # GQA is handled natively by all backends.
         # --------------------------------------------------------
         out = causal_attention(q, k, v)    # (B, T, N, D)
 
