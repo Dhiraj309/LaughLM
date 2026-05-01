@@ -10,13 +10,17 @@ Key design decisions
 
 2. Hardware-aware kernel dispatch:
    - TPU  → Splash Attention (Pallas kernel, O(T) memory, native GQA)
-   - GPU  → jax.nn.dot_product_attention(implementation='cudnn') — cuDNN FlashAttention
-   - CPU  → jax.nn.dot_product_attention(implementation='xla') — XLA fallback
+   - GPU (Ampere+) → cuDNN FlashAttention via jax.nn (O(T) memory)
+   - GPU (pre-Ampere, e.g. T4) → XLA with is_causal=True (O(T²) memory)
+   - CPU  → XLA fallback (O(T²), for testing only)
 
    CRITICAL: jax.nn.dot_product_attention has NO TPU flash path.
    The 'xla' implementation materializes a full (B, N, T, T) attention
    matrix, causing OOM on TPU for real training configs. Splash Attention
    avoids this entirely via tiled on-chip computation.
+
+   cuDNN FlashAttention requires Ampere+ (SM >= 8.0). Pre-Ampere GPUs
+   (T4/SM 7.5, V100/SM 7.0) must use XLA fallback.
 
 3. Native GQA — both Splash Attention and jax.nn.dot_product_attention
    handle Q_heads != KV_heads natively. No jnp.repeat or broadcast_to.
@@ -69,6 +73,40 @@ def reshape_from_heads(x: jnp.ndarray) -> jnp.ndarray:
     """
     b, t, h, d = x.shape
     return x.reshape(b, t, h * d)
+
+
+# ------------------------------------------------------------
+# GPU capability detection (cached)
+# ------------------------------------------------------------
+
+@functools.lru_cache(maxsize=1)
+def _gpu_supports_cudnn_flash() -> bool:
+    """
+    Check if the GPU supports cuDNN FlashAttention (requires SM >= 8.0).
+
+    SM 8.0+ = Ampere (A100, A10G, etc.)
+    SM 8.9  = Ada Lovelace (L4, L40S, RTX 4090)
+    SM 9.0  = Hopper (H100, H200)
+
+    SM 7.5  = Turing (T4) — NOT supported
+    SM 7.0  = Volta (V100) — NOT supported
+
+    Cached after first call — zero overhead in the hot path.
+    """
+    try:
+        devices = jax.local_devices()
+        for d in devices:
+            if d.platform == "gpu":
+                # compute_capability returns e.g. "7.5", "8.0", "9.0"
+                cc = getattr(d, "compute_capability", None)
+                if cc is not None:
+                    major = int(str(cc).split(".")[0])
+                    return major >= 8
+                # If compute_capability is not available, be conservative
+                return False
+    except Exception:
+        pass
+    return False
 
 
 # ------------------------------------------------------------
@@ -173,9 +211,13 @@ def causal_attention(
     v : (B, S, K, H)  — value
     implementation : 'splash', 'cudnn', 'xla', or None (auto).
         'splash' → TPU Splash Attention (Pallas kernel, O(T) memory)
-        'cudnn'  → cuDNN FlashAttention (GPU, O(T) memory)
+        'cudnn'  → cuDNN FlashAttention (GPU Ampere+, O(T) memory)
         'xla'    → XLA einsum with causal mask (O(T²) memory, any backend)
-        None     → auto-detect: TPU→splash, GPU→cudnn, CPU→xla
+        None     → auto-detect:
+                    TPU            → splash
+                    GPU (SM >= 8)  → cudnn
+                    GPU (SM < 8)   → xla  (T4, V100)
+                    CPU            → xla
 
     Returns
     -------
@@ -186,8 +228,9 @@ def causal_attention(
     - On TPU, jax.nn.dot_product_attention always uses XLA which
       materializes a full (B,N,T,T) matrix → OOM for real configs.
       Splash Attention avoids this completely.
-    - On GPU, cuDNN FlashAttention provides O(T) memory and
-      is_causal=True avoids materializing the mask.
+    - On GPU Ampere+, cuDNN FlashAttention provides O(T) memory.
+    - On GPU pre-Ampere (T4, V100), cuDNN flash is not supported.
+      Falls back to XLA which materializes the mask but works correctly.
     - scale is NOT applied here — it's applied to Q before this call.
     """
     # Auto-detect hardware
@@ -196,18 +239,27 @@ def causal_attention(
         if backend == "tpu":
             implementation = "splash"
         elif backend == "gpu":
-            implementation = "cudnn"
+            # cuDNN FlashAttention requires Ampere+ (SM >= 8.0)
+            # T4 (SM 7.5), V100 (SM 7.0) must use XLA fallback
+            implementation = "cudnn" if _gpu_supports_cudnn_flash() else "xla"
         else:
             implementation = "xla"
 
     if implementation == "splash":
         return _splash_causal_attention(q, k, v)
 
-    # GPU (cuDNN) or CPU (XLA) path
+    if implementation == "cudnn":
+        return jax.nn.dot_product_attention(
+            q, k, v,
+            is_causal=True,
+            implementation="cudnn",
+        )
+
+    # XLA fallback (CPU, or pre-Ampere GPU)
+    # implementation=None lets JAX use its default XLA path
     return jax.nn.dot_product_attention(
         q, k, v,
         is_causal=True,
-        implementation=implementation if implementation != "xla" else None,
     )
 
 
@@ -298,9 +350,10 @@ class CausalAttention(nn.Module):
         # --------------------------------------------------------
         # Causal attention (auto hardware dispatch)
         #
-        # TPU  → Splash Attention (O(T) memory, Pallas kernel)
-        # GPU  → cuDNN FlashAttention (O(T) memory)
-        # CPU  → XLA fallback (O(T²), for testing only)
+        # TPU           → Splash Attention (O(T) memory, Pallas)
+        # GPU (Ampere+) → cuDNN FlashAttention (O(T) memory)
+        # GPU (T4/V100) → XLA with causal mask (O(T²) memory)
+        # CPU           → XLA fallback (O(T²), testing only)
         #
         # GQA is handled natively by all backends.
         # --------------------------------------------------------
