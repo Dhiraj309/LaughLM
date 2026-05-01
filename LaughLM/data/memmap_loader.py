@@ -1,23 +1,43 @@
+"""
+LaughLM/data/memmap_loader.py
+
+High-throughput dataset loader for token shards.
+
+Frontier-grade changes (perf/frontier-optim):
+──────────────────────────────────────────────
+1. Multi-host awareness — process_index and process_count parameters
+   allow each JAX process (host) to read a disjoint subset of shards.
+   This prevents data duplication in multi-node training.
+
+2. Seed offset per host — each host gets a unique random seed derived
+   from (base_seed + process_index) to avoid correlated sampling.
+
+3. Existing features preserved:
+   - Memory-mapped shards for zero-copy reads
+   - Vectorized batch sampling (no Python loops)
+   - Infinite iterator
+   - Shard-grouped IO for sequential access
+
+Reference: MaxText uses grain-based data pipeline with per-host sharding.
+For memmap datasets, per-host shard assignment is sufficient.
+"""
+
 import numpy as np
-from typing import List
+from typing import List, Optional
 
 
 class MemmapDataset:
     """
-    High-throughput dataset loader for token shards.
+    High-throughput dataset loader for pre-tokenized binary shards.
 
-    Features
-    --------
-    • memory-mapped shards
-    • random sequence sampling
-    • multi-shard support
-    • infinite iterator
-    • vectorized batch sampling (no Python loops)
-
-    IMPORTANT
-    ---------
-    batch_size MUST be GLOBAL batch size:
-        = micro_batch_per_device * num_devices
+    Parameters
+    ----------
+    paths : str or list of str — paths to .bin shard files
+    seq_len : int — sequence length per sample
+    batch_size : int — GLOBAL batch size (micro_batch * num_devices)
+    seed : int — random seed for reproducibility
+    process_index : int — this host's index (0 for single-host)
+    process_count : int — total number of hosts (1 for single-host)
     """
 
     def __init__(
@@ -26,10 +46,22 @@ class MemmapDataset:
         seq_len: int,
         batch_size: int,
         seed: int = 42,
+        process_index: int = 0,
+        process_count: int = 1,
     ):
-
         if isinstance(paths, str):
             paths = [paths]
+
+        # ── Multi-host shard assignment ───────────────────────
+        # Each host gets a disjoint subset of shards. If fewer
+        # shards than hosts, all hosts share all shards but use
+        # different random seeds to avoid duplicate sequences.
+        if process_count > 1 and len(paths) >= process_count:
+            # Round-robin shard assignment
+            paths = [p for i, p in enumerate(paths) if i % process_count == process_index]
+            print(f"[dataset] Host {process_index}/{process_count}: assigned {len(paths)} shards")
+        elif process_count > 1:
+            print(f"[dataset] Host {process_index}/{process_count}: sharing all {len(paths)} shards (fewer shards than hosts)")
 
         self.shards = [
             np.memmap(p, dtype=np.uint16, mode="r")
@@ -42,28 +74,24 @@ class MemmapDataset:
         self.seq_len = seq_len
         self.batch_size = batch_size
 
-        self.rng = np.random.default_rng(seed)
+        # Per-host seed to avoid correlated sampling across hosts
+        self.rng = np.random.default_rng(seed + process_index)
 
-        # ✅ PRECOMPUTE OFFSETS (avoid realloc every step)
+        # Precompute offsets (avoid realloc every step)
         self._seq_offsets = np.arange(self.seq_len)
 
-        # ✅ SANITY CHECK (prevents silent TPU underfeeding bug)
         if self.batch_size <= 0:
             raise ValueError("batch_size must be > 0")
 
         print(
-            f"Loaded dataset with {self.total_tokens:,} tokens "
-            f"across {len(self.shards)} shards"
+            f"[dataset] {self.total_tokens:,} tokens across {len(self.shards)} shards"
         )
         print(f"[dataset] batch_size (GLOBAL): {self.batch_size:,}")
 
-    # ------------------------------------------------------------
-    # Sample batch
-    # ------------------------------------------------------------
-
     def sample_batch(self):
+        """Sample a random batch of sequences from shards."""
 
-        # ✅ SAMPLE WHICH SHARD EACH ROW COMES FROM
+        # Sample which shard each row comes from
         shard_ids = self.rng.integers(
             0,
             len(self.shards),
@@ -72,17 +100,17 @@ class MemmapDataset:
 
         lengths = np.take(self.shard_lengths, shard_ids)
 
-        # ✅ FIX: avoid negative offsets (edge-case safety)
+        # Avoid negative offsets
         max_offsets = lengths - self.seq_len - 1
         max_offsets = np.maximum(max_offsets, 1)
 
-        # ✅ VECTORISED RANDOM START POSITIONS
+        # Vectorised random start positions
         ix = (self.rng.random(self.batch_size) * max_offsets).astype(np.int64)
 
-        # ✅ BUILD FULL SEQUENCE INDICES
+        # Build full sequence indices
         indices = ix[:, None] + self._seq_offsets[None, :]
 
-        # GROUP BY SHARD (minimise random IO)
+        # Group by shard (minimize random IO)
         unique_shards, inverse = np.unique(shard_ids, return_inverse=True)
 
         x = np.empty((self.batch_size, self.seq_len), dtype=np.uint16)
@@ -95,17 +123,13 @@ class MemmapDataset:
 
             shard_indices = indices[mask]
 
-            # ✅ FAST GATHER FROM MEMMAP
+            # Fast gather from memmap
             x[mask] = self.shards[shard_id][shard_indices]
 
-        # ✅ CRITICAL: contiguous + int32 for JAX
+        # Contiguous + int32 for JAX
         return np.ascontiguousarray(x, dtype=np.int32)
 
-    # ------------------------------------------------------------
-    # Infinite iterator
-    # ------------------------------------------------------------
-
     def __iter__(self):
-
+        """Infinite iterator."""
         while True:
             yield self.sample_batch()
