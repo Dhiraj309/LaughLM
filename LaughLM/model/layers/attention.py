@@ -30,6 +30,10 @@ Key design decisions
 
 5. Scale after RoPE — Q scaling is applied after rotary position encoding.
 
+6. Dtype safety — all Q/K/V tensors are explicitly cast to compute_dtype
+   before the attention kernel. This prevents silent type promotion from
+   Python float scalars (scale) or RoPE operations promoting fp16→fp32.
+
 Reference implementations
 -------------------------
 - MaxText (Google): AI-Hypercomputer/maxtext/layers/attention_op.py
@@ -97,12 +101,10 @@ def _gpu_supports_cudnn_flash() -> bool:
         devices = jax.local_devices()
         for d in devices:
             if d.platform == "gpu":
-                # compute_capability returns e.g. "7.5", "8.0", "9.0"
                 cc = getattr(d, "compute_capability", None)
                 if cc is not None:
                     major = int(str(cc).split(".")[0])
                     return major >= 8
-                # If compute_capability is not available, be conservative
                 return False
     except Exception:
         pass
@@ -134,12 +136,6 @@ def _splash_causal_attention(
     Returns
     -------
     out : (B, T, N, H)
-
-    Notes
-    -----
-    The kernel expects BNTH layout internally, so we transpose
-    before/after. This is 2 transposes total (vs 6 in the old code),
-    and both are pure metadata ops when the tensor is contiguous.
     """
     from jax.experimental.pallas.ops.tpu.splash_attention import (
         splash_attention_kernel,
@@ -149,9 +145,9 @@ def _splash_causal_attention(
     B, T, N, H = q.shape
 
     # BTNH → BNTH (kernel expects heads-first, then sequence)
-    q = jnp.transpose(q, (0, 2, 1, 3))    # (B, N, T, H)
-    k = jnp.transpose(k, (0, 2, 1, 3))    # (B, K, T, H)
-    v = jnp.transpose(v, (0, 2, 1, 3))    # (B, K, T, H)
+    q = jnp.transpose(q, (0, 2, 1, 3))
+    k = jnp.transpose(k, (0, 2, 1, 3))
+    v = jnp.transpose(v, (0, 2, 1, 3))
 
     # Lazy causal mask — computed inside the kernel, zero HBM cost
     causal_mask = splash_attention_mask.CausalMask(shape=(T, T))
@@ -160,7 +156,6 @@ def _splash_causal_attention(
     )
 
     # Block sizes tuned for TPU v5e (128 is the minimum tile size)
-    # For seq_len < 512, use smaller blocks to avoid wasting compute
     block = min(512, max(128, T))
     block_sizes = splash_attention_kernel.BlockSizes(
         block_q=block,
@@ -173,8 +168,6 @@ def _splash_causal_attention(
         block_kv_dq=block,
     )
 
-    # Build the splash kernel
-    # make_splash_mha handles both MHA (K==N) and GQA (K<N) natively
     splash_kernel = splash_attention_kernel.make_splash_mha(
         mask=multi_head_mask,
         block_sizes=block_sizes,
@@ -182,9 +175,9 @@ def _splash_causal_attention(
         q_seq_shards=1,
     )
 
-    # vmap over batch dimension — kernel processes (N, T, H) slices
+    # vmap over batch dimension
     out = jax.vmap(splash_kernel, in_axes=(0, 0, 0, None))(
-        q, k, v, None  # None = no segment IDs
+        q, k, v, None
     )
 
     # BNTH → BTNH
@@ -222,16 +215,6 @@ def causal_attention(
     Returns
     -------
     out : (B, T, N, H)
-
-    Notes
-    -----
-    - On TPU, jax.nn.dot_product_attention always uses XLA which
-      materializes a full (B,N,T,T) matrix → OOM for real configs.
-      Splash Attention avoids this completely.
-    - On GPU Ampere+, cuDNN FlashAttention provides O(T) memory.
-    - On GPU pre-Ampere (T4, V100), cuDNN flash is not supported.
-      Falls back to XLA which materializes the mask but works correctly.
-    - scale is NOT applied here — it's applied to Q before this call.
     """
     # Auto-detect hardware
     if implementation is None:
@@ -239,8 +222,6 @@ def causal_attention(
         if backend == "tpu":
             implementation = "splash"
         elif backend == "gpu":
-            # cuDNN FlashAttention requires Ampere+ (SM >= 8.0)
-            # T4 (SM 7.5), V100 (SM 7.0) must use XLA fallback
             implementation = "cudnn" if _gpu_supports_cudnn_flash() else "xla"
         else:
             implementation = "xla"
@@ -256,7 +237,6 @@ def causal_attention(
         )
 
     # XLA fallback (CPU, or pre-Ampere GPU)
-    # implementation=None lets JAX use its default XLA path
     return jax.nn.dot_product_attention(
         q, k, v,
         is_causal=True,
@@ -298,7 +278,11 @@ class CausalAttention(nn.Module):
         param_dtype = get_dtype(self.config.parallelism.param_dtype)
 
         head_dim = self.d_model // self.num_heads
-        scale = head_dim ** -0.5
+
+        # Cast scale to compute_dtype to prevent silent type promotion.
+        # Without this: fp16_q * python_float_scale → fp32 (JAX promotion rules)
+        # With this:    fp16_q * fp16_scale → fp16 (no promotion)
+        scale = jnp.array(head_dim ** -0.5, dtype=compute_dtype)
 
         # Q dim = num_heads * head_dim = d_model
         # KV dim = num_kv_heads * head_dim  (smaller for GQA/MQA)
@@ -340,12 +324,25 @@ class CausalAttention(nn.Module):
             k = apply_rope(k, sin, cos)
 
         # --------------------------------------------------------
-        # Scale Q after RoPE
-        #
-        # RoPE rotations should operate on raw Q vectors.
-        # Scaling after preserves the rotation geometry.
+        # Scale Q after RoPE (in compute_dtype — no promotion)
         # --------------------------------------------------------
         q = q * scale
+
+        # --------------------------------------------------------
+        # Dtype enforcement before attention kernel
+        #
+        # Ensures Q, K, V are all in the same dtype. This guards
+        # against silent promotion from:
+        #   - Python float scalars (scale multiplication)
+        #   - RoPE sin/cos tables (computed in float32)
+        #   - Any future ops that might promote
+        #
+        # jax.nn.dot_product_attention requires matching dtypes
+        # for query, key, and value.
+        # --------------------------------------------------------
+        q = q.astype(compute_dtype)
+        k = k.astype(compute_dtype)
+        v = v.astype(compute_dtype)
 
         # --------------------------------------------------------
         # Causal attention (auto hardware dispatch)
