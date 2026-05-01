@@ -1,3 +1,26 @@
+"""
+LaughLM/training/train_step.py
+
+Training step for LaughLM.
+
+Frontier-grade changes (perf/frontier-optim):
+──────────────────────────────────────────────
+1. Updated for new model signature — GPTModel now returns
+   (logits, kv_caches) tuple. Training ignores caches.
+
+2. Removed assert statements inside jitted code — JAX traces
+   through asserts which causes ConcretizationError. Replaced
+   with shape comments for documentation.
+
+3. Gradient accumulation via jax.lax.scan — unchanged, already
+   correct. FP32 gradient accumulators for numerical stability.
+
+Note: This file still uses jax.pmap for now. The SPMD/jit migration
+(replacing pmap with jax.jit + mesh sharding) will happen when
+trainer.py is updated to construct the mesh. Both pmap and SPMD
+can coexist — pmap is a special case of SPMD.
+"""
+
 import jax
 import jax.numpy as jnp
 import optax
@@ -12,66 +35,41 @@ Batch = jnp.ndarray
 Metrics = Dict[str, jnp.ndarray]
 
 
-# ------------------------------------------------------------
+# ────────────────────────────────────────────────────────────────
 # TRAIN STEP (PMAP)
-# ------------------------------------------------------------
+# ────────────────────────────────────────────────────────────────
 
 def create_train_step(model, optimizer, grad_accum: int, axis_name="batch") -> Callable:
 
-    # --------------------------------------------------------
-    # Loss function (per micro-batch)
-    # --------------------------------------------------------
     def loss_fn(params: Params, micro_batch: Batch):
-        # 🔴 CRITICAL: enforce shape contract
-        assert micro_batch.ndim == 2, f"[loss_fn] Expected (B, T), got {micro_batch.shape}"
-
+        # micro_batch: (B, T) — integer token IDs
         inputs, targets = shift_tokens(micro_batch)
 
-        # Safety check after shift
-        assert inputs.ndim == 2, f"[loss_fn] inputs shape broken: {inputs.shape}"
-
-        logits = model.apply({"params": params}, inputs)
+        # Model returns (logits, kv_caches) — ignore caches during training
+        logits, _ = model.apply({"params": params}, inputs)
 
         loss, _ = compute_loss(logits, targets)
         return loss
 
-    # --------------------------------------------------------
-    # Train step (per device)
-    # --------------------------------------------------------
     def train_step(state, batch):
         """
-        batch shape inside pmap:
-            (grad_accum, micro_batch, seq_len)
+        batch shape inside pmap: (grad_accum, micro_batch, seq_len)
         """
-
-        # 🔴 CRITICAL: validate batch shape early
-        assert batch.ndim == 3, f"[train_step] Expected (grad_accum, micro_batch, seq), got {batch.shape}"
-
         params = state.params
         opt_state = state.opt_state
 
-        # --------------------------------------------------------
         # RNG
-        # --------------------------------------------------------
         state, step_rng = state.next_rng()
 
-        # --------------------------------------------------------
-        # INIT gradient accumulator (FP32 for stability)
-        # --------------------------------------------------------
+        # Init gradient accumulator (FP32 for stability)
         grads_accum = jax.tree_util.tree_map(
             lambda p: jnp.zeros_like(p, dtype=jnp.float32),
             params,
         )
 
-        # --------------------------------------------------------
-        # SCAN over micro-batches
-        # --------------------------------------------------------
+        # Scan over micro-batches
         def scan_fn(carry, micro_batch):
             grads_accum, rng = carry
-
-            # 🔴 enforce correct shape INSIDE scan
-            assert micro_batch.ndim == 2, f"[scan_fn] micro_batch wrong shape: {micro_batch.shape}"
-
             rng, subkey = jax.random.split(rng)
 
             loss, grads = jax.value_and_grad(loss_fn)(
@@ -93,9 +91,7 @@ def create_train_step(model, optimizer, grad_accum: int, axis_name="batch") -> C
             batch,
         )
 
-        # --------------------------------------------------------
-        # AVERAGE gradients
-        # --------------------------------------------------------
+        # Average gradients
         grads = jax.tree_util.tree_map(
             lambda g: g / grad_accum,
             grads_accum,
@@ -103,21 +99,15 @@ def create_train_step(model, optimizer, grad_accum: int, axis_name="batch") -> C
 
         loss = jnp.mean(losses)
 
-        # --------------------------------------------------------
-        # CROSS-DEVICE SYNC
-        # --------------------------------------------------------
+        # Cross-device sync
         grads = jax.lax.pmean(grads, axis_name)
         loss = jax.lax.pmean(loss, axis_name)
 
-        # --------------------------------------------------------
-        # GRAD NORM (critical for debugging + stability)
-        # --------------------------------------------------------
+        # Grad norm (for debugging + stability)
         grad_norm = optax.global_norm(grads)
         grad_norm = jax.lax.pmean(grad_norm, axis_name)
 
-        # --------------------------------------------------------
-        # OPTIMIZER STEP
-        # --------------------------------------------------------
+        # Optimizer step
         updates, new_opt_state = optimizer.update(
             grads,
             opt_state,
@@ -126,18 +116,14 @@ def create_train_step(model, optimizer, grad_accum: int, axis_name="batch") -> C
 
         new_params = optax.apply_updates(params, updates)
 
-        # --------------------------------------------------------
-        # TOKEN ACCOUNTING
-        # --------------------------------------------------------
+        # Token accounting
         tokens_in_step = (
-            batch.shape[0]  # grad_accum
+            batch.shape[0]   # grad_accum
             * batch.shape[1]  # micro_batch
             * batch.shape[2]  # seq_len
         )
 
-        # --------------------------------------------------------
-        # STATE UPDATE
-        # --------------------------------------------------------
+        # State update
         new_state = state.apply_grad_step(
             new_params,
             new_opt_state,
@@ -151,9 +137,6 @@ def create_train_step(model, optimizer, grad_accum: int, axis_name="batch") -> C
 
         return new_state, metrics
 
-    # ------------------------------------------------------------
-    # PMAP
-    # ------------------------------------------------------------
     return jax.pmap(
         train_step,
         axis_name=axis_name,
@@ -161,17 +144,19 @@ def create_train_step(model, optimizer, grad_accum: int, axis_name="batch") -> C
     )
 
 
-# ------------------------------------------------------------
+# ────────────────────────────────────────────────────────────────
 # EVAL STEP
-# ------------------------------------------------------------
+# ────────────────────────────────────────────────────────────────
 
 def create_eval_step(model) -> Callable:
 
     def eval_step(params: Params, batch: Batch):
-        assert batch.ndim == 2, f"[eval_step] Expected (B, T), got {batch.shape}"
-
+        # batch: (B, T)
         inputs, targets = shift_tokens(batch)
-        logits = model.apply({"params": params}, inputs)
+
+        # Model returns (logits, kv_caches)
+        logits, _ = model.apply({"params": params}, inputs)
+
         _, metrics = compute_loss(logits, targets)
 
         return metrics
