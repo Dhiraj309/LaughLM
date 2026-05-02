@@ -8,16 +8,17 @@ model:
   max_seq_len: 2048
 
 architecture:
-  positional: learned
-  normalization: layer_norm
-  norm_placement: post
-  attention_variant: mha
-  attention_impl: standard
+  positional: rope
+  normalization: rms_norm
+  norm_placement: pre
+  attention_variant: gqa
+  attention_impl: flash
   ffn_type: swiglu
   residual: standard
   embeddings: standard
   bias: false
   weight_tying: true
+  parallel_block: false
 
 initialization:
   method: normal
@@ -43,8 +44,8 @@ scheduler:
 
 runtime:
   seq_len: 1024
-  micro_batch_per_device: 8
-  gradient_accumulation: 2
+  micro_batch_per_device: 2
+  gradient_accumulation: 1
   total_tokens: 100000000
 
   eval_interval: 100
@@ -69,8 +70,8 @@ tokenizer:
   output_format: huggingface_fast
 
 hardware:
-  accelerator: tpu
-  type: v5e
+  accelerator: gpu
+  type: t4
 
 parallelism:
   data_parallel: 1
@@ -81,3 +82,16 @@ parallelism:
 monitoring:
   tensorboard: false
   rich_terminal: true
+
+spmd:
+  mesh:
+    ici_data_parallelism: 1
+    ici_fsdp_parallelism: 1
+    ici_tensor_parallelism: 1
+  remat:
+    policy: dots_saveable
+    scan_layers: true
+  dtype:
+    param_dtype: float32
+    compute_dtype: bfloat16
+    output_dtype: float32
