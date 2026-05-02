@@ -15,11 +15,13 @@ Frontier optimizations (perf/frontier-optim):
 3. Splash Attention GQA fix — MultiHeadMask must use num_q_heads, not
    num_kv_heads. The kernel handles Q→KV head broadcasting internally.
 
-4. Sharding annotations — with_sharding_constraint on Q/K/V/output
-   for FSDP + tensor parallelism. Reads axis rules from config.spmd.
+4. Splash block_size alignment — finds largest block ≤ 512 that divides
+   the actual sequence length. Falls back to XLA if no valid block exists.
 
-5. Dtype safety — reads from config.spmd.dtype instead of legacy fields.
-   No silent bf16→fp16 fallback.
+5. Graceful fallback — if Splash fails (Mosaic version mismatch, block
+   alignment), automatically falls back to jax.nn.dot_product_attention.
+
+6. Dtype safety — reads from config.spmd.dtype instead of legacy fields.
 
 Key design decisions
 ────────────────────
@@ -27,14 +29,12 @@ Key design decisions
   jax.nn.dot_product_attention and RoPE. Zero transposes in main path.
 
 • Hardware-aware kernel dispatch:
-  TPU           → Splash Attention (Pallas kernel, O(T) memory)
+  TPU           → Splash Attention (Pallas, O(T) memory) with XLA fallback
   GPU (Ampere+) → cuDNN FlashAttention via jax.nn (O(T) memory)
   GPU (pre-Ampere) → XLA with is_causal=True (O(T²) memory)
   CPU           → XLA fallback (O(T²), testing only)
 
 • Native GQA — Splash and cuDNN handle Q_heads != KV_heads natively.
-
-• Unified class — single CausalAttention handles MHA/MQA/GQA.
 
 References
 ──────────
@@ -176,6 +176,26 @@ def _gpu_supports_cudnn_flash() -> bool:
 
 
 # ════════════════════════════════════════════════════════════════
+# Block size selection for Splash Attention
+# ════════════════════════════════════════════════════════════════
+
+def _find_splash_block_size(seq_len: int) -> Optional[int]:
+    """
+    Find the largest block size ≤ 512 that divides seq_len.
+
+    Splash Attention requires block_q to divide q_seq_len exactly.
+    After shift_tokens, seq_len is typically (config.seq_len - 1),
+    e.g. 2047, 1023 — which are odd and not divisible by powers of 2.
+
+    Returns None if no valid block size ≥ 128 exists (triggers XLA fallback).
+    """
+    for block in [512, 256, 128]:
+        if seq_len % block == 0:
+            return block
+    return None
+
+
+# ════════════════════════════════════════════════════════════════
 # Splash Attention (TPU — O(T) memory via Pallas kernel)
 # ════════════════════════════════════════════════════════════════
 
@@ -189,6 +209,7 @@ def _splash_causal_attention(
     TPU Splash Attention with causal masking + optional document masking.
 
     Supports native GQA: K heads < Q heads, Q_heads % K_heads == 0.
+    Falls back to jax.nn.dot_product_attention if block alignment fails.
 
     Parameters
     ----------
@@ -209,6 +230,13 @@ def _splash_causal_attention(
     B, T, N, H = q.shape
     K = k.shape[2]  # num_kv_heads
 
+    # ── Find valid block size that divides T ──
+    block = _find_splash_block_size(T)
+    if block is None:
+        # T is not divisible by any standard block size (128/256/512)
+        # Fall back to XLA dot_product_attention (no alignment constraint)
+        return jax.nn.dot_product_attention(q, k, v, is_causal=True)
+
     # BTNH → BNTH (kernel expects heads-first)
     q = jnp.transpose(q, (0, 2, 1, 3))  # (B, N, T, H)
     k = jnp.transpose(k, (0, 2, 1, 3))  # (B, K, T, H)
@@ -217,11 +245,10 @@ def _splash_causal_attention(
     # ── Mask: must have num_Q_heads masks, not num_KV_heads ──
     causal_mask = splash_attention_mask.CausalMask(shape=(T, T))
     multi_head_mask = splash_attention_mask.MultiHeadMask(
-        masks=(causal_mask,) * N  # 🔴 FIX: use N (num_q_heads), NOT K
+        masks=(causal_mask,) * N
     )
 
-    # ── Block sizes tuned for TPU v5e ──
-    block = min(512, max(128, T))
+    # ── Block sizes ──
     block_sizes = splash_attention_kernel.BlockSizes(
         block_q=block,
         block_kv=block,
@@ -234,7 +261,6 @@ def _splash_causal_attention(
     )
 
     # ── Use make_splash_mha for both MHA and GQA ──
-    # (make_splash_mqa is ONLY for true MQA with 1 KV head)
     splash_kernel = splash_attention_kernel.make_splash_mha(
         mask=multi_head_mask,
         block_sizes=block_sizes,
@@ -246,7 +272,6 @@ def _splash_causal_attention(
     if segment_ids is not None:
         SegmentIds = splash_attention_kernel.SegmentIds
 
-        # vmap over batch: each sample gets its own 1D segment_ids
         def _per_sample(q_s, k_s, v_s, seg_s):
             seg = SegmentIds(q=seg_s, kv=seg_s)
             return splash_kernel(q_s, k_s, v_s, seg)
@@ -333,10 +358,19 @@ def causal_attention(
             implementation = "xla"
 
     if implementation == "splash":
-        return _splash_causal_attention(q, k, v, segment_ids=segment_ids)
+        try:
+            return _splash_causal_attention(q, k, v, segment_ids=segment_ids)
+        except (ValueError, RuntimeError, Exception) as e:
+            # Fallback to XLA if Splash fails (version mismatch, block alignment, etc.)
+            import warnings
+            warnings.warn(
+                f"[attention] Splash Attention failed ({type(e).__name__}: {e}). "
+                f"Falling back to jax.nn.dot_product_attention (XLA).",
+                RuntimeWarning,
+            )
+            implementation = "xla"
 
     # ── cuDNN / XLA paths with optional document mask ──
-    # jax.nn.dot_product_attention supports is_causal + bias
     bias = None
     if segment_ids is not None:
         bias = _build_document_mask(segment_ids, q.shape[1], k.shape[1])
@@ -350,7 +384,7 @@ def causal_attention(
             implementation="cudnn",
         )
 
-    # XLA fallback (CPU, or pre-Ampere GPU)
+    # XLA fallback (CPU, pre-Ampere GPU, or TPU when Splash unavailable)
     return jax.nn.dot_product_attention(
         q, k, v,
         bias=bias,
