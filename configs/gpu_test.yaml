@@ -43,7 +43,9 @@ scheduler:
   min_lr_ratio: 0.1
 
 runtime:
-  seq_len: 1024
+  # seq_len: 1025 so that after shift_tokens (1025-1=1024) the attention
+  # sequence length is divisible by Splash block sizes (128/256/512).
+  seq_len: 1025
   micro_batch_per_device: 2
   gradient_accumulation: 1
   total_tokens: 100000000
@@ -57,7 +59,7 @@ runtime:
 
 data:
   sources: []
-  max_seq_len: 1024
+  max_seq_len: 1025
   packing: false
   eos_between_docs: true
   pad_to_multiple: 128
