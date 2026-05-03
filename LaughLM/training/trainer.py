@@ -1,23 +1,4 @@
-"""
-LaughLM/training/trainer.py
-
-Main trainer for LaughLM.
-
-Frontier-grade changes (perf/frontier-optim):
-──────────────────────────────────────────────
-1. Updated for new model return signature — GPTModel.__call__
-   now returns (logits, kv_caches). Model init uses dummy forward
-   that unpacks correctly.
-
-2. All existing training loop logic preserved — pmap-based training
-   with gradient accumulation, async checkpointing, and MFU logging.
-
-Note: Full SPMD migration (jax.jit + mesh) is planned as a follow-up.
-The pmap-based approach is correct and functional; SPMD is an optimization.
-"""
-
 import json
-import time
 from pathlib import Path
 from typing import Iterator
 
@@ -29,7 +10,10 @@ from LaughLM.model.gpt import GPTModel
 from LaughLM.model.parameter_utils import generate_preflight_report, estimate_parameters
 from LaughLM.training.optimizer import build_optimizer
 from LaughLM.training.scheduler import build_scheduler, compute_total_steps
-from LaughLM.training.train_step import create_train_step, create_eval_step
+from LaughLM.training.train_step import (
+    create_train_step,
+    create_eval_step,
+)
 from LaughLM.training.logger import TrainingLogger
 from LaughLM.training.checkpoint import CheckpointManager
 from LaughLM.training.train_state import TrainState
@@ -38,10 +22,15 @@ from LaughLM.utils.prefetch import prefetch_to_device
 
 
 def _scalar(x):
+    if x is None:
+        return None
     try:
-        return float(jax.device_get(x))
+        return float(x)
     except Exception:
-        return float("nan")
+        try:
+            return float(jax.device_get(x))
+        except Exception:
+            return float("nan")
 
 
 class Trainer:
@@ -49,39 +38,34 @@ class Trainer:
     def __init__(self, config: LaughLMConfig, resume_dir: str | None = None):
 
         self.config = config
-        self.num_devices = jax.device_count()
-        self.devices = jax.devices()
-
-        print(f"[trainer] Using {self.num_devices} devices")
 
         self.rng = create_rng(seed=42)
+
         generate_preflight_report(config)
 
-        # ── Model init ────────────────────────────────────────
         self.model = GPTModel(config=config)
 
         dummy = jnp.zeros(
-            (config.runtime.micro_batch_per_device, config.runtime.seq_len),
+            (
+                config.runtime.micro_batch_per_device,
+                config.runtime.seq_len,
+            ),
             dtype=jnp.int32,
         )
 
-        # GPTModel returns (logits, kv_caches) — init still returns {"params": ...}
-        params = self.model.init(self.rng.next_key(), dummy)["params"]
+        params = self.model.init(
+            self.rng.next_key(),
+            dummy,
+        )["params"]
 
         self.schedule = build_scheduler(config)
         self.optimizer = build_optimizer(config, self.schedule)
 
         opt_state = self.optimizer.init(params)
 
-        state = TrainState(
-            params=params,
-            opt_state=opt_state,
-            step=0,
-            tokens_processed=0,
-            rng_key=self.rng.key,
-        )
-
-        self.state = jax.device_put_replicated(state, self.devices)
+        # ------------------------------------------------------------
+        # ✅ NEW: fused train step
+        # ------------------------------------------------------------
 
         self.grad_accum = config.runtime.gradient_accumulation
 
@@ -93,16 +77,25 @@ class Trainer:
 
         self.eval_step = create_eval_step(self.model)
 
-        # ── Logging ───────────────────────────────────────────
-        param_info = estimate_parameters(config)
+        # ------------------------------------------------------------
+        # State
+        # ------------------------------------------------------------
+
+        self.state = TrainState(
+            params=params,
+            opt_state=opt_state,
+            step=0,
+            tokens_processed=0,
+            rng_key=self.rng.key,
+        )
+
+        total_params = estimate_parameters(config)["total_params"]
 
         self.logger = TrainingLogger(
             config,
-            total_params=param_info["total_params"],
-            embedding_params=param_info["embedding_params"],
+            total_params=total_params,
         )
 
-        # ── Checkpoints ──────────────────────────────────────
         ckpt_dir = resume_dir or config.runtime.checkpoint_dir
 
         self.checkpoints = CheckpointManager(
@@ -113,115 +106,121 @@ class Trainer:
         self.checkpoint_interval = config.runtime.checkpoint_interval
 
         config_path = Path(ckpt_dir) / "config.json"
+
         if not config_path.exists():
             with open(config_path, "w") as f:
                 json.dump(self.config.model_dump(), f, indent=2)
 
-    # ────────────────────────────────────────────────────────────
+        restored = self.checkpoints.restore_latest(self.state)
+
+        if restored is not None:
+
+            self.state, step = restored
+
+            self.rng._key = self.state.rng_key
+
+            print(f"[trainer] resumed from step {self.state.step}")
+
+    # ------------------------------------------------------------
     # Training loop
-    # ────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------
 
     def train(self, dataloader: Iterator):
 
         cfg = self.config
-        total_steps = compute_total_steps(cfg)
 
-        global_batch_size = (
-            cfg.runtime.micro_batch_per_device * self.num_devices
-        )
+        total_steps = compute_total_steps(cfg)
 
         tokens_per_step = (
             cfg.runtime.seq_len
-            * global_batch_size
+            * cfg.runtime.micro_batch_per_device
+            * cfg.parallelism.data_parallel
             * cfg.runtime.gradient_accumulation
         )
 
         print("\n" + "=" * 60)
         print(f"Training for {total_steps:,} optimizer steps")
-        print(f"Tokens per step: {tokens_per_step:,}")
+        print(f"Effective tokens per step: {tokens_per_step:,}")
         print("=" * 60 + "\n")
 
+        # 🚀 increase prefetch depth
         prefetched_loader = prefetch_to_device(iter(dataloader), size=8)
+
         data_iter = iter(prefetched_loader)
 
         for _ in range(total_steps):
 
-            step_start = time.time()
-
+            # ------------------------------------------------------------
+            # ✅ collect micro-batches
+            # ------------------------------------------------------------
             micro_batches = []
+
             for _ in range(self.grad_accum):
                 batch = next(data_iter)
                 batch = jnp.asarray(batch, dtype=jnp.int32)
                 micro_batches.append(batch)
 
-            # (grad_accum, global_batch, seq)
+            # stack → [grad_accum, B, T]
             batch = jnp.stack(micro_batches)
 
-            # reshape → (grad_accum, devices, micro_batch, seq)
-            batch = batch.reshape(
-                self.grad_accum,
-                self.num_devices,
-                -1,
-                batch.shape[-1],
+            # ------------------------------------------------------------
+            # ✅ fused train step
+            # ------------------------------------------------------------
+            new_params, new_opt_state, metrics = self.train_step(
+                self.state.params,
+                self.state.opt_state,
+                batch,
             )
 
-            # swap → (devices, grad_accum, micro_batch, seq)
-            batch = jnp.swapaxes(batch, 0, 1)
+            metrics = jax.device_get(metrics)
 
-            # ── Train step ────────────────────────────────────
-            self.state, metrics = self.train_step(self.state, batch)
+            new_step = self.state.step + 1
+            new_tokens = self.state.tokens_processed + tokens_per_step
 
-            metrics = jax.tree_util.tree_map(
-                lambda x: float(jax.device_get(x[0])),
-                metrics,
+            self.state = TrainState(
+                params=new_params,
+                opt_state=new_opt_state,
+                step=new_step,
+                tokens_processed=new_tokens,
+                rng_key=self.rng.key,
             )
 
-            state_host = jax.tree_util.tree_map(
-                lambda x: x[0],
-                self.state,
-            )
+            # ------------------------------------------------------------
+            # Logging
+            # ------------------------------------------------------------
+            if self.state.step % cfg.runtime.log_interval == 0:
 
-            step_time = time.time() - step_start
+                lr = _scalar(self.schedule(self.state.step))
 
-            if int(state_host.step) % cfg.runtime.log_interval == 0:
-
-                lr = _scalar(self.schedule(int(state_host.step)))
+                safe_metrics = {
+                    k: _scalar(v)
+                    for k, v in metrics.items()
+                }
 
                 self.logger.log_step(
-                    step=int(state_host.step),
-                    metrics=metrics,
+                    step=self.state.step,
+                    metrics=safe_metrics,
                     lr=lr,
-                    grad_norm=metrics.get("grad_norm"),
-                    tokens_seen=int(state_host.tokens_processed),
-                    tokens_in_step=tokens_per_step,
-                    step_time=step_time,
+                    grad_norm=None,
+                    tokens_seen=self.state.tokens_processed,
                 )
 
-            if int(state_host.step) % self.checkpoint_interval == 0:
+            # ------------------------------------------------------------
+            # Checkpointing
+            # ------------------------------------------------------------
+            if self.state.step % self.checkpoint_interval == 0:
 
-                state_to_save = jax.tree_util.tree_map(
-                    lambda x: x[0],
-                    self.state,
-                )
+                print(f"[checkpoint] saving step {self.state.step}")
 
-                self.checkpoints.save(
-                    int(state_host.step),
-                    state_to_save,
-                )
+                self.checkpoints.save(self.state.step, self.state)
 
-        state_to_save = jax.tree_util.tree_map(
-            lambda x: x[0],
-            self.state,
-        )
-
-        self.checkpoints.save(
-            int(state_host.step),
-            state_to_save,
-        )
-
-        self.checkpoints.wait()
+        self.checkpoints.save(self.state.step, self.state)
 
         self.logger.log_summary(
-            int(state_host.step),
-            int(state_host.tokens_processed),
+            self.state.step,
+            self.state.tokens_processed,
         )
+
+    def _run_eval(self):
+
+        print(f"[Eval] step={self.state.step} — plug in eval dataloader")

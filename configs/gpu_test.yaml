@@ -4,21 +4,20 @@ model:
   d_model: 1024
   num_layers: 12
   num_heads: 16
-  num_kv_heads: 4
-  max_seq_len: 2048
+  num_kv_heads: null
+  max_seq_len: 1024
 
 architecture:
-  positional: rope
-  normalization: rms_norm
-  norm_placement: pre
-  attention_variant: gqa
-  attention_impl: flash
+  positional: learned
+  normalization: layer_norm
+  norm_placement: post
+  attention_variant: mha
+  attention_impl: standard
   ffn_type: swiglu
   residual: standard
   embeddings: standard
   bias: false
   weight_tying: true
-  parallel_block: false
 
 initialization:
   method: normal
@@ -43,11 +42,9 @@ scheduler:
   min_lr_ratio: 0.1
 
 runtime:
-  # seq_len: 1025 so that after shift_tokens (1025-1=1024) the attention
-  # sequence length is divisible by Splash block sizes (128/256/512).
-  seq_len: 1025
-  micro_batch_per_device: 2
-  gradient_accumulation: 1
+  seq_len: 1024
+  micro_batch_per_device: 4
+  gradient_accumulation: 2
   total_tokens: 100000000
 
   eval_interval: 100
@@ -59,7 +56,7 @@ runtime:
 
 data:
   sources: []
-  max_seq_len: 1025
+  max_seq_len: 1024
   packing: false
   eos_between_docs: true
   pad_to_multiple: 128
@@ -78,22 +75,9 @@ hardware:
 parallelism:
   data_parallel: 1
   model_parallel: 1
-  compute_dtype: bfloat16
+  compute_dtype: float16
   param_dtype: float32
 
 monitoring:
   tensorboard: false
   rich_terminal: true
-
-spmd:
-  mesh:
-    ici_data_parallelism: 1
-    ici_fsdp_parallelism: 1
-    ici_tensor_parallelism: 1
-  remat:
-    policy: dots_saveable
-    scan_layers: true
-  dtype:
-    param_dtype: float32
-    compute_dtype: bfloat16
-    output_dtype: float32

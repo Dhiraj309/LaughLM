@@ -1,50 +1,36 @@
+import collections
+import jax
 
-import threading
-import queue
 
-
-def prefetch_to_device(iterator, size=8):
+def prefetch_to_device(iterator, size=2):
     """
-    Simple async prefetch pipeline (CPU ONLY).
+    Prefetch batches to device.
 
-    Responsibilities:
-    - Background loading
-    - No reshaping
-    - No device sharding
-    - No batching logic
+    Keeps `size` batches queued on device so TPU never waits
+    for host batch preparation.
 
-    All structure is handled in trainer.
+    Parameters
+    ----------
+    iterator : Python iterator yielding batches
+    size : number of batches to prefetch
+
+    Returns
+    -------
+    generator yielding device arrays
     """
 
-    q = queue.Queue(maxsize=size)
-    stop_token = object()
+    queue = collections.deque()
 
-    # ------------------------------------------------------------
-    # Producer (CPU thread)
-    # ------------------------------------------------------------
-    def producer():
-        exc = None
-        try:
-            for batch in iterator:
-                q.put(batch)
-        except Exception as e:
-            exc = e
-        finally:
-            q.put((stop_token, exc))
+    def _device_put(batch):
+        return jax.device_put(batch)
 
-    thread = threading.Thread(target=producer, daemon=True)
-    thread.start()
+    # Fill queue
+    for _ in range(size):
+        batch = next(iterator)
+        queue.append(_device_put(batch))
 
-    # ------------------------------------------------------------
-    # Consumer
-    # ------------------------------------------------------------
     while True:
-        item = q.get()
+        yield queue.popleft()
 
-        if isinstance(item, tuple) and item[0] is stop_token:
-            _, exc = item
-            if exc is not None:
-                raise RuntimeError(f"Prefetch failed: {exc}") from exc
-            break
-
-        yield item
+        batch = next(iterator)
+        queue.append(_device_put(batch))

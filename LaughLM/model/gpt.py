@@ -1,58 +1,55 @@
-"""
-LaughLM/model/gpt.py
-
-Top-level GPT model for LaughLM.
-
-Frontier-grade changes (perf/frontier-optim):
-──────────────────────────────────────────────
-1. Uses build_block() — correct remat wrapping via factory, not
-   broken nn.remat(self._forward) pattern.
-
-2. KV cache support — forward pass accepts and returns KV caches
-   for autoregressive generation. Each layer gets its own cache.
-
-3. Output dtype — logits are always computed in float32 for numerical
-   stability (cross-entropy with bf16 logits causes NaN).
-
-4. NTK-aware RoPE — when config.architecture.positional == "rope_scaled",
-   applies NTK-aware context extension via scale_factor.
-
-5. Dtype from SPMD config — reads compute_dtype from config.spmd.dtype.
-
-References:
-  MaxText: AI-Hypercomputer/maxtext → layers.py (Decoder class)
-  LLaMA: Meta — GPT architecture with RoPE + SwiGLU + RMSNorm
-"""
 
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple
 
 from LaughLM.config.schema import LaughLMConfig
-from LaughLM.model.transformer_block import build_block
+from LaughLM.model.transformer_block import TransformerBlock
 from LaughLM.model.layers.normalization import build_normalization
 from LaughLM.model.layers.positional import (
     build_positional_encoding,
     build_rope_tables,
 )
-from LaughLM.model.layers.attention import KVCache
-from LaughLM.utils.dtype import resolve_compute_dtype
 
 
 class GPTModel(nn.Module):
+    """
+    Decoder-only language model (GPT / Llama architecture).
+
+    Key design decisions
+    --------------------
+    1. RoPE is pre-computed once in setup() and passed to every
+       TransformerBlock → attention layer, where it is applied to Q and K.
+       It is NOT added to the input embeddings.
+
+    2. Weight tying: the input token embedding matrix is reused as the
+       output projection (lm_head). This is done by storing the embedding
+       table in a variable and passing it explicitly to the logit computation,
+       ensuring JAX autodiff correctly identifies it as a shared parameter
+       and accumulates gradients from both uses.
+
+    3. Mixed precision: the forward pass runs in bfloat16 on TPU. Parameters
+       are stored in float32. Logits are cast back to float32 before the loss
+       to avoid numerical issues in cross-entropy.
+    """
+
     config: LaughLMConfig
 
     def setup(self):
-        cfg = self.config
-        d_model = cfg.model.d_model
-        vocab_size = cfg.model.vocab_size
-        num_layers = cfg.model.num_layers
-        pos_type = cfg.architecture.positional
 
-        self._compute_dtype = resolve_compute_dtype(cfg)
+        cfg         = self.config
+        d_model     = cfg.model.d_model
+        vocab_size  = cfg.model.vocab_size
+        num_layers  = cfg.model.num_layers
+        pos_type    = cfg.architecture.positional
+        compute_bf16 = (cfg.parallelism.compute_dtype == "bfloat16")
 
-        # ── Token embedding ───────────────────────────────────
+        self._compute_dtype = jnp.bfloat16 if compute_bf16 else jnp.float32
+
+        # ------------------------------------------------------------------
+        # Token embedding
+        # ------------------------------------------------------------------
         self.token_embedding = nn.Embed(
             num_embeddings=vocab_size,
             features=d_model,
@@ -61,40 +58,47 @@ class GPTModel(nn.Module):
             ),
         )
 
-        # ── Positional encoding (additive only) ──────────────
+        # ------------------------------------------------------------------
+        # Additive positional encoding (learned / sinusoidal)
+        # Returns None for RoPE — handled separately below.
+        # ------------------------------------------------------------------
         self.positional = build_positional_encoding(cfg)
 
-        # ── RoPE tables ───────────────────────────────────────
+        # ------------------------------------------------------------------
+        # RoPE tables (pre-computed, not learned parameters)
+        # Only built when positional = rope or rope_scaled.
+        # ------------------------------------------------------------------
         self._use_rope = pos_type in ("rope", "rope_scaled")
 
         if self._use_rope:
             head_dim = d_model // cfg.model.num_heads
-
-            # NTK-aware scaling for rope_scaled
-            scale_factor = None
-            if pos_type == "rope_scaled":
-                # Default 4× context extension
-                scale_factor = 4.0
-
+            # build_rope_tables returns (sin, cos) both [max_seq_len, head_dim // 2]
+            # These are JAX arrays, not nn.Module params — they don't appear
+            # in the parameter dict and are not updated by the optimizer.
             self._rope_sin, self._rope_cos = build_rope_tables(
                 head_dim=head_dim,
                 max_seq_len=cfg.model.max_seq_len,
-                scale_factor=scale_factor,
             )
         else:
             self._rope_sin = None
             self._rope_cos = None
 
-        # ── Transformer blocks (with correct remat) ──────────
+        # ------------------------------------------------------------------
+        # Transformer stack
+        # ------------------------------------------------------------------
         self.blocks = [
-            build_block(cfg)
+            TransformerBlock(config=cfg)
             for _ in range(num_layers)
         ]
 
-        # ── Final norm ────────────────────────────────────────
+        # ------------------------------------------------------------------
+        # Final layer norm
+        # ------------------------------------------------------------------
         self.final_norm = build_normalization(cfg)
 
-        # ── LM head (if not weight-tying) ─────────────────────
+        # ------------------------------------------------------------------
+        # Output projection (only when NOT using weight tying)
+        # ------------------------------------------------------------------
         if not cfg.architecture.weight_tying:
             self.lm_head = nn.Dense(
                 vocab_size,
@@ -108,71 +112,84 @@ class GPTModel(nn.Module):
         self,
         input_ids: jnp.ndarray,
         doc_ids: Optional[jnp.ndarray] = None,
-        kv_caches: Optional[List[KVCache]] = None,
-    ) -> Tuple[jnp.ndarray, Optional[List[KVCache]]]:
+    ) -> jnp.ndarray:
         """
         Forward pass.
 
         Parameters
         ----------
-        input_ids  : (B, T) integer token IDs
-        doc_ids    : (B, T) integer segment/document IDs (for cross-doc masking)
-        kv_caches  : list of KVCache per layer (for inference), or None
+        input_ids : [B, T] integer token IDs
+        doc_ids   : [B, T] integer document IDs for cross-doc masking.
+                    Required when config.data.packing=True.
+                    When None, the standard triangular causal mask is used.
 
         Returns
         -------
-        logits     : (B, T, V) in float32
-        new_caches : list of updated KVCache per layer, or None
+        logits : [B, T, vocab_size] float32
         """
-        assert input_ids.ndim == 2, f"Expected (B, T), got {input_ids.shape}"
 
-        B, T = input_ids.shape
+        T = input_ids.shape[1]
 
-        # ── Token embedding ───────────────────────────────────
-        x = self.token_embedding(input_ids)
+        # ------------------------------------------------------------------
+        # Embed tokens
+        # ------------------------------------------------------------------
+        x = self.token_embedding(input_ids)        # [B, T, D]  float32
+
+        # Cast to compute dtype (bfloat16 on TPU for speed)
         x = x.astype(self._compute_dtype)
 
-        # ── Positional encoding (additive, for learned/sinusoidal) ──
+        # ------------------------------------------------------------------
+        # Additive positional encoding (learned / sinusoidal only)
+        # RoPE is threaded to attention layers — not added here.
+        # ------------------------------------------------------------------
         if self.positional is not None:
-            positions = jnp.arange(T)[None, :]
-            pos_emb = self.positional(positions)
-            assert pos_emb.ndim == 3
+            positions = jnp.arange(T)[None, :]     # [1, T]
+            pos_emb = self.positional(positions)   # [1, T, D]
             x = x + pos_emb.astype(self._compute_dtype)
 
-        # ── RoPE tables (slice to current seq_len) ────────────
+        # ------------------------------------------------------------------
+        # Build RoPE tables for this sequence length
+        # Slice the pre-computed tables to current T (saves compute).
+        # ------------------------------------------------------------------
         rope_tables: Optional[Tuple] = None
         if self._use_rope:
             rope_tables = (
-                self._rope_sin[:T],
+                self._rope_sin[:T],   # [T, head_dim // 2]
                 self._rope_cos[:T],
             )
 
-        # ── Transformer stack ─────────────────────────────────
-        new_caches = [] if kv_caches is not None else None
+        # ------------------------------------------------------------------
+        # Transformer layers
+        # ------------------------------------------------------------------
+        for block in self.blocks:
+            x = block(x, rope_tables=rope_tables, doc_ids=doc_ids)
 
-        for i, block in enumerate(self.blocks):
-            layer_cache = kv_caches[i] if kv_caches is not None else None
-
-            x, new_cache = block(
-                x,
-                rope_tables=rope_tables,
-                doc_ids=doc_ids,
-                kv_cache=layer_cache,
-            )
-
-            if new_caches is not None:
-                new_caches.append(new_cache)
-
-        # ── Final norm ────────────────────────────────────────
+        # ------------------------------------------------------------------
+        # Final norm
+        # ------------------------------------------------------------------
         x = self.final_norm(x)
 
-        # ── Logits in float32 (CRITICAL for numerical stability) ──
+        # Cast back to float32 before logit projection
+        # (softmax / cross-entropy need float32 precision)
         x = x.astype(jnp.float32)
 
+        # ------------------------------------------------------------------
+        # Logit projection
+        # ------------------------------------------------------------------
         if self.config.architecture.weight_tying:
-            embedding_table = self.token_embedding.embedding
+            # Weight tying: reuse the token embedding matrix as the output
+            # projection. Transposed: [D] → [V].
+            #
+            # We access the embedding via self.token_embedding.embedding
+            # (Flax nn.Embed stores the table at this attribute).
+            # This is the correct Flax idiom — JAX autodiff will correctly
+            # accumulate gradients through this reference because both uses
+            # (embedding lookup and logit projection) refer to the same
+            # parameter array in the variable collection.
+            embedding_table = self.token_embedding.embedding   # [V, D]
             logits = jnp.einsum("btd,vd->btv", x, embedding_table)
+
         else:
             logits = self.lm_head(x)
 
-        return logits, new_caches
+        return logits   # [B, T, V]  float32
