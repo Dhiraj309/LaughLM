@@ -1,8 +1,12 @@
 """
 scripts/train_gpu_test.py
 
-GPU test training script for LaughLM.
-Downloads a pre-tokenized shard and runs training with the gpu_test config.
+Training script for LaughLM.
+Downloads pre-tokenized shards and runs training.
+
+NOTE: Do NOT set jax_default_matmul_precision='high' for TPU.
+It forces f32 accumulation which halves MXU throughput.
+bf16 native precision is correct for TPU training.
 """
 
 from huggingface_hub import hf_hub_download
@@ -12,10 +16,11 @@ from LaughLM.training.trainer import Trainer
 from LaughLM.data.memmap_loader import MemmapDataset
 
 import jax
-jax.config.update("jax_default_matmul_precision", "high")
 
 
 def main():
+
+    print(f"JAX devices: {jax.devices()}")
 
     # ── Download dataset shard ────────────────────────────────
     path = hf_hub_download(
@@ -28,8 +33,6 @@ def main():
     config = load_config("configs/gpu_test.yaml")
 
     # ── Dataset ───────────────────────────────────────────────
-    # batch_size = GLOBAL = micro_batch_per_device × num_devices
-    # Gradient accumulation is handled inside the Trainer.
     num_devices = jax.device_count()
 
     dataset = MemmapDataset(

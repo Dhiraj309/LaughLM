@@ -17,9 +17,15 @@ dependencies = [
     "jax>=0.4.20",
     "flax>=0.7.0",
     "optax>=0.1.7",
+    "pydantic>=2.0",
     "PyYAML>=6.0",
     "numpy>=1.24",
     "tqdm>=4.65",
+    "tokenizers>=0.15",
+    "datasets>=2.14",
+    "orbax-checkpoint>=0.4.0",
+    "huggingface_hub>=0.16",
+    "transformers>=4.30",
 ]
 
 [project.optional-dependencies]
@@ -36,13 +42,9 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
-    "config*",
-    "model*",
-    "training*",
-    "data*",
-    "utils*",
-    "distributed*",
-    "evaluation*",
+    "LaughLM*",
+    "configs*",
+    "scripts*",
 ]
 
 [tool.black]
