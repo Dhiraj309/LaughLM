@@ -1,5 +1,5 @@
 
-from LaughLM.data.dataset import DomainSampler
+from LaughLM.data.domain_sampler import DomainSampler
 from LaughLM.data.tokenizer import LaughTokenizer
 from LaughLM.data.shard_writer import BinaryShardWriter
 

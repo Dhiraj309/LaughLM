@@ -45,40 +45,40 @@ Supported architecture features:
 ```text
 .
 ├── configs
-│   ├── gpu_test.yaml
-│   └── test.yaml
+│   ├── gpu_test.yaml
+│   └── test.yaml
 ├── LaughLM
-│   ├── config
-│   │   ├── loader.py
-│   │   ├── schema.py
-│   │   └── validation.py
-│   ├── data
-│   │   ├── domain_sampler.py
-│   │   ├── memmap_loader.py
-│   │   ├── shard_writer.py
-│   │   ├── tokenizer.py
-│   │   └── tokenizer_train.py
-│   ├── model
-│   │   ├── gpt.py
-│   │   ├── layers
-│   │   │   ├── attention.py
-│   │   │   ├── mlp.py
-│   │   │   ├── normalization.py
-│   │   │   ├── positional.py
-│   │   │   └── residual.py
-│   │   ├── parameter_utils.py
-│   │   └── transformer_block.py
-│   ├── training
-│   │   ├── checkpoint.py
-│   │   ├── logger.py
-│   │   ├── loss.py
-│   │   ├── optimizer.py
-│   │   ├── scheduler.py
-│   │   ├── trainer.py
-│   │   ├── train_state.py
-│   │   └── train_step.py
-│   └── utils
-│       └── rng.py
+│   ├── config
+│   │   ├── loader.py
+│   │   ├── schema.py
+│   │   └── validation.py
+│   ├── data
+│   │   ├── domain_sampler.py
+│   │   ├── memmap_loader.py
+│   │   ├── shard_writer.py
+│   │   ├── tokenizer.py
+│   │   └── tokenizer_train.py
+│   ├── model
+│   │   ├── gpt.py
+│   │   ├── layers
+│   │   │   ├── attention.py
+│   │   │   ├── mlp.py
+│   │   │   ├── normalization.py
+│   │   │   ├── positional.py
+│   │   │   └── residual.py
+│   │   ├── parameter_utils.py
+│   │   └── transformer_block.py
+│   ├── training
+│   │   ├── checkpoint.py
+│   │   ├── logger.py
+│   │   ├── loss.py
+│   │   ├── optimizer.py
+│   │   ├── scheduler.py
+│   │   ├── trainer.py
+│   │   ├── train_state.py
+│   │   └── train_step.py
+│   └── utils
+│       └── rng.py
 ├── LICENSE
 ├── log.txt
 ├── pyproject.toml

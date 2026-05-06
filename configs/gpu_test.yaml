@@ -1,11 +1,15 @@
+# ════════════════════════════════════════════════════════════════
+# LaughLM — TPU v5e-8 MAX THROUGHPUT CONFIG
+# Target: 45–65% MFU, 150k–300k tokens/sec
+# ════════════════════════════════════════════════════════════════
 
 model:
-  vocab_size: 50257
-  d_model: 1024
-  num_layers: 12
-  num_heads: 16
-  num_kv_heads: 4
-  max_seq_len: 2048
+  vocab_size: 49152
+  d_model: 768
+  num_layers: 16
+  num_heads: 6
+  num_kv_heads: 2
+  max_seq_len: 2048   # keep model max high (for scaling)
 
 architecture:
   positional: rope
@@ -18,7 +22,7 @@ architecture:
   embeddings: standard
   bias: false
   weight_tying: true
-  parallel_block: false
+  parallel_block: true   # ✅ IMPORTANT (saves compute + sync)
 
 initialization:
   method: normal
@@ -34,66 +38,116 @@ optimizer:
   beta1: 0.9
   beta2: 0.95
   eps: 1e-8
-  weight_decay: 0.01
+  weight_decay: 0.1
   gradient_clip: 1.0
 
 scheduler:
-  type: cosine
-  warmup_steps: 200
+  type: wsd
+  warmup_fraction: 0.05
+  stable_fraction: 0.10
   min_lr_ratio: 0.1
 
+# ════════════════════════════════════════════════════════════════
+# 🚀 RUNTIME — CRITICAL FOR THROUGHPUT
+# ════════════════════════════════════════════════════════════════
+
 runtime:
-  # seq_len: 1025 so that after shift_tokens (1025-1=1024) the attention
-  # sequence length is divisible by Splash block sizes (128/256/512).
-  seq_len: 1025
-  micro_batch_per_device: 2
-  gradient_accumulation: 1
-  total_tokens: 100000000
+  seq_len: 1536                    # 🔥 higher MFU than 1024
+  micro_batch_per_device: 32       # 🔥 key driver of utilization
+  gradient_accumulation: 1         # 🔥 TPU prefers real batch > accum
+
+  total_tokens: 1_000_000_000
 
   eval_interval: 100
   log_interval: 10
 
-  checkpoint_interval: 200
+  checkpoint_interval: 500
   checkpoint_max_to_keep: 3
   checkpoint_dir: checkpoints
 
+# ════════════════════════════════════════════════════════════════
+# 🚀 DATA PIPELINE — HUGE IMPACT
+# ════════════════════════════════════════════════════════════════
+
 data:
   sources: []
-  max_seq_len: 1025
-  packing: false
+
+  max_seq_len: 1536
+
+  packing: true              # 🔥 MASSIVE throughput gain
   eos_between_docs: true
-  pad_to_multiple: 128
+  pad_to_multiple: 64        # 🔥 reduce padding waste (was 128)
+
+# ════════════════════════════════════════════════════════════════
 
 tokenizer:
   algorithm: bpe
-  vocab_size: 50257
+  vocab_size: 49152
   pre_tokenizer: byte_level
   number_tokenization: single_digit
   output_format: huggingface_fast
 
 hardware:
-  accelerator: gpu
-  type: t4
+  accelerator: tpu
+  type: v5e
+
+# ════════════════════════════════════════════════════════════════
+# ⚡ LEGACY PARALLELISM (kept for compat)
+# ════════════════════════════════════════════════════════════════
 
 parallelism:
-  data_parallel: 1
-  model_parallel: 1
+  data_parallel: 4
+  model_parallel: 2
   compute_dtype: bfloat16
   param_dtype: float32
 
-monitoring:
-  tensorboard: false
-  rich_terminal: true
+# ════════════════════════════════════════════════════════════════
+# 🧠 SPMD — THIS IS WHERE THE REAL PERFORMANCE COMES FROM
+# ════════════════════════════════════════════════════════════════
 
 spmd:
   mesh:
-    ici_data_parallelism: 1
+    # 🔥 Balanced mesh (better than pure DP=8)
+    ici_data_parallelism: 4
     ici_fsdp_parallelism: 1
-    ici_tensor_parallelism: 1
+    ici_tensor_parallelism: 2   # 🔥 critical for 400M–600M
+    ici_sequence_parallelism: 1
+    ici_pipeline_parallelism: 1
+
+    dcn_data_parallelism: 1
+    dcn_fsdp_parallelism: 1
+    dcn_tensor_parallelism: 1
+    dcn_pipeline_parallelism: 1
+
+  axis_rules:
+    batch: "data"
+    embed: null          # replicate → avoids costly shard gathers
+    heads: "tensor"
+    kv_heads: "tensor"
+    mlp: "tensor"
+    vocab: null          # replicate improves throughput at this scale
+    sequence: null
+    layers: null
+
+  # ════════════════════════════════════════════════════════════
+  # 🔥 REMATERIALIZATION — KEY FOR BIGGER BATCH
+  # ════════════════════════════════════════════════════════════
+
   remat:
-    policy: dots_saveable
-    scan_layers: true
+    policy: nothing_saveable     # 🔥 MAX MFU (more recompute, less memory)
+    granularity: block
+    scan_layers: true            # 🔥 critical for compile + memory
+    prevent_cse: false
+
+  # ════════════════════════════════════════════════════════════
+  # ⚡ DTYPE POLICY — PERFECTLY ALIGNED WITH TPU
+  # ════════════════════════════════════════════════════════════
+
   dtype:
     param_dtype: float32
     compute_dtype: bfloat16
     output_dtype: float32
+
+monitoring:
+  tensorboard: false
+  rich_terminal: true

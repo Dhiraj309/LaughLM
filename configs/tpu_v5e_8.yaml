@@ -1,25 +1,14 @@
 
 # ════════════════════════════════════════════════════════════════
-# LaughLM — TPU v5e-8 Optimized Training Config
+# LaughLM — TPU v5e-8 Training Config (Data-Parallel SPMD)
 # ════════════════════════════════════════════════════════════════
 #
-# Target: TPU v5e pod slice with 8 chips (16GB HBM each, 128GB total)
-# Peak:   8 × 197 TFLOPS = 1,576 TFLOPS bf16
+# Strategy: Data-parallel (replicate params, shard batch)
+# Reason: 184M model + optimizer = 2.2GB << 16GB per chip.
+#   FSDP gives no memory benefit at this scale. Pure data-parallel
+#   with large per-chip batch maximizes MXU utilization.
 #
-# Key choices for v5e-8:
-#   • FSDP across all 8 chips — shards params, grads, optimizer states
-#     so each chip holds only 1/8th of each. Enables larger models.
-#   • micro_batch=16 per chip — saturates the MXU (Matrix Unit).
-#     v5e has smaller HBM (16GB) so we can't go much higher.
-#   • gradient_accumulation=2 — effective batch = 16×8×2 = 256 seqs
-#     = 256 × 1024 = 262,144 tokens/step (good for 100M token run).
-#   • nothing_saveable remat — recompute everything during backward.
-#     With FSDP already sharding params, memory savings from remat
-#     allow larger batch sizes. Worth the ~33% extra compute.
-#   • parallel_block — GPT-J/PaLM style attn+MLP in parallel.
-#     Saves one sequential dependency and one all-reduce per layer.
-#   • Splash Attention — O(T) memory via Pallas tiled kernel.
-#     Native to v5e, ~2× faster than XLA materialized attention.
+# Expected MFU: 38-45% (vs 33% before nn.scan + checkpoint fixes)
 # ════════════════════════════════════════════════════════════════
 
 model:
@@ -41,7 +30,7 @@ architecture:
   embeddings: standard
   bias: false
   weight_tying: true
-  parallel_block: true     # PaLM-style: saves 1 all-reduce/layer in FSDP
+  parallel_block: true
 
 initialization:
   method: normal
@@ -57,31 +46,32 @@ optimizer:
   beta1: 0.9
   beta2: 0.95
   eps: 1e-8
-  weight_decay: 0.1        # higher WD for larger effective batch (standard at scale)
+  weight_decay: 0.1
   gradient_clip: 1.0
 
 scheduler:
-  type: wsd                 # Warmup-Stable-Decay (MiniCPM) — can extend training without restart
+  type: wsd
   warmup_steps: 200
   min_lr_ratio: 0.01
-  stable_fraction: 0.80    # 80% stable, 20% decay
+  stable_fraction: 0.80
 
 runtime:
-  # seq_len=1025: after shift_tokens → 1024 tokens in attention.
-  # 1024 is perfectly divisible by Splash block sizes (128/256/512).
+  # seq_len=1025: after shift → 1024 (Splash-compatible if single-device)
   seq_len: 1025
 
-  # micro_batch=16 per chip × 8 chips × 2 grad_accum = 256 seqs/step
-  # = 256 × 1024 = 262,144 tokens/step
+  # Per-chip: 16 seqs. Logits = 16×1024×50257×4 = 3.2GB (fits easily)
   micro_batch_per_device: 16
+
+  # grad_accum=2: effective = 16×8×2 = 256 seqs = 262K tok/step
   gradient_accumulation: 2
 
-  total_tokens: 100000000   # 100M tokens (~381 steps)
+  total_tokens: 500000000
 
   eval_interval: 50
   log_interval: 10
 
-  checkpoint_interval: 100
+  # 500 steps between checkpoints — no more 90s stalls every 80s
+  checkpoint_interval: 500
   checkpoint_max_to_keep: 3
   checkpoint_dir: checkpoints
 
@@ -104,7 +94,7 @@ hardware:
   type: v5e
 
 parallelism:
-  data_parallel: 8          # 8 chips
+  data_parallel: 8
   model_parallel: 1
   compute_dtype: bfloat16
   param_dtype: float32
@@ -113,36 +103,29 @@ monitoring:
   tensorboard: false
   rich_terminal: true
 
-# ════════════════════════════════════════════════════════════════
-# SPMD Configuration (frontier-grade)
-# ════════════════════════════════════════════════════════════════
 spmd:
   mesh:
-    # All 8 chips on FSDP axis — each chip holds 1/8 of params/grads/optimizer
-    ici_data_parallelism: 1
-    ici_fsdp_parallelism: 8
+    # Data-parallel: all 8 chips shard the batch
+    ici_data_parallelism: 8
+    ici_fsdp_parallelism: 1
     ici_tensor_parallelism: 1
     ici_sequence_parallelism: 1
     ici_pipeline_parallelism: 1
 
   axis_rules:
-    batch: "data"
-    embed: "fsdp"
-    heads: "tensor"
-    kv_heads: "tensor"
-    mlp: "tensor"
-    vocab: "fsdp"
+    batch: "batch"
+    embed: null
+    heads: null
+    kv_heads: null
+    mlp: null
+    vocab: null
 
   remat:
-    # nothing_saveable: recompute all activations during backward.
-    # Trades ~33% extra compute for massive memory savings.
-    # With FSDP already sharding params 8-way, this allows
-    # micro_batch=16 without OOM on v5e's 16GB HBM.
     policy: nothing_saveable
     scan_layers: true
     prevent_cse: false
 
   dtype:
-    param_dtype: float32     # master weights in fp32 (optimizer accumulation)
-    compute_dtype: bfloat16  # activations + matmuls in bf16 (native on v5e)
-    output_dtype: float32    # loss in fp32 (numerical stability)
+    param_dtype: float32
+    compute_dtype: bfloat16
+    output_dtype: float32

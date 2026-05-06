@@ -11,10 +11,13 @@ Frontier-grade changes (perf/frontier-optim):
    embeddings from decay. This is the standard for all frontier models.
 
 3. Manual AdamW construction via optax.chain — gives full control over
-   clipping → Adam → masked decay → LR schedule ordering.
+   Adam → masked decay → LR schedule ordering.
 
-All optimizer logic is unchanged from the previous version — it was
-already correctly implemented. Only documentation updated.
+4. Gradient clipping removed from optax chain (FIX audit 2025):
+   Clipping now happens per-device in train_step.py BEFORE pmean,
+   matching MaxText convention. The optimizer chain no longer includes
+   clip_by_global_norm — it's applied at the gradient level in train_step.
+   This prevents gradient spikes from being diluted by multi-device averaging.
 """
 
 import optax
@@ -47,19 +50,21 @@ def get_weight_decay_mask(params: Any) -> Any:
 
 def build_adamw(config: LaughLMConfig, schedule: Callable) -> optax.GradientTransformation:
     """
-    AdamW with gradient clipping, masked weight decay, and LR schedule.
+    AdamW with masked weight decay and LR schedule.
 
-    Built manually via optax.chain for full control:
-      1. clip_by_global_norm — prevent gradient explosions
-      2. scale_by_adam — moment estimation (β1=0.9, β2=0.95)
-      3. add_decayed_weights — masked decay (exclude norms)
-      4. scale_by_learning_rate — apply LR schedule
+    Built manually via optax.chain:
+      1. scale_by_adam — moment estimation (β1=0.9, β2=0.95)
+      2. add_decayed_weights — masked decay (exclude norms)
+      3. scale_by_learning_rate — apply LR schedule
+
+    NOTE: clip_by_global_norm is REMOVED from the chain (fix audit 2025).
+    Gradient clipping now happens per-device in train_step.py BEFORE pmean,
+    preventing spike dilution across devices.
 
     β2=0.95: frontier standard (Llama 3, DeepSeek V3, MiniCPM).
     Lower β2 adapts faster to gradient magnitude changes.
     """
     return optax.chain(
-        optax.clip_by_global_norm(config.optimizer.gradient_clip),
         optax.scale_by_adam(
             b1=config.optimizer.beta1,
             b2=config.optimizer.beta2,
@@ -76,7 +81,6 @@ def build_adamw(config: LaughLMConfig, schedule: Callable) -> optax.GradientTran
 def build_adafactor(config: LaughLMConfig, schedule: Callable) -> optax.GradientTransformation:
     """Adafactor: memory-efficient optimizer that factors the second moment."""
     return optax.chain(
-        optax.clip_by_global_norm(config.optimizer.gradient_clip),
         optax.adafactor(learning_rate=schedule),
     )
 
@@ -84,7 +88,6 @@ def build_adafactor(config: LaughLMConfig, schedule: Callable) -> optax.Gradient
 def build_lion(config: LaughLMConfig, schedule: Callable) -> optax.GradientTransformation:
     """Lion optimizer (EvoLved Sign Momentum). Lower memory than Adam."""
     return optax.chain(
-        optax.clip_by_global_norm(config.optimizer.gradient_clip),
         optax.lion(
             learning_rate=schedule,
             b1=config.optimizer.beta1,
@@ -101,7 +104,12 @@ def build_optimizer(
     config: LaughLMConfig,
     schedule: Callable,
 ) -> optax.GradientTransformation:
-    """Build optimizer from config. Schedule is baked into the chain."""
+    """Build optimizer from config. Schedule is baked into the chain.
+    
+    NOTE: Gradient clipping (clip_by_global_norm) is NOT included here.
+    It is applied per-device in train_step.py before pmean to prevent
+    gradient spike dilution across devices.
+    """
 
     opt_type = config.optimizer.type
 
