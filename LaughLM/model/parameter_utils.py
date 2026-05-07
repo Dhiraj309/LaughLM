@@ -16,8 +16,12 @@ Frontier-grade changes (perf/frontier-optim):
    with the actual training loop.
 
 4. Weight tying awareness — if weight_tying=True, lm_head params are zero.
+
+5. Real device count in step estimation — uses jax.device_count() instead
+   of config.parallelism.data_parallel to match scheduler + trainer.
 """
 
+import jax
 from typing import Dict, Any
 
 from LaughLM.config.schema import LaughLMConfig
@@ -159,19 +163,32 @@ def estimate_memory_usage(config: LaughLMConfig) -> Dict[str, float]:
 # Training Step Estimation
 # ────────────────────────────────────────────────────────────────
 
-def estimate_training_steps(config: LaughLMConfig) -> Dict[str, Any]:
+def estimate_training_steps(
+    config: LaughLMConfig,
+    num_devices: int | None = None,
+) -> Dict[str, Any]:
     """
     Estimate tokens per step and total steps.
 
     INCLUDES gradient accumulation in tokens_per_step — matches
     the actual training loop in trainer.py.
+
+    Parameters
+    ----------
+    num_devices : int, optional
+        Real device count at runtime. If None, uses jax.device_count().
+        Replaces config.parallelism.data_parallel which may differ
+        from the actual number of JAX devices available.
     """
+    if num_devices is None:
+        num_devices = jax.device_count()
+
     seq_len    = config.runtime.seq_len
     batch      = config.runtime.micro_batch_per_device
-    devices    = config.parallelism.data_parallel
     grad_accum = config.runtime.gradient_accumulation
 
-    tokens_per_step = seq_len * batch * devices * grad_accum
+    # ✅ real device count — no longer uses config.parallelism.data_parallel
+    tokens_per_step = seq_len * batch * num_devices * grad_accum
 
     total_tokens = config.runtime.total_tokens
     steps = total_tokens // tokens_per_step
@@ -186,12 +203,22 @@ def estimate_training_steps(config: LaughLMConfig) -> Dict[str, Any]:
 # Pre-flight Report
 # ────────────────────────────────────────────────────────────────
 
-def generate_preflight_report(config: LaughLMConfig) -> None:
-    """Print a pre-training model report."""
+def generate_preflight_report(
+    config: LaughLMConfig,
+    num_devices: int | None = None,
+) -> None:
+    """
+    Print a pre-training model report.
 
+    Parameters
+    ----------
+    num_devices : int, optional
+        Pass jax.device_count() from Trainer for accurate step display.
+        If None, auto-detected via jax.device_count().
+    """
     params = estimate_parameters(config)
     memory = estimate_memory_usage(config)
-    steps  = estimate_training_steps(config)
+    steps  = estimate_training_steps(config, num_devices=num_devices)  # ✅
 
     print("\nModel Report")
     print("────────────────────────────────────────")

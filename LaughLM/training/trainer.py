@@ -10,6 +10,8 @@ Fixes:
 3. Uses state.step instead of blind loop
 4. Safer device → host extraction
 5. Perfect alignment with train_step token accounting
+6. num_devices passed to build_scheduler + compute_total_steps
+7. tokens_seen scaled by num_devices (state stores per-device count)
 """
 
 import json
@@ -69,7 +71,8 @@ class Trainer:
 
         params = self.model.init(self.rng.next_key(), dummy)["params"]
 
-        self.schedule = build_scheduler(config)
+        # ✅ Pass num_devices so scheduler step budget matches real runtime
+        self.schedule = build_scheduler(config, num_devices=self.num_devices)
         self.optimizer = build_optimizer(config, self.schedule)
 
         opt_state = self.optimizer.init(params)
@@ -137,7 +140,9 @@ class Trainer:
     def train(self, dataloader: Iterator):
 
         cfg = self.config
-        total_steps = compute_total_steps(cfg)
+
+        # ✅ Pass num_devices — must match what build_scheduler received
+        total_steps = compute_total_steps(cfg, num_devices=self.num_devices)
 
         # ✅ TRUE GLOBAL BATCH
         global_batch_size = (
@@ -183,7 +188,7 @@ class Trainer:
                 if batch.dtype != jnp.int32:
                     batch = batch.astype(jnp.int32)
 
-                # 🔥 CRITICAL SHAPE CHECK
+                # ✅ CRITICAL SHAPE CHECK
                 expected = global_batch_size
                 assert batch.shape[0] == expected, (
                     f"Batch mismatch: got {batch.shape[0]}, expected {expected}"
@@ -235,7 +240,8 @@ class Trainer:
                     metrics=metrics,
                     lr=lr,
                     grad_norm=metrics.get("grad_norm"),
-                    tokens_seen=int(state_host.tokens_processed),
+                    # ✅ scale per-device count → global token count
+                    tokens_seen=int(state_host.tokens_processed) * self.num_devices,
                     tokens_in_step=tokens_per_step,
                     step_time=step_time,
                 )
@@ -268,5 +274,6 @@ class Trainer:
 
         self.logger.log_summary(
             step,
-            int(state_host.tokens_processed),
+            # ✅ scale per-device count → global token count
+            int(state_host.tokens_processed) * self.num_devices,
         )

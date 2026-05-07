@@ -5,7 +5,7 @@ pmap training step with proper gradient all-reduce.
 
 FINAL (2026):
 ──────────────────────────────────────────────
-- Correct global token accounting (includes all devices)
+- Correct per-device token accounting (NO device_count inside pmap)
 - Safe for multi-device / multi-host setups
 - BF16-friendly gradient accumulation
 - Per-device grad clipping BEFORE pmean
@@ -43,6 +43,10 @@ def create_train_step(
         """
         batch shape inside pmap:
         (grad_accum, micro_batch_per_device, seq_len)
+
+        NOTE: The device axis is stripped by pmap before this function
+        executes. Every operation here is per-device. Global token
+        count is computed in trainer.py using the real num_devices.
         """
 
         params = state.params
@@ -119,14 +123,19 @@ def create_train_step(
         new_params = optax.apply_updates(params, updates)
 
         # ─────────────────────────────────────────────
-        # ✅ Correct GLOBAL token accounting
+        # ✅ Per-device token accounting
+        #
+        # Inside pmap, batch.shape = (grad_accum, micro_batch_per_device, seq_len).
+        # The device axis has already been stripped by pmap — do NOT multiply
+        # by jax.device_count() here. Global token count is assembled in
+        # trainer.py as: tokens_per_step = seq_len × global_batch × grad_accum
         # ─────────────────────────────────────────────
 
         tokens_in_step = (
             batch.shape[0]   # grad_accum
             * batch.shape[1] # micro_batch_per_device
             * batch.shape[2] # seq_len
-            * jax.device_count()  # 🔥 correct global device count
+            # ✅ NO jax.device_count() — this is per-device execution
         )
 
         # ─────────────────────────────────────────────
