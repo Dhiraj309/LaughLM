@@ -210,43 +210,49 @@ class GPTModel(nn.Module):
         input_ids: jnp.ndarray,
         doc_ids: Optional[jnp.ndarray] = None,
         kv_caches: Optional[List[KVCache]] = None,
+        position_offset: int = 0,
     ) -> Tuple[jnp.ndarray, Optional[List[KVCache]]]:
-
+    
         assert input_ids.ndim == 2, f"Expected (B, T), got {input_ids.shape}"
         B, T = input_ids.shape
-
+    
         # ── Token embedding ───────────────────────────────────
         x = self.token_embedding(input_ids)
         x = x.astype(self._compute_dtype)
-
+    
         # ── Positional encoding ───────────────────────────────
         if self.positional is not None:
-            positions = jnp.arange(T)[None, :]
+            positions = (
+                jnp.arange(position_offset, position_offset + T)[None, :]
+            )
             pos_emb = self.positional(positions)
             x = x + pos_emb.astype(self._compute_dtype)
-
+    
         # ── RoPE tables ───────────────────────────────────────
         rope_tables = None
         if self._use_rope:
-            rope_tables = (self._rope_sin[:T], self._rope_cos[:T])
-
+            rope_tables = (
+                self._rope_sin[position_offset:position_offset + T],
+                self._rope_cos[position_offset:position_offset + T],
+            )
+    
         # ── Transformer stack ─────────────────────────────────
         if kv_caches is not None:
             # ── Inference: for-loop with per-layer KV cache ──
             new_caches = []
-
+    
             if self._use_scan:
-                # Extract per-layer params from the scanned parameter tree.
-                # self.variables['params'] contains:
-                #   {token_embedding: {...}, scan_block: {Dense_0: {kernel: [L, ...]}, ...}, ...}
-                # We need just the scan_block subtree, unstacked per layer.
+                # Extract per-layer params from scanned param tree
                 all_params = self.variables.get("params", {})
                 scan_params = all_params.get("scan_block", all_params)
-                layer_params_list = _unstack_scan_params(scan_params, self._num_layers)
-
+                layer_params_list = _unstack_scan_params(
+                    scan_params,
+                    self._num_layers,
+                )
+    
                 for i in range(self._num_layers):
-                    # Use .apply() with per-layer params — stateless, no init needed
                     block_vars = {"params": layer_params_list[i]}
+    
                     x, new_cache = self._ref_block.apply(
                         block_vars,
                         x,
@@ -254,7 +260,9 @@ class GPTModel(nn.Module):
                         doc_ids=doc_ids,
                         kv_cache=kv_caches[i],
                     )
+    
                     new_caches.append(new_cache)
+    
             else:
                 for i, block in enumerate(self.blocks):
                     x, new_cache = block(
@@ -264,26 +272,37 @@ class GPTModel(nn.Module):
                         kv_cache=kv_caches[i],
                     )
                     new_caches.append(new_cache)
-
+    
         elif self._use_scan:
-            # ── Training: nn.scan (O(1) compile, optimal) ──
-            x, _ = self.scan_block(x, rope_tables, doc_ids, None)
+            # ── Training: nn.scan ─────────────────────────────
+            x, _ = self.scan_block(
+                x,
+                rope_tables,
+                doc_ids,
+                None,
+            )
             new_caches = None
-
+    
         else:
-            # ── Fallback: for-loop (no scan) ──
+            # ── Fallback: for-loop training ──────────────────
             for block in self.blocks:
-                x, _ = block(x, rope_tables=rope_tables, doc_ids=doc_ids, kv_cache=None)
+                x, _ = block(
+                    x,
+                    rope_tables=rope_tables,
+                    doc_ids=doc_ids,
+                    kv_cache=None,
+                )
+    
             new_caches = None
-
-        # ── Final norm + logits ───────────────────────────────
+    
+        # ── Final norm + logits ──────────────────────────────
         x = self.final_norm(x)
         x = x.astype(jnp.float32)
-
+    
         if self.config.architecture.weight_tying:
             embedding_table = self.token_embedding.embedding
             logits = jnp.einsum("btd,vd->btv", x, embedding_table)
         else:
             logits = self.lm_head(x)
-
+    
         return logits, new_caches

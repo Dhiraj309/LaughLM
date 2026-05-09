@@ -98,60 +98,95 @@ def generate(
     eos_token_id: Optional[int] = None,
     seed: int = 42,
 ) -> List[int]:
-    """
-    Autoregressive generation with KV cache.
 
-    FIX: Previous code ran the prompt through the model TWICE (once for
-    logits, once to fill KV caches). Now we run it ONCE, getting both
-    logits and KV caches from the same forward pass, then decode
-    autoregressively using the caches.
-    """
     config = model.config
+
     num_layers = config.model.num_layers
-    num_kv_heads = config.model.num_kv_heads or config.model.num_heads
-    head_dim = config.model.d_model // config.model.num_heads
+    num_kv_heads = (
+        config.model.num_kv_heads
+        or config.model.num_heads
+    )
+
+    head_dim = (
+        config.model.d_model
+        // config.model.num_heads
+    )
+
     max_seq_len = config.model.max_seq_len
 
     rng = jax.random.PRNGKey(seed)
+
     generated = list(np.array(input_ids[0]))
 
-    # ── Prefill: process prompt ONCE, get both logits and KV caches ──
+    # ── Initialize KV caches ─────────────────────────────
     kv_caches = [
-        init_kv_cache(1, max_seq_len, num_kv_heads, head_dim, jnp.bfloat16)
+        init_kv_cache(
+            1,
+            max_seq_len,
+            num_kv_heads,
+            head_dim,
+            jnp.bfloat16,
+        )
         for _ in range(num_layers)
     ]
 
-    # Single forward pass: get logits AND fill KV caches
+    # ── Prefill prompt ONCE ──────────────────────────────
     logits, kv_caches = model.apply(
-        {"params": params}, input_ids, kv_caches=kv_caches
+        {"params": params},
+        input_ids,
+        kv_caches=kv_caches,
+        position_offset=0,
     )
 
-    # Get next token from last position's logits
     next_logits = logits[0, -1, :]
 
-    # ── Autoregressive decode: one token at a time ────────────
+    # IMPORTANT:
+    # Track absolute sequence position for RoPE.
+    position_offset = input_ids.shape[1]
+
+    # ── Decode loop ──────────────────────────────────────
     for step in range(max_new_tokens):
+
         rng, sample_key = jax.random.split(rng)
+
         next_token = sample_token(
-            next_logits, sample_key, temperature=temperature, top_k=top_k, top_p=top_p,
+            next_logits,
+            sample_key,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
         )
 
         next_token_int = int(next_token)
+
         generated.append(next_token_int)
 
-        if eos_token_id is not None and next_token_int == eos_token_id:
+        if (
+            eos_token_id is not None
+            and next_token_int == eos_token_id
+        ):
             break
 
         if len(generated) >= max_seq_len:
             break
 
-        # Feed single token through model with KV cache
-        single_token = jnp.array([[next_token_int]], dtype=jnp.int32)
+        # ── Decode single token ─────────────────────────
+        single_token = jnp.array(
+            [[next_token_int]],
+            dtype=jnp.int32,
+        )
+
         logits, kv_caches = model.apply(
-            {"params": params}, single_token, kv_caches=kv_caches,
+            {"params": params},
+            single_token,
+            kv_caches=kv_caches,
+            position_offset=position_offset,
         )
 
         next_logits = logits[0, -1, :]
+
+        # Advance absolute position
+        position_offset += 1
 
     return generated
 
