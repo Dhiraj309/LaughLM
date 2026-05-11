@@ -9,48 +9,135 @@ from LaughLM.config.schema import LaughLMConfig
 # Utility: compute total training steps
 # ------------------------------------------------------------
 
-def compute_total_steps(config: LaughLMConfig, num_devices: int | None = None) -> int:
+def compute_total_steps(
+    config: LaughLMConfig,
+    num_devices: int | None = None,
+) -> int:
     """
-    Derive total gradient update steps from config.
+    Derive total optimizer update steps from cumulative token budget.
 
-    tokens_per_step = seq_len × micro_batch × num_devices × grad_accumulation
-    total_steps     = total_tokens / tokens_per_step
+    Formula
+    -------
+    tokens_per_step =
+        seq_len
+        × micro_batch_per_device
+        × num_devices
+        × gradient_accumulation
+
+    total_steps =
+        total_tokens // tokens_per_step
+
+    Resume Safety
+    -------------
+    total_tokens is interpreted as the FULL cumulative
+    training horizon, NOT "additional tokens".
+
+    Example:
+        Run 1:
+            total_tokens = 100M
+
+        Resume:
+            total_tokens = 200M
+
+    The scheduler then smoothly extends training to the
+    200M-token horizon without restarting LR schedules.
 
     Parameters
     ----------
-    config     : LaughLMConfig
-    num_devices: int, optional
-        Real device count at runtime. If None, uses jax.device_count().
-        Always pass this explicitly from Trainer to avoid config mismatch.
+    config : LaughLMConfig
+
+    num_devices : int, optional
+        Real runtime device count.
+        If None, uses jax.device_count().
+
+    Returns
+    -------
+    int
+        Total optimizer steps.
     """
+
     if num_devices is None:
         num_devices = jax.device_count()
+
+    if num_devices <= 0:
+        raise ValueError(
+            f"num_devices must be > 0, got {num_devices}"
+        )
 
     tokens_per_step = (
         config.runtime.seq_len
         * config.runtime.micro_batch_per_device
-        * num_devices                               # ✅ real devices, not config.parallelism.data_parallel
+        * num_devices
         * config.runtime.gradient_accumulation
     )
-    return config.runtime.total_tokens // tokens_per_step
+
+    if tokens_per_step <= 0:
+        raise ValueError(
+            "Computed tokens_per_step <= 0.\n"
+            "Check:\n"
+            "  seq_len\n"
+            "  micro_batch_per_device\n"
+            "  gradient_accumulation\n"
+            "  num_devices"
+        )
+
+    total_steps = (
+        config.runtime.total_tokens
+        // tokens_per_step
+    )
+
+    if total_steps <= 0:
+        raise ValueError(
+            "Computed total_steps <= 0.\n"
+            "Increase runtime.total_tokens or "
+            "reduce effective batch size."
+        )
+
+    print(
+        f"[scheduler] total_tokens: "
+        f"{config.runtime.total_tokens:,}"
+    )
+
+    print(
+        f"[scheduler] tokens_per_step: "
+        f"{tokens_per_step:,}"
+    )
+
+    print(
+        f"[scheduler] total_steps: "
+        f"{total_steps:,}"
+    )
+
+    return int(total_steps)
 
 
 # ------------------------------------------------------------
 # Cosine decay with warmup
 # ------------------------------------------------------------
 
-def build_cosine_scheduler(config: LaughLMConfig, num_devices: int | None = None) -> Callable:
+def build_cosine_scheduler(
+    config: LaughLMConfig,
+    num_devices: int | None = None,
+) -> Callable:
     """
     Warmup → cosine decay.
 
-    Standard schedule for fine-tuning or short pretraining runs.
-    NOT recommended for production pretraining — use WSD instead.
-    WSD allows training extension without restart; cosine does not.
+    Good for:
+    - fine-tuning
+    - short pretraining
+
+    Not ideal for very long training extension because
+    cosine naturally decays toward minimum LR.
     """
-    warmup      = config.scheduler.warmup_steps
-    lr          = config.optimizer.learning_rate
-    min_ratio   = config.scheduler.min_lr_ratio
-    total_steps = compute_total_steps(config, num_devices)
+
+    warmup = config.scheduler.warmup_steps
+    lr = config.optimizer.learning_rate
+    min_ratio = config.scheduler.min_lr_ratio
+
+    total_steps = compute_total_steps(
+        config,
+        num_devices,
+    )
 
     return optax.warmup_cosine_decay_schedule(
         init_value=0.0,
@@ -62,117 +149,195 @@ def build_cosine_scheduler(config: LaughLMConfig, num_devices: int | None = None
 
 
 # ------------------------------------------------------------
-# Linear (warmup → linear decay)
+# Linear decay
 # ------------------------------------------------------------
 
-def build_linear_scheduler(config: LaughLMConfig, num_devices: int | None = None) -> Callable:
+def build_linear_scheduler(
+    config: LaughLMConfig,
+    num_devices: int | None = None,
+) -> Callable:
     """
-    Linear warmup → linear decay to zero.
+    Warmup → linear decay.
     """
-    warmup      = config.scheduler.warmup_steps
-    lr          = config.optimizer.learning_rate
-    total_steps = compute_total_steps(config, num_devices)
+
+    warmup = config.scheduler.warmup_steps
+    lr = config.optimizer.learning_rate
+
+    total_steps = compute_total_steps(
+        config,
+        num_devices,
+    )
+
+    if warmup >= total_steps:
+        raise ValueError(
+            f"warmup_steps ({warmup}) must be "
+            f"< total_steps ({total_steps})"
+        )
 
     warmup_sched = optax.linear_schedule(
         init_value=0.0,
         end_value=lr,
-        transition_steps=warmup,
+        transition_steps=max(warmup, 1),
     )
 
     decay_sched = optax.linear_schedule(
         init_value=lr,
         end_value=0.0,
-        transition_steps=total_steps - warmup,
+        transition_steps=max(total_steps - warmup, 1),
     )
 
     return optax.join_schedules(
-        schedules=[warmup_sched, decay_sched],
+        schedules=[
+            warmup_sched,
+            decay_sched,
+        ],
         boundaries=[warmup],
     )
 
 
 # ------------------------------------------------------------
-# Inverse square root (T5 / original Transformer)
+# Inverse square root
 # ------------------------------------------------------------
 
-def build_rsqrt_scheduler(config: LaughLMConfig, num_devices: int | None = None) -> Callable:
+def build_rsqrt_scheduler(
+    config: LaughLMConfig,
+    num_devices: int | None = None,
+) -> Callable:
     """
-    Warmup then inverse square root decay.
-    LR ∝ 1/√step after warmup.
-    Used in T5 and the original Transformer paper.
-    num_devices is accepted for API consistency but not used
-    (rsqrt is step-based, not total-steps-based).
+    Warmup → inverse sqrt decay.
+
+    Used in:
+    - Transformer paper
+    - T5
+
+    Step-based schedule.
     """
+
     warmup = config.scheduler.warmup_steps
-    lr     = config.optimizer.learning_rate
+    lr = config.optimizer.learning_rate
+
+    if warmup <= 0:
+        raise ValueError(
+            "rsqrt scheduler requires "
+            "warmup_steps > 0"
+        )
 
     def schedule(step: int) -> float:
+
         step = max(step, 1)
+
         scale = min(
             step ** -0.5,
             step * warmup ** -1.5,
         )
+
         return lr * scale
 
     return schedule
 
 
 # ------------------------------------------------------------
-# WSD — Warmup → Stable → Decay
+# WSD Scheduler
 # ------------------------------------------------------------
 
-def build_wsd_scheduler(config: LaughLMConfig, num_devices: int | None = None) -> Callable:
+def build_wsd_scheduler(
+    config: LaughLMConfig,
+    num_devices: int | None = None,
+) -> Callable:
     """
-    Warmup-Stable-Decay learning rate schedule (MiniCPM, 2024).
-    Supports BOTH warmup_steps and warmup_fraction.
+    Warmup → Stable → Decay
+
+    Reference:
+    MiniCPM (2024)
+
+    Resume-friendly schedule design.
     """
 
-    lr          = config.optimizer.learning_rate
-    min_ratio   = config.scheduler.min_lr_ratio
-    total_steps = compute_total_steps(config, num_devices)
+    lr = config.optimizer.learning_rate
+    min_ratio = config.scheduler.min_lr_ratio
 
-    # ------------------------------------------------------------
-    # Warmup handling (steps OR fraction)
-    # ------------------------------------------------------------
+    total_steps = compute_total_steps(
+        config,
+        num_devices,
+    )
+
+    # --------------------------------------------------------
+    # Warmup
+    # --------------------------------------------------------
+
     if config.scheduler.warmup_steps is not None:
+
         warmup = config.scheduler.warmup_steps
-    elif getattr(config.scheduler, "warmup_fraction", None) is not None:
-        warmup = int(total_steps * config.scheduler.warmup_fraction)
-    else:
-        raise ValueError(
-            "WSD scheduler requires either 'warmup_steps' or 'warmup_fraction'."
+
+    elif getattr(
+        config.scheduler,
+        "warmup_fraction",
+        None,
+    ) is not None:
+
+        warmup = int(
+            total_steps
+            * config.scheduler.warmup_fraction
         )
 
-    # ------------------------------------------------------------
-    # Stable phase
-    # ------------------------------------------------------------
-    stable_fraction = config.scheduler.stable_fraction
-    stable_steps = int(total_steps * stable_fraction)
-
-    # ------------------------------------------------------------
-    # Decay phase
-    # ------------------------------------------------------------
-    if config.scheduler.decay_steps is not None:
-        decay_steps = config.scheduler.decay_steps
-        stable_steps = total_steps - warmup - decay_steps
     else:
-        decay_steps = total_steps - warmup - stable_steps
+        raise ValueError(
+            "WSD scheduler requires either "
+            "'warmup_steps' or 'warmup_fraction'."
+        )
 
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+    # Stable phase
+    # --------------------------------------------------------
+
+    stable_fraction = config.scheduler.stable_fraction
+
+    stable_steps = int(
+        total_steps * stable_fraction
+    )
+
+    # --------------------------------------------------------
+    # Decay phase
+    # --------------------------------------------------------
+
+    if config.scheduler.decay_steps is not None:
+
+        decay_steps = config.scheduler.decay_steps
+
+        stable_steps = (
+            total_steps
+            - warmup
+            - decay_steps
+        )
+
+    else:
+
+        decay_steps = (
+            total_steps
+            - warmup
+            - stable_steps
+        )
+
+    # --------------------------------------------------------
     # Safety checks
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+
     if warmup < 0:
-        raise ValueError(f"warmup must be >= 0, got {warmup}")
+        raise ValueError(
+            f"warmup must be >= 0, got {warmup}"
+        )
 
     if stable_steps < 0:
         raise ValueError(
-            f"Computed stable_steps is negative ({stable_steps}). "
+            f"Computed stable_steps is negative "
+            f"({stable_steps}). "
             f"Check stable_fraction or decay_steps."
         )
 
     if decay_steps < 0:
         raise ValueError(
-            f"Computed decay_steps is negative ({decay_steps}). "
+            f"Computed decay_steps is negative "
+            f"({decay_steps}). "
             f"Reduce warmup or stable_fraction."
         )
 
@@ -187,32 +352,53 @@ def build_wsd_scheduler(config: LaughLMConfig, num_devices: int | None = None) -
 
     min_lr = lr * min_ratio
 
-    # ------------------------------------------------------------
+    print(
+        "[scheduler] WSD phases:\n"
+        f"  warmup: {warmup:,}\n"
+        f"  stable: {stable_steps:,}\n"
+        f"  decay:  {decay_steps:,}"
+    )
+
+    # --------------------------------------------------------
     # Phase 1: Warmup
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+
     warmup_sched = optax.linear_schedule(
         init_value=0.0,
         end_value=lr,
         transition_steps=max(warmup, 1),
     )
 
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
     # Phase 2: Stable
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+
     stable_sched = optax.constant_schedule(lr)
 
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
     # Phase 3: Decay
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+
     decay_sched = optax.linear_schedule(
         init_value=lr,
         end_value=min_lr,
         transition_steps=max(decay_steps, 1),
     )
 
+    # --------------------------------------------------------
+    # Compose
+    # --------------------------------------------------------
+
     schedule = optax.join_schedules(
-        schedules=[warmup_sched, stable_sched, decay_sched],
-        boundaries=[warmup, warmup + stable_steps],
+        schedules=[
+            warmup_sched,
+            stable_sched,
+            decay_sched,
+        ],
+        boundaries=[
+            warmup,
+            warmup + stable_steps,
+        ],
     )
 
     return schedule
@@ -222,33 +408,48 @@ def build_wsd_scheduler(config: LaughLMConfig, num_devices: int | None = None) -
 # Dispatcher
 # ------------------------------------------------------------
 
-def build_scheduler(config: LaughLMConfig, num_devices: int | None = None) -> Callable:
+def build_scheduler(
+    config: LaughLMConfig,
+    num_devices: int | None = None,
+) -> Callable:
     """
-    Build learning rate schedule from config.
+    Build learning rate scheduler.
 
-    Returns a callable: step (int) → learning_rate (float).
-    This callable is passed to build_optimizer() to be baked into
-    the optimizer chain via optax.scale_by_learning_rate.
-
-    Parameters
-    ----------
-    num_devices : int, optional
-        Pass jax.device_count() from Trainer. If None, auto-detected.
+    Returns
+    -------
+    Callable:
+        step -> learning_rate
     """
 
     sched_type = config.scheduler.type
 
+    print(
+        f"[scheduler] type: {sched_type}"
+    )
+
     if sched_type == "cosine":
-        return build_cosine_scheduler(config, num_devices)
+        return build_cosine_scheduler(
+            config,
+            num_devices,
+        )
 
     if sched_type == "linear":
-        return build_linear_scheduler(config, num_devices)
+        return build_linear_scheduler(
+            config,
+            num_devices,
+        )
 
     if sched_type == "rsqrt":
-        return build_rsqrt_scheduler(config, num_devices)
+        return build_rsqrt_scheduler(
+            config,
+            num_devices,
+        )
 
     if sched_type == "wsd":
-        return build_wsd_scheduler(config, num_devices)
+        return build_wsd_scheduler(
+            config,
+            num_devices,
+        )
 
     raise ValueError(
         f"Unknown scheduler type: '{sched_type}'. "
