@@ -1,0 +1,93 @@
+[project]
+name = "grandline"
+version = "0.1.0"
+description = "Frontier-class deterministic dataset compiler for LLM pretraining"
+requires-python = ">=3.11"
+
+dependencies = [
+    # Core
+    "pyyaml>=6.0.1",
+    "orjson>=3.10.0",
+    "rich>=13.7.0",
+    "typer>=0.12.3",
+
+    # HF ecosystem
+    "datasets>=2.19.0",
+    "huggingface_hub>=0.23.0",
+    "transformers>=4.41.0",
+    "tokenizers>=0.19.1",
+
+    # Arrow / parquet
+    "pyarrow>=16.1.0",
+    "fastparquet>=2024.5.0",
+
+    # Text normalization
+    "ftfy>=6.2.0",
+
+    # Fast hashing
+    "blake3>=0.4.1",
+
+    # Dedup DB
+    "duckdb>=1.0.0",
+
+    # Numerical
+    "numpy>=1.26.4",
+
+    # Optional speedups
+    "xxhash>=3.4.1",
+
+    # Benchmark contamination
+    "datasketch>=1.6.5",
+]
+
+[project.optional-dependencies]
+
+dev = [
+    "pytest>=8.2.0",
+    "ruff>=0.4.5",
+    "black>=24.4.2",
+]
+
+tokenization = [
+    "sentencepiece>=0.2.0",
+]
+
+code = [
+    "tree-sitter>=0.22.3",
+]
+
+[project.scripts]
+grandline = "scripts.run_dataset:app"
+
+[build-system]
+requires = ["setuptools>=69.5.1"]
+build-backend = "setuptools.build_meta"
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+]
+
+ignore = [
+    "E501",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["dataset_compiler*"]
