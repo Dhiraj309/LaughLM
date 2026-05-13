@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "laughlm"
+version = "0.1.0"
+description = "Configuration-driven decoder-only LLM training system built with JAX"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    { name = "LaughLM Team" }
+]
+license = { text = "MIT" }
+
+dependencies = [
+    "jax>=0.4.20",
+    "flax>=0.7.0",
+    "optax>=0.1.7",
+    "pydantic>=2.0",
+    "PyYAML>=6.0",
+    "numpy>=1.24",
+    "tqdm>=4.65",
+    "tokenizers>=0.15",
+    "datasets>=2.14",
+    "orbax-checkpoint>=0.4.0",
+    "huggingface_hub>=0.16",
+    "transformers>=4.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=23.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+    "pytest>=7.0",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "LaughLM*",
+    "configs*",
+    "scripts*",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+select = ["E", "F", "W"]
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+ignore_missing_imports = true

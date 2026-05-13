@@ -1,0 +1,83 @@
+model:
+  d_model: 768
+  num_layers: 12
+  num_heads: 12
+  vocab_size: 32000
+  max_seq_len: 2048
+
+architecture:
+  positional: learned
+  normalization: layer_norm
+  norm_placement: post
+
+  attention_variant: mha
+  attention_impl: standard
+
+  ffn_type: gelu_mlp
+
+  residual: standard
+  embeddings: standard
+
+  bias: true
+  weight_tying: true
+
+initialization:
+  method: normal
+  std: 0.02
+  embedding_std: 0.02
+  attention_std: 0.02
+  mlp_std: 0.02
+  residual_scale: 1.0
+
+optimizer:
+  type: adamw
+  learning_rate: 3e-4
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1e-8
+  weight_decay: 0.1
+  gradient_clip: 1.0
+
+scheduler:
+  type: cosine
+  warmup_steps: 2000
+  min_lr_ratio: 0.1
+
+runtime:
+  seq_len: 2048
+  micro_batch_per_device: 2
+  gradient_accumulation: 1
+  total_tokens: 25000000000
+  eval_interval: 500
+  log_interval: 10
+
+data:
+  sources:
+    - name: HuggingFaceFW/fineweb-edu
+      weight: 1.0
+
+  max_seq_len: 2048
+  packing: true
+  eos_between_docs: true
+  pad_to_multiple: 128
+
+tokenizer:
+  algorithm: bpe
+  vocab_size: 32000
+  pre_tokenizer: byte_level
+  number_tokenization: single_digit
+  output_format: huggingface_fast
+
+hardware:
+  accelerator: tpu
+  type: v5e-8
+
+parallelism:
+  data_parallel: 8
+  model_parallel: 1
+  compute_dtype: bfloat16
+  param_dtype: float32
+
+monitoring:
+  tensorboard: true
+  rich_terminal: true
