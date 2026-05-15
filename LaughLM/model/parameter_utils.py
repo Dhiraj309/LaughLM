@@ -19,6 +19,11 @@ Frontier-grade changes (perf/frontier-optim):
 
 5. Real device count in step estimation — uses jax.device_count() instead
    of config.parallelism.data_parallel to match scheduler + trainer.
+
+FIX (frontier-optim audit 2026):
+  FFN dim estimation used multiple_of=64, but mlp.py uses multiple_of=128.
+  This caused parameter estimates to differ from actual model parameters.
+  Fixed to use multiple_of=128 consistently.
 """
 
 import jax
@@ -72,8 +77,9 @@ def estimate_parameters(config: LaughLMConfig) -> Dict[str, int]:
     attn_params = qkv_params + out_params
 
     # ── MLP per layer (SwiGLU/GEGLU-aware) ────────────────────
+    # Use multiple_of=128 to match mlp.py exactly
     ffn_type = config.architecture.ffn_type
-    ffn_dim = compute_ffn_dim(d_model, ffn_type, multiple_of=64)
+    ffn_dim = compute_ffn_dim(d_model, ffn_type, multiple_of=128)
 
     if ffn_type in ("swiglu", "geglu"):
         # Gate+Up fused: d_model → 2*ffn_dim, Down: ffn_dim → d_model
@@ -218,7 +224,7 @@ def generate_preflight_report(
     """
     params = estimate_parameters(config)
     memory = estimate_memory_usage(config)
-    steps  = estimate_training_steps(config, num_devices=num_devices)  # ✅
+    steps  = estimate_training_steps(config, num_devices=num_devices)
 
     print("\nModel Report")
     print("────────────────────────────────────────")

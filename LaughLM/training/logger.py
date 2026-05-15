@@ -5,11 +5,7 @@ Training logger with MFU tracking for LaughLM.
 
 Frontier-grade changes (perf/frontier-optim):
 ──────────────────────────────────────────────
-1. Fixed MFU calculation — the attention FLOPs formula used
-   `tokens_in_step` (which = batch × seq_len) multiplied by `seq_len`
-   again, effectively computing batch × seq_len². The correct formula
-   is `2 * n_layers * seq_len² * num_kv_heads * head_dim * batch`
-   for the QK^T and attn×V matmuls. Now uses the standard Kaplan et al.
+1. Fixed MFU calculation — uses the standard Kaplan et al.
    approximation: model_flops = (6N + 12 L H S) × T where N = non-emb
    params, L = layers, H = d_model, S = seq_len, T = tokens_in_step.
 
@@ -21,6 +17,14 @@ Frontier-grade changes (perf/frontier-optim):
 
 4. Smoothed tok/s — uses exponential moving average over last 10 steps
    to reduce noise in ETA estimates from step-to-step jitter.
+
+FIX (frontier-optim audit 2026):
+  - compute_total_steps() now receives num_devices parameter to match
+    the actual runtime device count used by trainer and scheduler.
+  - Removed early-step logging suppression (step < 10). Warmup metrics
+    are critical for diagnosing LR ramp issues and divergence.
+  - Uses jax.device_count() for hardware FLOPS calculation instead of
+    config.parallelism.data_parallel to be consistent with actual runtime.
 """
 
 import time
@@ -67,20 +71,29 @@ _GPU_FLOPS = {
 }
 
 
-def estimate_hardware_flops(config: LaughLMConfig) -> float:
+def estimate_hardware_flops(config: LaughLMConfig, num_devices: int = None) -> float:
     """
     Estimate total hardware peak FLOPs across all devices.
 
     Uses bf16 tensor core peak for the configured hardware type.
+    
+    Parameters
+    ----------
+    config : LaughLMConfig
+    num_devices : int, optional
+        Actual runtime device count. Falls back to jax.device_count().
     """
     accel   = config.hardware.accelerator
     hw_type = config.hardware.type.lower()
-    devices = config.parallelism.data_parallel
+    
+    # Use actual device count, not config value
+    if num_devices is None:
+        num_devices = jax.device_count()
 
     if accel == "tpu":
         for key, flops in _TPU_FLOPS.items():
             if key in hw_type:
-                return flops * devices
+                return flops * num_devices
         raise ValueError(
             f"Unknown TPU type: '{hw_type}'. "
             f"Known: {list(_TPU_FLOPS.keys())}"
@@ -92,7 +105,7 @@ def estimate_hardware_flops(config: LaughLMConfig) -> float:
                 f"Unknown GPU type: '{hw_type}'. "
                 f"Known: {list(_GPU_FLOPS.keys())}"
             )
-        return _GPU_FLOPS[hw_type] * devices
+        return _GPU_FLOPS[hw_type] * num_devices
 
     raise ValueError(f"Unknown accelerator: '{accel}'")
 
@@ -191,19 +204,29 @@ _RULE   = dim("─" * len(_HEADER_PLAIN))
 
 class TrainingLogger:
 
-    def __init__(self, config: LaughLMConfig, total_params: int, embedding_params: int):
+    def __init__(self, config: LaughLMConfig, total_params: int, embedding_params: int,
+                 num_devices: int = None):
+        """
+        Parameters
+        ----------
+        config : LaughLMConfig
+        total_params : int — total model parameter count
+        embedding_params : int — embedding parameter count
+        num_devices : int, optional — actual runtime device count
+        """
 
         self.config = config
+        self._num_devices = num_devices or jax.device_count()
 
         self.total_params = total_params
         self.embedding_params = embedding_params
         self._non_emb_params = total_params - embedding_params
 
         from LaughLM.training.scheduler import compute_total_steps
-        self.total_steps = compute_total_steps(config)
+        self.total_steps = compute_total_steps(config, num_devices=self._num_devices)
 
         self._tokens_total = config.runtime.total_tokens
-        self._hw_flops = estimate_hardware_flops(config)
+        self._hw_flops = estimate_hardware_flops(config, num_devices=self._num_devices)
 
         # Pre-compute per-step attention FLOPs components
         self._n_layers = config.model.num_layers
@@ -237,8 +260,6 @@ class TrainingLogger:
 
         if step % self.config.runtime.log_interval != 0:
             return
-        if step < 10:
-            return
         if tokens_in_step is None or step_time is None:
             raise ValueError("tokens_in_step and step_time must be provided")
 
@@ -270,11 +291,8 @@ class TrainingLogger:
         # Second term: attention score computation (QK^T + attn×V)
         #   This is the seq_len² part — NOT counted in "6N" because
         #   these FLOPs don't correspond to any parameter.
-        #   12 = 2 ops (QK^T + attn×V) × 2 (forward) × 3 (fwd+bwd)
-        #   ... actually: 2 × (2 for fwd QK^T, attn×V) × 3 (fwd+bwd)
         #   tokens_in_step = batch × seq_len, so this becomes:
-        #   12 * L * d * S * B * S = 12 * L * d * S² * B
-        #   which is the correct O(S²) attention cost.
+        #   12 * L * d * S² * B (correct O(S²) attention cost)
 
         param_flops = 6 * self._non_emb_params * tokens_in_step
         attn_flops  = 12 * self._n_layers * self._d_model * self._seq_len * tokens_in_step
@@ -287,7 +305,7 @@ class TrainingLogger:
         # ── ETA from smoothed throughput ──────────────────────
         eta     = fmt_time(remaining / max(self._ema_toks_per_sec, 1))
         elapsed = fmt_time(time.time() - self.start_time)
-        pct     = 100 * step / self.total_steps
+        pct     = 100 * step / max(self.total_steps, 1)
 
         is_best = loss < self._best_loss
         if is_best:

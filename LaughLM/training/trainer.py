@@ -15,6 +15,12 @@ Fixes:
 8. Proper checkpoint restore support
 9. Resume-safe optimizer + RNG restoration
 10. Avoid checkpoint spam at step 0
+
+FIX (frontier-optim audit 2026):
+  - num_devices passed to TrainingLogger for consistent MFU calculation
+  - Prefetch yields numpy arrays (no premature device transfer)
+  - Data reshaping done explicitly before train_step
+  - Logging enabled from step 0 (no early-step suppression)
 """
 
 import json
@@ -24,6 +30,7 @@ from typing import Iterator
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from LaughLM.config.schema import LaughLMConfig
 from LaughLM.model.gpt import GPTModel
@@ -60,7 +67,7 @@ class Trainer:
 
         self.rng = create_rng(seed=42)
 
-        generate_preflight_report(config)
+        generate_preflight_report(config, num_devices=self.num_devices)
 
         # ─────────────────────────────────────────────
         # Checkpoints
@@ -180,6 +187,7 @@ class Trainer:
             config,
             total_params=param_info["total_params"],
             embedding_params=param_info["embedding_params"],
+            num_devices=self.num_devices,
         )
 
     # ─────────────────────────────────────────────
@@ -216,6 +224,7 @@ class Trainer:
         print(f"Grad accum: {self.grad_accum}")
         print(f"{'=' * 60}\n")
 
+        # Prefetch yields numpy arrays (CPU-side buffering only)
         prefetched_loader = prefetch_to_device(
             iter(dataloader),
             size=8,
@@ -251,8 +260,11 @@ class Trainer:
 
                 batch = next(data_iter)
 
-                if batch.dtype != jnp.int32:
-                    batch = batch.astype(jnp.int32)
+                # Ensure int32 numpy array
+                if not isinstance(batch, np.ndarray):
+                    batch = np.asarray(batch)
+                if batch.dtype != np.int32:
+                    batch = batch.astype(np.int32)
 
                 expected = global_batch_size
 
@@ -264,11 +276,11 @@ class Trainer:
 
                 micro_batches.append(batch)
 
-            batch = jnp.stack(micro_batches)
+            # Stack: (grad_accum, global_batch, seq_len)
+            batch = np.stack(micro_batches)
 
             # reshape →
             # (grad_accum, devices, micro_batch_per_device, seq)
-
             batch = batch.reshape(
                 self.grad_accum,
                 self.num_devices,
@@ -276,10 +288,11 @@ class Trainer:
                 cfg.runtime.seq_len,
             )
 
-            # →
-            # (devices, grad_accum, micro_batch_per_device, seq)
+            # → (devices, grad_accum, micro_batch_per_device, seq)
+            batch = np.swapaxes(batch, 0, 1)
 
-            batch = jnp.swapaxes(batch, 0, 1)
+            # Transfer to devices (contiguous for efficient DMA)
+            batch = jnp.asarray(batch)
 
             # ─────────────────────────────────────────
             # Train step

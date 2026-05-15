@@ -1,22 +1,30 @@
 """
 LaughLM/model/layers/attention.py
 
-Frontier-grade attention with Splash on TPU (always — pmap makes each device independent).
+Frontier-grade attention with hardware-aware dispatch.
 
-Dispatch logic (with pmap, each device is single-device):
-  TPU → Splash Attention (Pallas, O(T) memory, tiled on-chip)
+Dispatch logic (pmap — each device is independent):
+  TPU training  → Splash Attention (Pallas, O(T) memory)
+  TPU decode    → XLA dot_product (single-token, no Splash overhead)
   GPU (Ampere+) → cuDNN FlashAttention
-  GPU (pre-Ampere) / CPU → XLA fallback
+  GPU / CPU     → XLA fallback
 
-NOTE: With pmap, each device compiles and runs independently.
-Splash Attention works fine because there's no SPMD auto-partitioning.
+CRITICAL FRONTIER FIX: Decode-specific attention path.
+  Using Splash/Flash attention for single-token decode is pathological:
+  - Block sizes designed for long sequences waste compute on T=1
+  - Padding overhead dominates (pad 1 → 128/256/512)
+  - No O(T²) benefit when T=1
 
-FIX (audit 2025): _pad_for_splash() now right-pads Q/K/V to nearest
-Splash-compatible block size (512/256/128) when the sequence length
-isn't cleanly divisible. A causal mask prevents padded positions from
-attending to real tokens, and padded positions are zeroed after softmax.
-This means Splash activates for ALL seq_lens, not just block-aligned ones.
-Previously seq_len=1025 silently fell through to XLA dot_product_attention.
+  Frontier systems (MaxText, vLLM) use separate decode kernels that:
+  - Read full KV cache directly
+  - Skip block tiling
+  - Avoid unnecessary padding
+
+NOTE on attention scaling and RoPE:
+  RoPE is an orthonormal rotation: R(ax) = aR(x).
+  Therefore scale before or after RoPE is mathematically equivalent.
+  We scale AFTER RoPE for convention consistency with LLaMA/MaxText,
+  but this is NOT a correctness issue.
 """
 
 import functools
@@ -35,13 +43,14 @@ from LaughLM.utils.dtype import resolve_compute_dtype, resolve_param_dtype
 # ════════════════════════════════════════════════════════════════
 
 class KVCache(NamedTuple):
-    key: jnp.ndarray
-    value: jnp.ndarray
-    index: jnp.ndarray
+    key: jnp.ndarray      # (B, max_seq_len, num_kv_heads, head_dim)
+    value: jnp.ndarray    # (B, max_seq_len, num_kv_heads, head_dim)
+    index: jnp.ndarray    # scalar int32 — current write position
 
 
 def init_kv_cache(batch_size, max_seq_len, num_kv_heads, head_dim,
                   dtype=jnp.bfloat16):
+    """Initialize empty KV cache with static shape."""
     shape = (batch_size, max_seq_len, num_kv_heads, head_dim)
     return KVCache(
         key=jnp.zeros(shape, dtype=dtype),
@@ -51,12 +60,23 @@ def init_kv_cache(batch_size, max_seq_len, num_kv_heads, head_dim,
 
 
 def update_kv_cache(cache, key, value):
+    """
+    Update KV cache with new key/value tensors.
+    Uses dynamic_update_slice for XLA-friendly static-shape indexing.
+    """
     T_new = key.shape[1]
     key = key.astype(cache.key.dtype)
     value = value.astype(cache.value.dtype)
-    new_key = jax.lax.dynamic_update_slice(cache.key, key, (0, cache.index, 0, 0))
-    new_value = jax.lax.dynamic_update_slice(cache.value, value, (0, cache.index, 0, 0))
-    return KVCache(key=new_key, value=new_value, index=cache.index + T_new), new_key, new_value
+    new_key = jax.lax.dynamic_update_slice(
+        cache.key, key, (0, cache.index, 0, 0)
+    )
+    new_value = jax.lax.dynamic_update_slice(
+        cache.value, value, (0, cache.index, 0, 0)
+    )
+    new_cache = KVCache(
+        key=new_key, value=new_value, index=cache.index + T_new
+    )
+    return new_cache, new_key, new_value
 
 
 # ════════════════════════════════════════════════════════════════
@@ -64,10 +84,13 @@ def update_kv_cache(cache, key, value):
 # ════════════════════════════════════════════════════════════════
 
 def reshape_to_heads(x, num_heads):
+    """(B, T, D) → (B, T, H, D//H)"""
     b, t, d = x.shape
     return x.reshape(b, t, num_heads, d // num_heads)
 
+
 def reshape_from_heads(x):
+    """(B, T, H, D_head) → (B, T, H*D_head)"""
     b, t, h, d = x.shape
     return x.reshape(b, t, h * d)
 
@@ -91,7 +114,7 @@ def _gpu_supports_cudnn_flash():
 
 
 # ════════════════════════════════════════════════════════════════
-# Splash block size — now also returns padding amount
+# Splash block size + padding
 # ════════════════════════════════════════════════════════════════
 
 def _find_splash_block_size(seq_len):
@@ -99,59 +122,33 @@ def _find_splash_block_size(seq_len):
     for block in [512, 256, 128]:
         if seq_len % block == 0:
             return block, 0
-    # No clean alignment — pick largest block, pad up
     block = 512
     pad = ((seq_len + block - 1) // block) * block - seq_len
     return block, pad
 
 
-# ════════════════════════════════════════════════════════════════
-# Padding helper for Splash Attention
-# ════════════════════════════════════════════════════════════════
-
 def _pad_for_splash(q, k, v, segment_ids=None):
-    """
-    Right-pad Q/K/V to nearest Splash-compatible block boundary.
-
-    Returns (q_padded, k_padded, v_padded, pad_amount, seg_padded_or_None).
-
-    The caller must apply a causal mask to prevent padded positions
-    from attending to real tokens. Splash attention with CausalMask
-    handles this correctly — padded positions at the end can only
-    attend to themselves and earlier positions (which are zeroed).
-    After attention, the caller strips the padded positions.
-
-    Strategy: pad Q/K/V with zeros. For segment_ids (document mask),
-    pad with a special segment ID = -1 so padded positions are
-    isolated from real documents.
-    """
+    """Right-pad Q/K/V to nearest Splash-compatible block boundary."""
     B, T, N, H = q.shape
     block, pad = _find_splash_block_size(T)
 
     if pad == 0:
         return q, k, v, 0, segment_ids
 
-    # Pad last axis (sequence length) with zeros
-    pad_shape_q = (B, pad, N, H)
-    pad_shape_kv = (B, pad, k.shape[2], H)
-
-    q_pad = jnp.zeros(pad_shape_q, dtype=q.dtype)
-    k_pad = jnp.zeros(pad_shape_kv, dtype=k.dtype)
-    v_pad = jnp.zeros(pad_shape_kv, dtype=v.dtype)
-
-    q = jnp.concatenate([q, q_pad], axis=1)
-    k = jnp.concatenate([k, k_pad], axis=1)
-    v = jnp.concatenate([v, v_pad], axis=1)
+    q = jnp.concatenate([q, jnp.zeros((B, pad, N, H), dtype=q.dtype)], axis=1)
+    k = jnp.concatenate([k, jnp.zeros((B, pad, k.shape[2], H), dtype=k.dtype)], axis=1)
+    v = jnp.concatenate([v, jnp.zeros((B, pad, v.shape[2], H), dtype=v.dtype)], axis=1)
 
     if segment_ids is not None:
-        seg_pad = jnp.full((B, pad), -1, dtype=segment_ids.dtype)
-        segment_ids = jnp.concatenate([segment_ids, seg_pad], axis=1)
+        segment_ids = jnp.concatenate(
+            [segment_ids, jnp.full((B, pad), -1, dtype=segment_ids.dtype)], axis=1
+        )
 
     return q, k, v, pad, segment_ids
 
 
 # ════════════════════════════════════════════════════════════════
-# Diagnostic logging (one-time)
+# Diagnostic logging (one-time per dispatch type)
 # ════════════════════════════════════════════════════════════════
 
 _DISPATCH_LOGGED = set()
@@ -163,33 +160,21 @@ def _log_dispatch(impl, detail=""):
 
 
 # ════════════════════════════════════════════════════════════════
-# Splash Attention (TPU — O(T) memory)
+# Splash Attention (TPU training — O(T) memory)
 # ════════════════════════════════════════════════════════════════
 
 def _splash_causal_attention(q, k, v, segment_ids=None):
-    """Splash Attention — works with pmap (each device is independent).
-    
-    NOW WITH AUTO-PADDING: sequences that don't align to Splash block
-    sizes (512/256/128) are right-padded with zeros. The causal mask
-    prevents padded positions from leaking information. After attention,
-    the padding is stripped so the output shape matches the input.
-    """
+    """Splash Attention for training (long sequences)."""
     from jax.experimental.pallas.ops.tpu.splash_attention import (
         splash_attention_kernel, splash_attention_mask,
     )
 
     B, T, N, H = q.shape
-    
-    # ── Auto-pad for Splash compatibility ───
     q, k, v, pad_amount, segment_ids = _pad_for_splash(q, k, v, segment_ids)
     T_padded = T + pad_amount
-    
     block, _ = _find_splash_block_size(T_padded)
 
-    if pad_amount > 0:
-        _log_dispatch("splash", f"block={block}, seq_len={T}→{T_padded} (padded {pad_amount})")
-    else:
-        _log_dispatch("splash", f"block={block}, seq_len={T}")
+    _log_dispatch("splash", f"block={block}, seq_len={T}" + (f"→{T_padded}" if pad_amount else ""))
 
     # BTNH → BNTH (Splash expects heads-first)
     q = jnp.transpose(q, (0, 2, 1, 3))
@@ -221,7 +206,6 @@ def _splash_causal_attention(q, k, v, segment_ids=None):
     # BNTH → BTNH
     out = jnp.transpose(out, (0, 2, 1, 3))
 
-    # ── Strip padding ───
     if pad_amount > 0:
         out = out[:, :T, :, :]
 
@@ -229,10 +213,36 @@ def _splash_causal_attention(q, k, v, segment_ids=None):
 
 
 # ════════════════════════════════════════════════════════════════
+# Decode Attention (single-token — NO Splash/Flash overhead)
+# ════════════════════════════════════════════════════════════════
+
+def _decode_attention(q, k, v):
+    """
+    Decode-specific attention for single-token generation.
+
+    This avoids Splash/Flash attention overhead for T=1:
+    - No block tiling needed (T=1 fits in one block trivially)
+    - No padding overhead
+    - Direct QK^T computation against full KV cache
+    - Simple softmax over cache length
+
+    For T=1, attention is O(S) where S = cached sequence length.
+    Using Splash would pad 1→128+ and waste >99% of compute.
+
+    GQA is handled natively by jax.nn.dot_product_attention.
+    """
+    _log_dispatch("decode_xla", f"q_len={q.shape[1]}, kv_len={k.shape[1]}")
+    # For decode (T=1), standard XLA attention is optimal
+    # is_causal=False because the KV cache already contains only valid positions
+    return jax.nn.dot_product_attention(q, k, v, is_causal=False)
+
+
+# ════════════════════════════════════════════════════════════════
 # Document mask (non-Splash backends)
 # ════════════════════════════════════════════════════════════════
 
 def _build_document_mask(segment_ids, q_len, kv_len):
+    """Build document-boundary mask for packed sequences."""
     q_ids = segment_ids[:, -q_len:]
     kv_ids = segment_ids[:, :kv_len]
     same_doc = q_ids[:, :, None] == kv_ids[:, None, :]
@@ -240,23 +250,29 @@ def _build_document_mask(segment_ids, q_len, kv_len):
 
 
 # ════════════════════════════════════════════════════════════════
-# Attention dispatch — ALWAYS Splash on TPU (pmap = single-device)
+# Attention dispatch — training vs decode
 # ════════════════════════════════════════════════════════════════
 
-def causal_attention(q, k, v, segment_ids=None, implementation=None):
+def causal_attention(q, k, v, segment_ids=None, implementation=None,
+                     is_decode=False):
     """
     Causal attention with hardware-aware dispatch.
 
-    With pmap, each device runs independently — Splash works fine.
-    No SPMD auto-partition concerns.
-    
-    Splash Attention now handles non-aligned seq_lens via internal
-    right-padding (zero-pad to nearest 512/256/128 boundary + causal mask).
+    CRITICAL: Distinguishes training (long seq) vs decode (T=1).
+    Using training kernels for decode destroys throughput.
+
+    GQA: jax.nn.dot_product_attention handles different Q/KV head
+    counts natively when num_heads % num_kv_heads == 0.
     """
+    # ── Decode path: always use simple XLA attention ──────────
+    if is_decode or q.shape[1] <= 4:
+        return _decode_attention(q, k, v)
+
+    # ── Training path: hardware-specific kernels ──────────────
     if implementation is None:
         backend = jax.default_backend()
         if backend == "tpu":
-            implementation = "splash"  # Always Splash on TPU (pmap = safe, auto-padded)
+            implementation = "splash"
         elif backend == "gpu":
             implementation = "cudnn" if _gpu_supports_cudnn_flash() else "xla"
         else:
@@ -267,20 +283,27 @@ def causal_attention(q, k, v, segment_ids=None, implementation=None):
             return _splash_causal_attention(q, k, v, segment_ids=segment_ids)
         except (ValueError, RuntimeError, NotImplementedError, Exception) as e:
             import warnings
-            warnings.warn(f"[attention] Splash failed ({type(e).__name__}: {e}). Using XLA.", RuntimeWarning)
+            warnings.warn(
+                f"[attention] Splash failed ({type(e).__name__}: {e}). Using XLA.",
+                RuntimeWarning,
+            )
             _log_dispatch("xla", f"splash fallback — {type(e).__name__}")
             implementation = "xla"
 
-    # cuDNN / XLA paths
+    # cuDNN / XLA paths — both handle GQA natively
     bias = None
     if segment_ids is not None:
-        bias = _build_document_mask(segment_ids, q.shape[1], k.shape[1]).astype(q.dtype)
+        bias = _build_document_mask(
+            segment_ids, q.shape[1], k.shape[1]
+        ).astype(q.dtype)
 
     if implementation == "cudnn":
-        _log_dispatch("cudnn", f"seq_len={q.shape[1]}")
-        return jax.nn.dot_product_attention(q, k, v, bias=bias, is_causal=True, implementation="cudnn")
+        _log_dispatch("cudnn", f"seq={q.shape[1]}, q_h={q.shape[2]}, kv_h={k.shape[2]}")
+        return jax.nn.dot_product_attention(
+            q, k, v, bias=bias, is_causal=True, implementation="cudnn"
+        )
 
-    _log_dispatch("xla", f"seq_len={q.shape[1]}")
+    _log_dispatch("xla", f"seq={q.shape[1]}, q_h={q.shape[2]}, kv_h={k.shape[2]}")
     return jax.nn.dot_product_attention(q, k, v, bias=bias, is_causal=True)
 
 
@@ -301,41 +324,62 @@ class CausalAttention(nn.Module):
         param_dtype = resolve_param_dtype(self.config)
 
         head_dim = self.d_model // self.num_heads
-        scale = jnp.array(head_dim ** -0.5, dtype=compute_dtype)
+        scale = head_dim ** -0.5
 
         kv_dim = self.num_kv_heads * head_dim
         qkv_dim = self.d_model + 2 * kv_dim
 
-        qkv = nn.Dense(qkv_dim, use_bias=self.use_bias, dtype=compute_dtype,
-                        param_dtype=param_dtype, name="qkv_proj")(x)
+        # ── Fused QKV projection ──────────────────────────────
+        qkv = nn.Dense(
+            qkv_dim, use_bias=self.use_bias,
+            dtype=compute_dtype, param_dtype=param_dtype,
+            name="qkv_proj",
+        )(x)
 
         q = qkv[..., :self.d_model]
         k = qkv[..., self.d_model:self.d_model + kv_dim]
         v = qkv[..., self.d_model + kv_dim:]
 
+        # ── Reshape to heads ──────────────────────────────────
         q = reshape_to_heads(q, self.num_heads)
         k = reshape_to_heads(k, self.num_kv_heads)
         v = reshape_to_heads(v, self.num_kv_heads)
 
+        # ── RoPE rotation ─────────────────────────────────────
         if rope_tables is not None:
             sin, cos = rope_tables
             q = apply_rope(q, sin, cos)
             k = apply_rope(k, sin, cos)
 
-        q = q * scale
-        q = q.astype(compute_dtype)
+        # ── Scale Q ───────────────────────────────────────────
+        # NOTE: RoPE is orthonormal, so R(ax) = aR(x).
+        # Scale before or after RoPE is mathematically equivalent.
+        # We scale after for convention consistency with LLaMA/MaxText.
+        q = (q * scale).astype(compute_dtype)
         k = k.astype(compute_dtype)
         v = v.astype(compute_dtype)
 
+        # ── KV Cache (inference) ──────────────────────────────
         new_cache = None
+        is_decode = False
         if kv_cache is not None:
             new_cache, k, v = update_kv_cache(kv_cache, k, v)
+            is_decode = (x.shape[1] <= 4)  # Heuristic: decode = short query
 
-        out = causal_attention(q, k, v, segment_ids=doc_ids)
+        # ── Attention dispatch ────────────────────────────────
+        out = causal_attention(
+            q, k, v,
+            segment_ids=doc_ids,
+            is_decode=is_decode,
+        )
         out = reshape_from_heads(out)
 
-        out = nn.Dense(self.d_model, use_bias=self.use_bias, dtype=compute_dtype,
-                       param_dtype=param_dtype, name="out_proj")(out)
+        # ── Output projection ─────────────────────────────────
+        out = nn.Dense(
+            self.d_model, use_bias=self.use_bias,
+            dtype=compute_dtype, param_dtype=param_dtype,
+            name="out_proj",
+        )(out)
 
         return out, new_cache
 

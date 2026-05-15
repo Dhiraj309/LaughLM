@@ -1,14 +1,24 @@
 """
 LaughLM/training/train_step.py
 
-pmap training step with proper gradient all-reduce.
+pmap training step with correct distributed gradient semantics.
 
-FINAL (2026):
+FRONTIER-GRADE (2026):
 ──────────────────────────────────────────────
-- Correct per-device token accounting (NO device_count inside pmap)
-- Safe for multi-device / multi-host setups
-- BF16-friendly gradient accumulation
-- Per-device grad clipping BEFORE pmean
+- Float32 gradient accumulation (mandatory for bf16 training)
+- Gradient clipping AFTER pmean (correct optimization semantics)
+- Decode-aware: training step only — decode uses separate path
+- Static shapes throughout (no recompilation)
+- Zero host synchronization in hot path
+
+CORRECTNESS NOTE on gradient clipping order:
+  Clipping before pmean does NOT cause replica divergence — after pmean,
+  all devices still converge to the same averaged result. However, it
+  changes OPTIMIZATION SEMANTICS:
+    clip(g_i) != clip(mean(g_i))
+  Clipping local gradients biases updates toward smaller local norms.
+  Frontier systems (MaxText, Pax, Megatron, DeepSpeed) all perform:
+    grads = pmean(grads) → grad_norm = global_norm(grads) → clip(grads)
 """
 
 import jax
@@ -32,6 +42,17 @@ def create_train_step(
     max_grad_norm: float = 1.0,
     axis_name="batch",
 ) -> Callable:
+    """
+    Create a pmap-wrapped training step.
+
+    The returned function has signature:
+        (state, batch) -> (new_state, metrics)
+
+    where batch shape (inside pmap, device axis stripped):
+        (grad_accum, micro_batch_per_device, seq_len)
+
+    Static shapes are enforced throughout to prevent recompilation.
+    """
 
     def loss_fn(params: Params, micro_batch: Batch):
         inputs, targets = shift_tokens(micro_batch)
@@ -41,31 +62,42 @@ def create_train_step(
 
     def train_step(state, batch):
         """
-        batch shape inside pmap:
-        (grad_accum, micro_batch_per_device, seq_len)
+        Single optimizer step with gradient accumulation.
 
-        NOTE: The device axis is stripped by pmap before this function
-        executes. Every operation here is per-device. Global token
-        count is computed in trainer.py using the real num_devices.
+        Execution order:
+          1. Accumulate gradients in fp32 (per-device, via lax.scan)
+          2. Average across accumulation steps
+          3. pmean across devices (all-reduce)
+          4. Compute global norm and clip (on globally-correct gradient)
+          5. Optimizer step
+          6. Update state
+
+        This ordering ensures all devices compute identical updates.
         """
 
         params = state.params
         opt_state = state.opt_state
 
-        # RNG
+        # RNG split for this step
         state, step_rng = state.next_rng()
 
         # ─────────────────────────────────────────────
-        # Gradient accumulator (same dtype as params)
+        # Gradient accumulator — ALWAYS float32
+        #
+        # bf16 accumulation loses mantissa precision over multiple
+        # microbatches, causing noisy gradients and worse convergence.
+        # This is mandatory for frontier training stability.
+        # Reference: MaxText, Megatron-LM, DeepSpeed all use fp32.
         # ─────────────────────────────────────────────
 
         grads_accum = jax.tree_util.tree_map(
-            lambda p: jnp.zeros_like(p, dtype=p.dtype),
+            lambda p: jnp.zeros_like(p, dtype=jnp.float32),
             params,
         )
 
         # ─────────────────────────────────────────────
-        # Gradient accumulation loop
+        # Gradient accumulation via lax.scan
+        # (canonical JAX pattern — confirmed by MaxText)
         # ─────────────────────────────────────────────
 
         def scan_fn(carry, micro_batch):
@@ -74,8 +106,9 @@ def create_train_step(
 
             loss, grads = jax.value_and_grad(loss_fn)(params, micro_batch)
 
+            # Accumulate in float32 regardless of param dtype
             grads_accum = jax.tree_util.tree_map(
-                lambda g_acc, g: g_acc + g,
+                lambda g_acc, g: g_acc + g.astype(jnp.float32),
                 grads_accum,
                 grads,
             )
@@ -89,11 +122,31 @@ def create_train_step(
         )
 
         # Average grads across accumulation steps
-        grads = jax.tree_util.tree_map(lambda g: g / grad_accum, grads_accum)
+        grads = jax.tree_util.tree_map(
+            lambda g: g / grad_accum, grads_accum
+        )
         loss = jnp.mean(losses)
 
         # ─────────────────────────────────────────────
-        # Gradient clipping (per-device BEFORE pmean)
+        # Cross-device synchronization (all-reduce)
+        #
+        # After pmean, all devices have identical gradients.
+        # This MUST happen before clipping to get correct
+        # global norm semantics: clip(mean(g_i)) not mean(clip(g_i)).
+        # ─────────────────────────────────────────────
+
+        grads = jax.lax.pmean(grads, axis_name)
+        loss = jax.lax.pmean(loss, axis_name)
+
+        # ─────────────────────────────────────────────
+        # Global gradient clipping AFTER pmean
+        #
+        # Now all devices have identical grads → identical global
+        # norm → identical clipping → identical optimizer updates.
+        #
+        # This is the correct optimization semantics. Clipping before
+        # pmean biases toward smaller local norms, changing the
+        # effective learning signal.
         # ─────────────────────────────────────────────
 
         grad_norm = optax.global_norm(grads)
@@ -106,40 +159,28 @@ def create_train_step(
         grads = jax.tree_util.tree_map(lambda g: g * clip_scale, grads)
 
         # ─────────────────────────────────────────────
-        # Cross-device synchronization
+        # Optimizer step (fp32 gradients → optimizer)
         # ─────────────────────────────────────────────
-
-        grads = jax.lax.pmean(grads, axis_name)
-        loss = jax.lax.pmean(loss, axis_name)
-        grad_norm = jax.lax.pmean(grad_norm, axis_name)
-
-        # ─────────────────────────────────────────────
-        # Optimizer step (fp32 master weights)
-        # ─────────────────────────────────────────────
-
-        grads = jax.tree_util.tree_map(lambda g: g.astype(jnp.float32), grads)
 
         updates, new_opt_state = optimizer.update(grads, opt_state, params)
         new_params = optax.apply_updates(params, updates)
 
         # ─────────────────────────────────────────────
-        # ✅ Per-device token accounting
+        # Per-device token accounting
         #
-        # Inside pmap, batch.shape = (grad_accum, micro_batch_per_device, seq_len).
-        # The device axis has already been stripped by pmap — do NOT multiply
-        # by jax.device_count() here. Global token count is assembled in
-        # trainer.py as: tokens_per_step = seq_len × global_batch × grad_accum
+        # Inside pmap, device axis is stripped. batch.shape =
+        # (grad_accum, micro_batch_per_device, seq_len).
+        # Global tokens assembled in trainer.py.
         # ─────────────────────────────────────────────
 
         tokens_in_step = (
             batch.shape[0]   # grad_accum
             * batch.shape[1] # micro_batch_per_device
             * batch.shape[2] # seq_len
-            # ✅ NO jax.device_count() — this is per-device execution
         )
 
         # ─────────────────────────────────────────────
-        # State update
+        # State update (no host sync here)
         # ─────────────────────────────────────────────
 
         new_state = state.apply_grad_step(
@@ -163,6 +204,7 @@ def create_train_step(
 
 
 def create_eval_step(model) -> Callable:
+    """Create pmap-wrapped evaluation step (no gradient computation)."""
 
     def eval_step(params: Params, batch: Batch):
         inputs, targets = shift_tokens(batch)
