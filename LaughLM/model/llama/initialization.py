@@ -85,6 +85,7 @@ def create_dense(
             config.initializer_range
         ),
         bias_init=llama_bias_init(),
+        dtype=jnp.float32,
         param_dtype=DEFAULT_PARAM_DTYPE,
         name=name,
     )
@@ -107,6 +108,7 @@ def create_embedding(
         embedding_init=llama_kernel_init(
             config.initializer_range
         ),
+        dtype=jnp.float32,
         param_dtype=DEFAULT_PARAM_DTYPE,
         name=name,
     )
