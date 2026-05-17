@@ -3,6 +3,17 @@ LaughLM/model/llama/model.py
 
 Canonical Llama decoder-only language model.
 
+Frontier-grade SPMD additions:
+────────────────────────────────────────────────────
+1. Logical partitioning for embeddings/logits
+2. Hidden-state logical constraints
+3. Tensor-parallel-safe tied embeddings
+4. Remat-ready decoder stack
+5. Scan-compatible layer structure
+6. Vocab-axis sharding semantics
+7. BF16 compute + FP32 logits stability
+8. Future-ready GSPMD compatibility
+
 Design goals
 ------------
 - HF-compatible architecture semantics
@@ -42,6 +53,10 @@ import jax.numpy as jnp
 
 from flax import linen as nn
 
+from flax.linen import (
+    partitioning as nn_partitioning,
+)
+
 from LaughLM.model.llama.config import (
     LlamaConfig,
 )
@@ -49,6 +64,8 @@ from LaughLM.model.llama.config import (
 from LaughLM.model.llama.initialization import (
     create_dense,
     create_embedding,
+    constrain_hidden_states,
+    constrain_logits,
 )
 
 from LaughLM.model.llama.decoder import (
@@ -84,6 +101,16 @@ class LlamaModel(nn.Module):
         # --------------------------------------------------
         # Token embeddings
         # --------------------------------------------------
+        #
+        # Logical shape:
+        #
+        #   [vocab, embed]
+        #
+        # Standard frontier sharding:
+        #
+        #   vocab -> fsdp
+        #   embed -> fsdp/tensor
+        #
 
         self.embed_tokens = create_embedding(
             num_embeddings=config.vocab_size,
@@ -95,17 +122,6 @@ class LlamaModel(nn.Module):
         # --------------------------------------------------
         # Optional rematerialization
         # --------------------------------------------------
-        #
-        # Activation checkpointing:
-        #
-        # - reduces HBM usage
-        # - enables larger batches
-        # - enables deeper models
-        # - improves TPU scaling
-        #
-        # This matches MaxText/T5X/Pax style
-        # transformer block rematerialization.
-        #
 
         LayerCls = LlamaDecoderLayer
 
@@ -128,21 +144,6 @@ class LlamaModel(nn.Module):
         # --------------------------------------------------
         # Decoder layers
         # --------------------------------------------------
-        #
-        # IMPORTANT
-        # ---------
-        # Explicit stable layer names:
-        #
-        # model.layers_0
-        # model.layers_1
-        #
-        # Required for:
-        # - deterministic checkpoints
-        # - stable traversal
-        # - remat compatibility
-        # - future scan compatibility
-        # - HF conversion
-        #
 
         self.layers = [
             LayerCls(
@@ -207,6 +208,14 @@ class LlamaModel(nn.Module):
         )
 
         # --------------------------------------------------
+        # Logical activation constraint
+        # --------------------------------------------------
+
+        hidden_states = constrain_hidden_states(
+            hidden_states
+        )
+
+        # --------------------------------------------------
         # Position IDs
         # --------------------------------------------------
 
@@ -257,15 +266,6 @@ class LlamaModel(nn.Module):
                     "decode mode requires kv_caches"
                 )
 
-            #
-            # IMPORTANT
-            # ---------
-            # During decode:
-            #
-            # visible KV length =
-            # existing cache + current token(s)
-            #
-
             key_length = (
                 kv_caches[0]
                 .cache_position
@@ -314,6 +314,12 @@ class LlamaModel(nn.Module):
                 )
             )
 
+            hidden_states = (
+                constrain_hidden_states(
+                    hidden_states
+                )
+            )
+
             if use_cache:
 
                 updated_caches.append(
@@ -325,6 +331,10 @@ class LlamaModel(nn.Module):
         # --------------------------------------------------
 
         hidden_states = self.norm(
+            hidden_states
+        )
+
+        hidden_states = constrain_hidden_states(
             hidden_states
         )
 
@@ -355,9 +365,11 @@ class LlamaForCausalLM(nn.Module):
         # LM head
         # --------------------------------------------------
         #
-        # HF Llama uses the same Gaussian init:
+        # Logical shape:
         #
-        # std = config.initializer_range
+        #   [embed, vocab]
+        #
+        # Tensor/vocab parallel compatible.
         #
 
         self.lm_head = create_dense(
@@ -415,10 +427,19 @@ class LlamaForCausalLM(nn.Module):
                 .embedding
             )
 
+            #
+            # embedding:
+            #   [vocab, embed]
+            #
+            # logits:
+            #   [batch, seq, vocab]
+            #
+
             logits = jnp.einsum(
                 "btd,vd->btv",
                 hidden_states,
                 embedding,
+                preferred_element_type=jnp.float32,
             )
 
         else:
@@ -426,6 +447,26 @@ class LlamaForCausalLM(nn.Module):
             logits = self.lm_head(
                 hidden_states
             )
+
+        # --------------------------------------------------
+        # Logical logits constraint
+        # --------------------------------------------------
+        #
+        # logits:
+        #   [batch, sequence, vocab]
+        #
+
+        logits = constrain_logits(
+            logits
+        )
+
+        # --------------------------------------------------
+        # Stable output dtype
+        # --------------------------------------------------
+
+        logits = logits.astype(
+            self.config.output_dtype
+        )
 
         return (
             logits,
