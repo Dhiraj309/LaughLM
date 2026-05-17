@@ -39,12 +39,13 @@ class RMSNorm(nn.Module):
 
     eps: float = 1e-6
 
-    dtype: jnp.dtype = jnp.float32
-
     param_dtype: jnp.dtype = jnp.float32
 
     @nn.compact
-    def __call__(self, hidden_states: jnp.ndarray) -> jnp.ndarray:
+    def __call__(
+        self,
+        hidden_states: jnp.ndarray,
+    ) -> jnp.ndarray:
 
         input_dtype = hidden_states.dtype
 
@@ -55,7 +56,13 @@ class RMSNorm(nn.Module):
             self.param_dtype,
         )
 
-        hidden_states_f32 = hidden_states.astype(jnp.float32)
+        # --------------------------------------------------
+        # HF-compatible float32 RMS computation
+        # --------------------------------------------------
+
+        hidden_states_f32 = hidden_states.astype(
+            jnp.float32
+        )
 
         variance = jnp.mean(
             jnp.square(hidden_states_f32),
@@ -65,13 +72,25 @@ class RMSNorm(nn.Module):
 
         hidden_states_normed = (
             hidden_states_f32
-            * jax.lax.rsqrt(variance + self.eps)
+            * jax.lax.rsqrt(
+                variance + self.eps
+            )
         )
 
-        hidden_states_normed = hidden_states_normed.astype(
+        # --------------------------------------------------
+        # Cast back to activation dtype
+        # --------------------------------------------------
+
+        hidden_states_normed = (
+            hidden_states_normed.astype(
+                input_dtype
+            )
+        )
+
+        weight = weight.astype(
             input_dtype
         )
 
-        weight = weight.astype(input_dtype)
-
-        return hidden_states_normed * weight
+        return (
+            hidden_states_normed * weight
+        )
