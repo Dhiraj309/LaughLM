@@ -173,6 +173,105 @@ def test_kv_cache_decode_parity():
         atol=1e-5,
     )
 
+def test_iterative_decode_parity():
+
+    config = build_test_config()
+
+    model = LlamaForCausalLM(config)
+
+    rng = jax.random.PRNGKey(42)
+
+    #
+    # Full sequence
+    #
+    # [1,2,3,4,5,6,7]
+    #
+
+    input_ids = jnp.array(
+        [[1, 2, 3, 4, 5, 6, 7]],
+        dtype=jnp.int32,
+    )
+
+    variables = model.init(
+        rng,
+        input_ids=input_ids,
+        use_cache=False,
+    )
+
+    # ---------------------------------------------------------
+    # Full forward reference
+    # ---------------------------------------------------------
+
+    full_logits, _ = model.apply(
+        variables,
+        input_ids=input_ids,
+        use_cache=False,
+    )
+
+    # ---------------------------------------------------------
+    # Prefill
+    # ---------------------------------------------------------
+
+    prefill_ids = input_ids[:, :4]
+
+    batch_size = prefill_ids.shape[0]
+
+    kv_caches = []
+
+    for _ in range(config.num_hidden_layers):
+
+        kv_caches.append(
+            init_kv_cache(
+                batch_size=batch_size,
+                max_seq_len=config.max_position_embeddings,
+                num_kv_heads=config.num_key_value_heads,
+                head_dim=config.head_dim,
+                dtype=jnp.float32,
+            )
+        )
+
+    _, kv_caches = model.apply(
+        variables,
+        input_ids=prefill_ids,
+        kv_caches=kv_caches,
+        use_cache=True,
+        mode="prefill",
+    )
+
+    # ---------------------------------------------------------
+    # Iterative decode
+    # ---------------------------------------------------------
+
+    for step_idx in range(4, 7):
+
+        decode_ids = input_ids[
+            :,
+            step_idx:step_idx + 1,
+        ]
+
+        decode_logits, kv_caches = model.apply(
+            variables,
+            input_ids=decode_ids,
+            kv_caches=kv_caches,
+            use_cache=True,
+            mode="decode",
+        )
+
+        decode_last_logits = (
+            decode_logits[:, -1, :]
+        )
+
+        reference_logits = (
+            full_logits[:, step_idx, :]
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(reference_logits),
+            np.asarray(decode_last_logits),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
 
 if __name__ == "__main__":
 
