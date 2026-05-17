@@ -9,6 +9,7 @@ Design goals
 - deterministic KV-cache behavior
 - explicit train/prefill/decode modes
 - deterministic initialization semantics
+- rematerialization-ready transformer stack
 - minimal abstraction surface
 - future-ready sharding compatibility
 
@@ -54,6 +55,10 @@ from LaughLM.model.llama.decoder import (
     LlamaDecoderLayer,
 )
 
+from LaughLM.model.llama.remat import (
+    remat_module,
+)
+
 from LaughLM.model.llama.rmsnorm import (
     RMSNorm,
 )
@@ -88,6 +93,39 @@ class LlamaModel(nn.Module):
         )
 
         # --------------------------------------------------
+        # Optional rematerialization
+        # --------------------------------------------------
+        #
+        # Activation checkpointing:
+        #
+        # - reduces HBM usage
+        # - enables larger batches
+        # - enables deeper models
+        # - improves TPU scaling
+        #
+        # This matches MaxText/T5X/Pax style
+        # transformer block rematerialization.
+        #
+
+        LayerCls = LlamaDecoderLayer
+
+        if getattr(
+            config,
+            "remat_policy",
+            None,
+        ) is not None:
+
+            LayerCls = remat_module(
+                LlamaDecoderLayer,
+                policy=config.remat_policy,
+                prevent_cse=getattr(
+                    config,
+                    "prevent_cse",
+                    False,
+                ),
+            )
+
+        # --------------------------------------------------
         # Decoder layers
         # --------------------------------------------------
         #
@@ -101,12 +139,13 @@ class LlamaModel(nn.Module):
         # Required for:
         # - deterministic checkpoints
         # - stable traversal
-        # - remat/scan compatibility
+        # - remat compatibility
+        # - future scan compatibility
         # - HF conversion
         #
 
         self.layers = [
-            LlamaDecoderLayer(
+            LayerCls(
                 config=config,
                 name=f"layers_{i}",
             )
@@ -158,6 +197,10 @@ class LlamaModel(nn.Module):
         """
 
         B, T = input_ids.shape
+
+        # --------------------------------------------------
+        # Token embeddings
+        # --------------------------------------------------
 
         hidden_states = self.embed_tokens(
             input_ids
