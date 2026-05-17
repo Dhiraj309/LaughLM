@@ -10,6 +10,28 @@ Design goals
 - explicit train/prefill/decode modes
 - minimal abstraction surface
 - future-ready sharding compatibility
+
+Tensor conventions
+------------------
+input_ids:
+    [B, T]
+
+position_ids:
+    [B, T]
+
+hidden_states:
+    [B, T, D]
+
+attention_mask:
+    [B, 1, Tq, Tk]
+
+logits:
+    [B, T, V]
+
+KV cache:
+    per-layer static cache:
+        key/value:
+            [B, S, KVH, Dh]
 """
 
 from typing import Optional
@@ -19,13 +41,19 @@ from flax import linen as nn
 import jax.numpy as jnp
 
 from LaughLM.model.llama.config import LlamaConfig
+
 from LaughLM.model.llama.decoder import (
     LlamaDecoderLayer,
 )
-from LaughLM.model.llama.rmsnorm import RMSNorm
+
+from LaughLM.model.llama.rmsnorm import (
+    RMSNorm,
+)
+
 from LaughLM.model.llama.kv_cache import (
     KVCache,
 )
+
 from LaughLM.model.llama.masks import (
     build_causal_mask,
     build_decode_mask,
@@ -47,23 +75,26 @@ class LlamaModel(nn.Module):
         )
 
         #
-        # IMPORTANT:
-        #
-        # Use scan-compatible/list-compatible HF hierarchy:
-        #
-        # model.layers.0
-        # model.layers.1
-        #
-        # NOT:
+        # IMPORTANT
+        # ---------
+        # Explicit stable layer names:
         #
         # model.layers_0
+        # model.layers_1
+        #
+        # Required for:
+        # - deterministic checkpoints
+        # - stable traversal
+        # - remat/scan compatibility
+        # - HF conversion
         #
 
         self.layers = [
             LlamaDecoderLayer(
                 config=config,
+                name=f"layers_{i}",
             )
-            for _ in range(
+            for i in range(
                 config.num_hidden_layers
             )
         ]
@@ -85,6 +116,26 @@ class LlamaModel(nn.Module):
         jnp.ndarray,
         Optional[list[KVCache]],
     ]:
+        """
+        Parameters
+        ----------
+        input_ids:
+            [B, T]
+
+        position_ids:
+            [B, T]
+
+        kv_caches:
+            list[KVCache]
+
+        use_cache:
+            Whether to return updated caches.
+
+        mode:
+            "train"
+            "prefill"
+            "decode"
+        """
 
         B, T = input_ids.shape
 
@@ -111,13 +162,11 @@ class LlamaModel(nn.Module):
             else:
                 start_pos = 0
 
-            position_ids = (
-                jnp.arange(
-                    start_pos,
-                    start_pos + T,
-                    dtype=jnp.int32,
-                )[None, :]
-            )
+            position_ids = jnp.arange(
+                start_pos,
+                start_pos + T,
+                dtype=jnp.int32,
+            )[None, :]
 
         # --------------------------------------------------
         # Attention mask
@@ -137,6 +186,15 @@ class LlamaModel(nn.Module):
                 raise ValueError(
                     "decode mode requires kv_caches"
                 )
+
+            #
+            # IMPORTANT
+            # ---------
+            # During decode:
+            #
+            # visible KV length =
+            # existing cache + current token(s)
+            #
 
             key_length = (
                 kv_caches[0]
@@ -168,6 +226,7 @@ class LlamaModel(nn.Module):
             layer_cache = None
 
             if kv_caches is not None:
+
                 layer_cache = kv_caches[
                     layer_idx
                 ]
@@ -230,6 +289,20 @@ class LlamaForCausalLM(nn.Module):
         jnp.ndarray,
         Optional[list[KVCache]],
     ]:
+        """
+        Parameters
+        ----------
+        input_ids:
+            [B, T]
+
+        position_ids:
+            [B, T]
+
+        Returns
+        -------
+        logits:
+            [B, T, vocab_size]
+        """
 
         hidden_states, updated_caches = (
             self.model(
