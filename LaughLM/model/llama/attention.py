@@ -221,9 +221,27 @@ class LlamaAttention(nn.Module):
             )
         )
 
-        # ──────────────────────────────────────────
+# ──────────────────────────────────────────
         # KV cache update
         # ──────────────────────────────────────────
+        #
+        # Cache storage layout:
+        #   [B, S, KVH, Dh]
+        #
+        # Attention layout:
+        #   [B, KVH, S, Dh]
+        #
+        # IMPORTANT:
+        # The cache stores FULL static tensors.
+        #
+        # We MUST slice to the valid cache length before
+        # attention, otherwise decode attends into:
+        #   - future positions
+        #   - zero-filled cache slots
+        #
+        # This is a critical autoregressive correctness
+        # invariant.
+        #
 
         updated_cache = None
 
@@ -237,9 +255,26 @@ class LlamaAttention(nn.Module):
                 )
             )
 
+            kv_length = updated_cache.cache_position
+
+            # Restrict visibility to valid cached tokens only
+            key_states = key_states[:, :kv_length, :, :]
+            value_states = value_states[:, :kv_length, :, :]
+
         # ──────────────────────────────────────────
         # Transpose for attention
         # ──────────────────────────────────────────
+        #
+        # Q:
+        #   [B, Tq, QH, Dh]
+        #     ->
+        #   [B, QH, Tq, Dh]
+        #
+        # K/V:
+        #   [B, Tk, KVH, Dh]
+        #     ->
+        #   [B, KVH, Tk, Dh]
+        #
 
         query_states = jnp.transpose(
             query_states,
