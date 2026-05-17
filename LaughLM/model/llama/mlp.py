@@ -6,6 +6,7 @@ Canonical Llama SwiGLU MLP.
 Design goals:
 - HF-compatible parameter naming
 - deterministic semantics
+- HF-compatible initialization
 - minimal architecture surface
 - stable bf16/fp16 behavior
 
@@ -18,12 +19,18 @@ Output:
     [B, T, D]
 """
 
-from flax import linen as nn
-
 import jax
 import jax.numpy as jnp
 
-from LaughLM.model.llama.config import LlamaConfig
+from flax import linen as nn
+
+from LaughLM.model.llama.config import (
+    LlamaConfig,
+)
+
+from LaughLM.model.llama.initialization import (
+    create_dense,
+)
 
 
 class LlamaMLP(nn.Module):
@@ -49,32 +56,57 @@ class LlamaMLP(nn.Module):
 
         config = self.config
 
-        gate_proj = nn.Dense(
-            config.intermediate_size,
+        # --------------------------------------------------
+        # SwiGLU projections
+        # --------------------------------------------------
+
+        gate_proj = create_dense(
+            features=(
+                config.intermediate_size
+            ),
+            config=config,
             use_bias=config.mlp_bias,
             name="gate_proj",
         )
 
-        up_proj = nn.Dense(
-            config.intermediate_size,
+        up_proj = create_dense(
+            features=(
+                config.intermediate_size
+            ),
+            config=config,
             use_bias=config.mlp_bias,
             name="up_proj",
         )
 
-        down_proj = nn.Dense(
-            config.hidden_size,
+        down_proj = create_dense(
+            features=config.hidden_size,
+            config=config,
             use_bias=config.mlp_bias,
             name="down_proj",
         )
 
-        gate = gate_proj(hidden_states)
+        # --------------------------------------------------
+        # SwiGLU
+        # --------------------------------------------------
 
-        gate = jax.nn.silu(gate)
+        gate = gate_proj(
+            hidden_states
+        )
 
-        up = up_proj(hidden_states)
+        gate = jax.nn.silu(
+            gate
+        )
 
-        hidden_states = gate * up
+        up = up_proj(
+            hidden_states
+        )
 
-        hidden_states = down_proj(hidden_states)
+        hidden_states = (
+            gate * up
+        )
+
+        hidden_states = down_proj(
+            hidden_states
+        )
 
         return hidden_states
