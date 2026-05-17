@@ -3,6 +3,16 @@ LaughLM/model/llama/attention.py
 
 Canonical Llama attention.
 
+Frontier-grade SPMD additions:
+────────────────────────────────────────────────────
+1. Logical activation constraints
+2. Tensor-parallel aware Q/K/V sharding
+3. KV-head-aware GQA partitioning
+4. Mesh-safe attention layouts
+5. Stable bf16 softmax path
+6. Sequence-parallel ready tensor semantics
+7. GSPMD-compatible attention pipeline
+
 Design goals:
 - HF-compatible semantics
 - deterministic KV-cache behavior
@@ -10,9 +20,10 @@ Design goals:
 - stable GQA implementation
 - minimal architecture surface
 - deterministic initialization semantics
+- tensor-parallel compatible layouts
 
 Tensor conventions
-------------------
+──────────────────
 Input hidden states:
     [B, T, D]
 
@@ -42,6 +53,9 @@ from LaughLM.model.llama.config import (
 
 from LaughLM.model.llama.initialization import (
     create_dense,
+    constrain_hidden_states,
+    constrain_attention_q,
+    constrain_attention_kv,
 )
 
 from LaughLM.model.llama.rope import (
@@ -54,6 +68,10 @@ from LaughLM.model.llama.kv_cache import (
     update_kv_cache,
 )
 
+
+# ─────────────────────────────────────────────────────────────
+# GQA helper
+# ─────────────────────────────────────────────────────────────
 
 def repeat_kv(
     hidden_states: jnp.ndarray,
@@ -103,6 +121,10 @@ def repeat_kv(
     )
 
 
+# ─────────────────────────────────────────────────────────────
+# Attention
+# ─────────────────────────────────────────────────────────────
+
 class LlamaAttention(nn.Module):
 
     config: LlamaConfig
@@ -137,13 +159,25 @@ class LlamaAttention(nn.Module):
             "decode"
         """
 
+        # --------------------------------------------------
+        # Hidden-state constraint
+        # --------------------------------------------------
+
+        hidden_states = constrain_hidden_states(
+            hidden_states
+        )
+
         B, T, _ = hidden_states.shape
 
         config = self.config
 
-        num_heads = config.num_attention_heads
+        num_heads = (
+            config.num_attention_heads
+        )
 
-        num_kv_heads = config.num_key_value_heads
+        num_kv_heads = (
+            config.num_key_value_heads
+        )
 
         head_dim = config.head_dim
 
@@ -188,6 +222,10 @@ class LlamaAttention(nn.Module):
             use_bias=config.attention_bias,
             name="o_proj",
         )
+
+        # --------------------------------------------------
+        # QKV projections
+        # --------------------------------------------------
 
         query_states = q_proj(
             hidden_states
@@ -251,33 +289,19 @@ class LlamaAttention(nn.Module):
         # --------------------------------------------------
         # KV cache update
         # --------------------------------------------------
-        #
-        # Cache storage layout:
-        #
-        #   [B, S, KVH, Dh]
-        #
-        # Attention layout:
-        #
-        #   [B, KVH, S, Dh]
-        #
-        # IMPORTANT:
-        #
-        # The cache stores FULL static tensors.
-        #
-        # We MUST slice to valid cache length
-        # before attention.
-        #
 
         updated_cache = None
 
         if kv_cache is not None:
 
-            updated_cache, key_states, value_states = (
-                update_kv_cache(
-                    kv_cache,
-                    key_states,
-                    value_states,
-                )
+            (
+                updated_cache,
+                key_states,
+                value_states,
+            ) = update_kv_cache(
+                kv_cache,
+                key_states,
+                value_states,
             )
 
             kv_length = (
@@ -330,6 +354,22 @@ class LlamaAttention(nn.Module):
         )
 
         # --------------------------------------------------
+        # Logical constraints
+        # --------------------------------------------------
+
+        query_states = constrain_attention_q(
+            query_states
+        )
+
+        key_states = constrain_attention_kv(
+            key_states
+        )
+
+        value_states = constrain_attention_kv(
+            value_states
+        )
+
+        # --------------------------------------------------
         # GQA expansion
         # --------------------------------------------------
 
@@ -344,7 +384,7 @@ class LlamaAttention(nn.Module):
         )
 
         # --------------------------------------------------
-        # Attention
+        # Attention logits
         # --------------------------------------------------
 
         attn_weights = jnp.matmul(
@@ -361,12 +401,30 @@ class LlamaAttention(nn.Module):
             * (head_dim ** -0.5)
         )
 
+        # --------------------------------------------------
+        # Attention mask
+        # --------------------------------------------------
+
         if attention_mask is not None:
 
             attn_weights = (
                 attn_weights
                 + attention_mask
             )
+
+        # --------------------------------------------------
+        # Numerically-stable softmax
+        # --------------------------------------------------
+        #
+        # Always compute softmax in fp32.
+        #
+        # Frontier standard:
+        #   bf16 logits
+        #       ->
+        #   fp32 softmax
+        #       ->
+        #   cast back
+        #
 
         attn_weights = (
             jax.nn.softmax(
@@ -378,6 +436,10 @@ class LlamaAttention(nn.Module):
                 query_states.dtype
             )
         )
+
+        # --------------------------------------------------
+        # Attention output
+        # --------------------------------------------------
 
         attn_output = jnp.matmul(
             attn_weights,
@@ -399,7 +461,27 @@ class LlamaAttention(nn.Module):
             config.hidden_size,
         )
 
+        # --------------------------------------------------
+        # Hidden-state constraint
+        # --------------------------------------------------
+
+        attn_output = constrain_hidden_states(
+            attn_output
+        )
+
+        # --------------------------------------------------
+        # Output projection
+        # --------------------------------------------------
+
         attn_output = o_proj(
+            attn_output
+        )
+
+        # --------------------------------------------------
+        # Final activation constraint
+        # --------------------------------------------------
+
+        attn_output = constrain_hidden_states(
             attn_output
         )
 
