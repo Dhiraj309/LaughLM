@@ -13,6 +13,7 @@ Frontier-grade SPMD additions:
 6. Vocab-axis sharding semantics
 7. BF16 compute + FP32 logits stability
 8. Future-ready GSPMD compatibility
+9. nn.scan transformer stack (MaxText/T5X-style)
 
 Design goals
 ------------
@@ -48,6 +49,7 @@ KV cache:
 """
 
 from typing import Optional
+from functools import partial
 
 import jax.numpy as jnp
 
@@ -109,7 +111,7 @@ class LlamaModel(nn.Module):
         # Standard frontier sharding:
         #
         #   vocab -> fsdp
-        #   embed -> fsdp/tensor
+        #   embed -> tensor/fsdp
         #
 
         self.embed_tokens = create_embedding(
@@ -142,18 +144,75 @@ class LlamaModel(nn.Module):
             )
 
         # --------------------------------------------------
-        # Decoder layers
+        # Decoder stack
         # --------------------------------------------------
+        #
+        # Frontier-grade scan stack.
+        #
+        # Benefits:
+        #
+        # - O(1) compile graph size
+        # - dramatically lower compile time
+        # - lower HBM pressure
+        # - remat-compatible
+        # - future FSDP compatible
+        # - future pipeline parallel compatible
+        #
+        # Parameter layout:
+        #
+        #   params["layers"][layer_idx]
+        #
+        # instead of:
+        #
+        #   params["layers_0"]
+        #   params["layers_1"]
+        #
+        # This matches MaxText/T5X/Pax conventions.
+        #
 
-        self.layers = [
-            LayerCls(
+        if getattr(
+            config,
+            "scan_layers",
+            False,
+        ):
+
+            ScanLayer = nn.scan(
+                LayerCls,
+
+                variable_axes={
+                    "params": 0,
+                },
+
+                split_rngs={
+                    "params": True,
+                },
+
+                in_axes=nn.broadcast,
+                out_axes=nn.broadcast,
+
+                length=config.num_hidden_layers,
+
+                metadata_params={
+                    "partition_name": "layers",
+                },
+            )
+
+            self.layers = ScanLayer(
                 config=config,
-                name=f"layers_{i}",
+                name="layers",
             )
-            for i in range(
-                config.num_hidden_layers
-            )
-        ]
+
+        else:
+
+            self.layers = [
+                LayerCls(
+                    config=config,
+                    name=f"layers_{i}",
+                )
+                for i in range(
+                    config.num_hidden_layers
+                )
+            ]
 
         # --------------------------------------------------
         # Final RMSNorm
@@ -290,41 +349,71 @@ class LlamaModel(nn.Module):
         # Decoder stack
         # --------------------------------------------------
 
-        updated_caches = []
+        # --------------------------------------------------
+        # Scan path
+        # --------------------------------------------------
 
-        for layer_idx, layer in enumerate(
-            self.layers
+        if getattr(
+            self.config,
+            "scan_layers",
+            False,
         ):
 
-            layer_cache = None
-
-            if kv_caches is not None:
-
-                layer_cache = kv_caches[
-                    layer_idx
-                ]
-
-            hidden_states, updated_cache = (
-                layer(
+            hidden_states, updated_caches = (
+                self.layers(
                     hidden_states=hidden_states,
                     positions=position_ids,
                     attention_mask=attention_mask,
-                    kv_cache=layer_cache,
+                    kv_cache=kv_caches,
                     mode=mode,
                 )
             )
 
-            hidden_states = (
-                constrain_hidden_states(
-                    hidden_states
-                )
+            hidden_states = constrain_hidden_states(
+                hidden_states
             )
 
-            if use_cache:
+        # --------------------------------------------------
+        # Non-scan fallback
+        # --------------------------------------------------
 
-                updated_caches.append(
-                    updated_cache
+        else:
+
+            updated_caches = []
+
+            for layer_idx, layer in enumerate(
+                self.layers
+            ):
+
+                layer_cache = None
+
+                if kv_caches is not None:
+
+                    layer_cache = kv_caches[
+                        layer_idx
+                    ]
+
+                hidden_states, updated_cache = (
+                    layer(
+                        hidden_states=hidden_states,
+                        positions=position_ids,
+                        attention_mask=attention_mask,
+                        kv_cache=layer_cache,
+                        mode=mode,
+                    )
                 )
+
+                hidden_states = (
+                    constrain_hidden_states(
+                        hidden_states
+                    )
+                )
+
+                if use_cache:
+
+                    updated_caches.append(
+                        updated_cache
+                    )
 
         # --------------------------------------------------
         # Final normalization
@@ -451,10 +540,6 @@ class LlamaForCausalLM(nn.Module):
         # --------------------------------------------------
         # Logical logits constraint
         # --------------------------------------------------
-        #
-        # logits:
-        #   [batch, sequence, vocab]
-        #
 
         logits = constrain_logits(
             logits
