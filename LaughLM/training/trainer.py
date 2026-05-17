@@ -1,3 +1,4 @@
+
 """
 LaughLM/training/trainer.py
 
@@ -10,6 +11,7 @@ Architecture:
 - No replicated TrainState
 - Mesh-native parameter initialization
 - Sharded optimizer state
+- Explicit input batch sharding
 - Resume-safe checkpoints
 - CPU-side async prefetch
 - Static-shape training loop
@@ -104,6 +106,7 @@ from LaughLM.distributed.state import (
 
 from LaughLM.distributed.sharding import (
     get_logical_axis_rules,
+    create_input_sharding,
 )
 
 
@@ -146,6 +149,16 @@ class Trainer:
             f"{self.num_devices} devices "
             f"with mesh axes="
             f"{self.mesh.axis_names}"
+        )
+
+        # --------------------------------------------------
+        # Explicit input sharding
+        # --------------------------------------------------
+
+        self.input_sharding = (
+            create_input_sharding(
+                self.mesh
+            )
         )
 
         # --------------------------------------------------
@@ -357,7 +370,7 @@ class Trainer:
                 config=config,
                 mesh=self.mesh,
                 state_shardings=self.shardings,
-                data_sharding=None,
+                data_sharding=self.input_sharding,
                 grad_accum=self.grad_accum,
                 max_grad_norm=(
                     config.optimizer
@@ -369,7 +382,7 @@ class Trainer:
                 model=self.model,
                 config=config,
                 mesh=self.mesh,
-                data_sharding=None,
+                data_sharding=self.input_sharding,
             )
 
         # --------------------------------------------------
@@ -543,14 +556,17 @@ class Trainer:
             )
 
             # ------------------------------------------
-            # Device transfer
+            # Explicit input sharding
             #
-            # TODO:
-            # explicit NamedSharding input placement
+            # IMPORTANT:
+            # No implicit placement.
+            # No hidden resharding.
+            # Canonical GSPMD semantics.
             # ------------------------------------------
 
             batch = jax.device_put(
-                batch
+                batch,
+                self.input_sharding,
             )
 
             # ------------------------------------------
