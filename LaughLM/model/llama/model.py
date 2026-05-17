@@ -8,6 +8,7 @@ Design goals
 - HF-compatible architecture semantics
 - deterministic KV-cache behavior
 - explicit train/prefill/decode modes
+- deterministic initialization semantics
 - minimal abstraction surface
 - future-ready sharding compatibility
 
@@ -36,11 +37,18 @@ KV cache:
 
 from typing import Optional
 
-from flax import linen as nn
-
 import jax.numpy as jnp
 
-from LaughLM.model.llama.config import LlamaConfig
+from flax import linen as nn
+
+from LaughLM.model.llama.config import (
+    LlamaConfig,
+)
+
+from LaughLM.model.llama.initialization import (
+    create_dense,
+    create_embedding,
+)
 
 from LaughLM.model.llama.decoder import (
     LlamaDecoderLayer,
@@ -68,12 +76,20 @@ class LlamaModel(nn.Module):
 
         config = self.config
 
-        self.embed_tokens = nn.Embed(
+        # --------------------------------------------------
+        # Token embeddings
+        # --------------------------------------------------
+
+        self.embed_tokens = create_embedding(
             num_embeddings=config.vocab_size,
             features=config.hidden_size,
+            config=config,
             name="embed_tokens",
         )
 
+        # --------------------------------------------------
+        # Decoder layers
+        # --------------------------------------------------
         #
         # IMPORTANT
         # ---------
@@ -98,6 +114,10 @@ class LlamaModel(nn.Module):
                 config.num_hidden_layers
             )
         ]
+
+        # --------------------------------------------------
+        # Final RMSNorm
+        # --------------------------------------------------
 
         self.norm = RMSNorm(
             hidden_size=config.hidden_size,
@@ -160,6 +180,7 @@ class LlamaModel(nn.Module):
                 )
 
             else:
+
                 start_pos = 0
 
             position_ids = jnp.arange(
@@ -172,17 +193,23 @@ class LlamaModel(nn.Module):
         # Attention mask
         # --------------------------------------------------
 
-        if mode in ("train", "prefill"):
+        if mode in (
+            "train",
+            "prefill",
+        ):
 
-            attention_mask = build_causal_mask(
-                query_length=T,
-                key_length=T,
-                dtype=hidden_states.dtype,
+            attention_mask = (
+                build_causal_mask(
+                    query_length=T,
+                    key_length=T,
+                    dtype=hidden_states.dtype,
+                )
             )
 
         elif mode == "decode":
 
             if kv_caches is None:
+
                 raise ValueError(
                     "decode mode requires kv_caches"
                 )
@@ -202,13 +229,16 @@ class LlamaModel(nn.Module):
                 + T
             )
 
-            attention_mask = build_decode_mask(
-                query_length=T,
-                key_length=key_length,
-                dtype=hidden_states.dtype,
+            attention_mask = (
+                build_decode_mask(
+                    query_length=T,
+                    key_length=key_length,
+                    dtype=hidden_states.dtype,
+                )
             )
 
         else:
+
             raise ValueError(
                 f"Unknown mode: {mode}"
             )
@@ -242,15 +272,21 @@ class LlamaModel(nn.Module):
             )
 
             if use_cache:
+
                 updated_caches.append(
                     updated_cache
                 )
+
+        # --------------------------------------------------
+        # Final normalization
+        # --------------------------------------------------
 
         hidden_states = self.norm(
             hidden_states
         )
 
         if not use_cache:
+
             updated_caches = None
 
         return (
@@ -272,8 +308,18 @@ class LlamaForCausalLM(nn.Module):
             name="model",
         )
 
-        self.lm_head = nn.Dense(
-            config.vocab_size,
+        # --------------------------------------------------
+        # LM head
+        # --------------------------------------------------
+        #
+        # HF Llama uses the same Gaussian init:
+        #
+        # std = config.initializer_range
+        #
+
+        self.lm_head = create_dense(
+            features=config.vocab_size,
+            config=config,
             use_bias=False,
             name="lm_head",
         )
@@ -338,4 +384,7 @@ class LlamaForCausalLM(nn.Module):
                 hidden_states
             )
 
-        return logits, updated_caches
+        return (
+            logits,
+            updated_caches,
+        )
