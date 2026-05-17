@@ -38,9 +38,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from flax.linen import partitioning as nn_partitioning
+from flax.linen import (
+    partitioning as nn_partitioning,
+)
 
-from LaughLM.config.schema import LaughLMConfig
+from LaughLM.config.schema import (
+    LaughLMConfig,
+)
 
 from LaughLM.model.llama.model import (
     LlamaForCausalLM,
@@ -194,6 +198,7 @@ class Trainer:
             )
 
             with open(config_path, "w") as f:
+
                 json.dump(
                     self.config.model_dump(),
                     f,
@@ -213,11 +218,30 @@ class Trainer:
         )
 
         # --------------------------------------------------
-        # Input shape
+        # Runtime params
         # --------------------------------------------------
 
+        self.grad_accum = (
+            config.runtime
+            .gradient_accumulation
+        )
+
+        # --------------------------------------------------
+        # GLOBAL input shape
+        #
+        # IMPORTANT:
+        # GSPMD initializes with global shapes,
+        # not per-device shapes.
+        # --------------------------------------------------
+
+        global_batch_size = (
+            config.runtime
+            .micro_batch_per_device
+            * self.num_devices
+        )
+
         input_shape = (
-            config.runtime.micro_batch_per_device,
+            global_batch_size,
             config.runtime.seq_len,
         )
 
@@ -317,16 +341,7 @@ class Trainer:
         self.state = state
 
         # --------------------------------------------------
-        # Runtime params
-        # --------------------------------------------------
-
-        self.grad_accum = (
-            config.runtime
-            .gradient_accumulation
-        )
-
-        # --------------------------------------------------
-        # Train step
+        # Train / Eval step
         # --------------------------------------------------
 
         with (
@@ -337,9 +352,13 @@ class Trainer:
         ):
 
             self.train_step = create_train_step(
-                self.model,
-                self.optimizer,
-                self.grad_accum,
+                model=self.model,
+                optimizer=self.optimizer,
+                config=config,
+                mesh=self.mesh,
+                state_shardings=self.shardings,
+                data_sharding=None,
+                grad_accum=self.grad_accum,
                 max_grad_norm=(
                     config.optimizer
                     .gradient_clip
@@ -347,7 +366,10 @@ class Trainer:
             )
 
             self.eval_step = create_eval_step(
-                self.model
+                model=self.model,
+                config=config,
+                mesh=self.mesh,
+                data_sharding=None,
             )
 
         # --------------------------------------------------
@@ -438,7 +460,7 @@ class Trainer:
         print(f"{'=' * 60}\n")
 
         # --------------------------------------------------
-        # Prefetch
+        # CPU-side async prefetch
         # --------------------------------------------------
 
         prefetched_loader = (
@@ -448,7 +470,9 @@ class Trainer:
             )
         )
 
-        data_iter = iter(prefetched_loader)
+        data_iter = iter(
+            prefetched_loader
+        )
 
         # --------------------------------------------------
         # Resume-safe training loop
@@ -486,11 +510,14 @@ class Trainer:
                     batch = np.asarray(batch)
 
                 if batch.dtype != np.int32:
+
                     batch = batch.astype(
                         np.int32
                     )
 
-                expected = global_batch_size
+                expected = (
+                    global_batch_size
+                )
 
                 assert (
                     batch.shape[0]
@@ -501,7 +528,9 @@ class Trainer:
                     f"expected {expected}"
                 )
 
-                micro_batches.append(batch)
+                micro_batches.append(
+                    batch
+                )
 
             # ------------------------------------------
             # Stack:
@@ -514,10 +543,15 @@ class Trainer:
             )
 
             # ------------------------------------------
-            # Transfer
+            # Device transfer
+            #
+            # TODO:
+            # explicit NamedSharding input placement
             # ------------------------------------------
 
-            batch = jax.device_put(batch)
+            batch = jax.device_put(
+                batch
+            )
 
             # ------------------------------------------
             # Train step
@@ -544,10 +578,17 @@ class Trainer:
                 - step_start
             )
 
-            state_host = (
-                jax.tree_util.tree_map(
-                    jax.device_get,
-                    self.state,
+            # ------------------------------------------
+            # Scalar extraction ONLY
+            #
+            # IMPORTANT:
+            # Never device_get full state
+            # inside hot loop.
+            # ------------------------------------------
+
+            tokens_seen = int(
+                jax.device_get(
+                    self.state.tokens_processed
                 )
             )
 
@@ -572,10 +613,7 @@ class Trainer:
                     grad_norm=metrics.get(
                         "grad_norm"
                     ),
-                    tokens_seen=int(
-                        state_host
-                        .tokens_processed
-                    ),
+                    tokens_seen=tokens_seen,
                     tokens_in_step=(
                         tokens_per_step
                     ),
