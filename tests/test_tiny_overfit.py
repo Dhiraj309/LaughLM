@@ -14,9 +14,6 @@ Verifies:
 - KV-free training path is stable
 - optimizer integration works
 
-This is the single most important
-training sanity test.
-
 Expected behavior
 -----------------
 Loss should collapse rapidly.
@@ -89,17 +86,9 @@ def test_tiny_overfit():
 
     rng = jax.random.PRNGKey(0)
 
-    #
+    # --------------------------------------------------
     # Tiny deterministic dataset
-    #
-    # Sequence:
-    #
-    # 1 2 3 4 5 6 7 8
-    #
-    # Target:
-    #
-    # 2 3 4 5 6 7 8 9
-    #
+    # --------------------------------------------------
 
     input_ids = jnp.array(
         [[1, 2, 3, 4, 5, 6, 7, 8]],
@@ -111,15 +100,20 @@ def test_tiny_overfit():
         dtype=jnp.int32,
     )
 
-    positions = jnp.arange(
+    position_ids = jnp.arange(
         input_ids.shape[1],
         dtype=jnp.int32,
     )[None, :]
 
+    # --------------------------------------------------
+    # Initialize
+    # --------------------------------------------------
+
     variables = model.init(
         rng,
         input_ids=input_ids,
-        positions=positions,
+        position_ids=position_ids,
+        use_cache=False,
         mode="train",
     )
 
@@ -131,16 +125,17 @@ def test_tiny_overfit():
 
     opt_state = optimizer.init(params)
 
-    # ─────────────────────────────────────────
-    # Loss fn
-    # ─────────────────────────────────────────
+    # --------------------------------------------------
+    # Loss function
+    # --------------------------------------------------
 
     def loss_fn(params):
 
         logits, _ = model.apply(
             {"params": params},
             input_ids=input_ids,
-            positions=positions,
+            position_ids=position_ids,
+            use_cache=False,
             mode="train",
         )
 
@@ -151,9 +146,9 @@ def test_tiny_overfit():
 
         return loss
 
-    # ─────────────────────────────────────────
+    # --------------------------------------------------
     # Train step
-    # ─────────────────────────────────────────
+    # --------------------------------------------------
 
     @jax.jit
     def train_step(
@@ -178,9 +173,9 @@ def test_tiny_overfit():
 
         return params, opt_state, loss
 
-    # ─────────────────────────────────────────
+    # --------------------------------------------------
     # Training loop
-    # ─────────────────────────────────────────
+    # --------------------------------------------------
 
     initial_loss = None
 
@@ -201,18 +196,38 @@ def test_tiny_overfit():
         final_loss = loss
 
         if step % 50 == 0:
+
             print(
                 f"step={step:<3d} "
                 f"loss={loss:.6f}"
             )
 
     print()
-    print(f"initial_loss={initial_loss:.6f}")
-    print(f"final_loss={final_loss:.6f}")
 
-    # ─────────────────────────────────────────
+    print(
+        f"initial_loss={initial_loss:.6f}"
+    )
+
+    print(
+        f"final_loss={final_loss:.6f}"
+    )
+
+
+    from flax.traverse_util import flatten_dict
+
+    print()
+    print("=" * 80)
+    print("PARAMETER TREE")
+    print("=" * 80)
+    
+    flat = flatten_dict(variables["params"])
+    
+    for k, v in flat.items():
+        print(k, v.shape)
+
+    # --------------------------------------------------
     # Assertions
-    # ─────────────────────────────────────────
+    # --------------------------------------------------
 
     assert final_loss < 0.05
 
