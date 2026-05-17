@@ -16,6 +16,9 @@ Tensor conventions
 input_ids:
     [B, T]
 
+position_ids:
+    [B, T]
+
 hidden_states:
     [B, T, D]
 
@@ -79,8 +82,9 @@ class LlamaModel(nn.Module):
     def __call__(
         self,
         input_ids: jnp.ndarray,
-        positions: jnp.ndarray,
+        position_ids: Optional[jnp.ndarray] = None,
         kv_caches: Optional[list[KVCache]] = None,
+        use_cache: bool = False,
         mode: str = "train",
     ) -> tuple[
         jnp.ndarray,
@@ -92,8 +96,14 @@ class LlamaModel(nn.Module):
         input_ids:
             [B, T]
 
-        positions:
+        position_ids:
             [B, T]
+
+        kv_caches:
+            per-layer KV caches
+
+        use_cache:
+            whether to update and return KV cache
 
         mode:
             "train"
@@ -101,17 +111,42 @@ class LlamaModel(nn.Module):
             "decode"
         """
 
-        config = self.config
-
         B, T = input_ids.shape
 
         hidden_states = self.embed_tokens(
             input_ids
         )
 
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
+        # Position IDs
+        # --------------------------------------------------
+
+        if position_ids is None:
+
+            if (
+                mode == "decode"
+                and kv_caches is not None
+            ):
+
+                start_pos = (
+                    kv_caches[0]
+                    .cache_position
+                )
+
+            else:
+                start_pos = 0
+
+            position_ids = (
+                jnp.arange(
+                    start_pos,
+                    start_pos + T,
+                    dtype=jnp.int32,
+                )[None, :]
+            )
+
+        # --------------------------------------------------
         # Attention mask
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
 
         if mode in ("train", "prefill"):
 
@@ -131,6 +166,7 @@ class LlamaModel(nn.Module):
             key_length = (
                 kv_caches[0]
                 .cache_position
+                + T
             )
 
             attention_mask = build_decode_mask(
@@ -144,9 +180,9 @@ class LlamaModel(nn.Module):
                 f"Unknown mode: {mode}"
             )
 
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
         # Decoder stack
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
 
         updated_caches = []
 
@@ -164,14 +200,14 @@ class LlamaModel(nn.Module):
             hidden_states, updated_cache = (
                 layer(
                     hidden_states=hidden_states,
-                    positions=positions,
+                    positions=position_ids,
                     attention_mask=attention_mask,
                     kv_cache=layer_cache,
                     mode=mode,
                 )
             )
 
-            if kv_caches is not None:
+            if use_cache:
                 updated_caches.append(
                     updated_cache
                 )
@@ -180,7 +216,7 @@ class LlamaModel(nn.Module):
             hidden_states
         )
 
-        if kv_caches is None:
+        if not use_cache:
             updated_caches = None
 
         return (
@@ -211,8 +247,9 @@ class LlamaForCausalLM(nn.Module):
     def __call__(
         self,
         input_ids: jnp.ndarray,
-        positions: jnp.ndarray,
+        position_ids: Optional[jnp.ndarray] = None,
         kv_caches: Optional[list[KVCache]] = None,
+        use_cache: bool = False,
         mode: str = "train",
     ) -> tuple[
         jnp.ndarray,
@@ -224,22 +261,26 @@ class LlamaForCausalLM(nn.Module):
         input_ids:
             [B, T]
 
-        positions:
+        position_ids:
             [B, T]
+
+        kv_caches:
+            per-layer KV caches
         """
 
         hidden_states, updated_caches = (
             self.model(
                 input_ids=input_ids,
-                positions=positions,
+                position_ids=position_ids,
                 kv_caches=kv_caches,
+                use_cache=use_cache,
                 mode=mode,
             )
         )
 
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
         # LM head
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
 
         if self.config.tie_word_embeddings:
 
