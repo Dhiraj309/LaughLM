@@ -9,6 +9,7 @@ Design goals:
 - explicit prefill/decode modes
 - stable GQA implementation
 - minimal architecture surface
+- deterministic initialization semantics
 
 Tensor conventions
 ------------------
@@ -30,16 +31,24 @@ Cache storage:
 
 from typing import Optional
 
-from flax import linen as nn
-
 import jax
 import jax.numpy as jnp
 
-from LaughLM.model.llama.config import LlamaConfig
+from flax import linen as nn
+
+from LaughLM.model.llama.config import (
+    LlamaConfig,
+)
+
+from LaughLM.model.llama.initialization import (
+    create_dense,
+)
+
 from LaughLM.model.llama.rope import (
     RotaryEmbedding,
     apply_rotary_pos_emb,
 )
+
 from LaughLM.model.llama.kv_cache import (
     KVCache,
     update_kv_cache,
@@ -142,43 +151,59 @@ class LlamaAttention(nn.Module):
             num_heads // num_kv_heads
         )
 
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
         # Projections
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
 
-        q_proj = nn.Dense(
-            num_heads * head_dim,
+        q_proj = create_dense(
+            features=(
+                num_heads * head_dim
+            ),
+            config=config,
             use_bias=config.attention_bias,
             name="q_proj",
         )
 
-        k_proj = nn.Dense(
-            num_kv_heads * head_dim,
+        k_proj = create_dense(
+            features=(
+                num_kv_heads * head_dim
+            ),
+            config=config,
             use_bias=config.attention_bias,
             name="k_proj",
         )
 
-        v_proj = nn.Dense(
-            num_kv_heads * head_dim,
+        v_proj = create_dense(
+            features=(
+                num_kv_heads * head_dim
+            ),
+            config=config,
             use_bias=config.attention_bias,
             name="v_proj",
         )
 
-        o_proj = nn.Dense(
-            config.hidden_size,
+        o_proj = create_dense(
+            features=config.hidden_size,
+            config=config,
             use_bias=config.attention_bias,
             name="o_proj",
         )
 
-        query_states = q_proj(hidden_states)
+        query_states = q_proj(
+            hidden_states
+        )
 
-        key_states = k_proj(hidden_states)
+        key_states = k_proj(
+            hidden_states
+        )
 
-        value_states = v_proj(hidden_states)
+        value_states = v_proj(
+            hidden_states
+        )
 
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
         # Reshape
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
 
         query_states = query_states.reshape(
             B,
@@ -201,11 +226,13 @@ class LlamaAttention(nn.Module):
             head_dim,
         )
 
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
         # RoPE
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
 
-        rotary_emb = RotaryEmbedding(config)
+        rotary_emb = RotaryEmbedding(
+            config
+        )
 
         cos, sin = rotary_emb(
             query_states,
@@ -221,26 +248,24 @@ class LlamaAttention(nn.Module):
             )
         )
 
-# ──────────────────────────────────────────
+        # --------------------------------------------------
         # KV cache update
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
         #
         # Cache storage layout:
+        #
         #   [B, S, KVH, Dh]
         #
         # Attention layout:
+        #
         #   [B, KVH, S, Dh]
         #
         # IMPORTANT:
+        #
         # The cache stores FULL static tensors.
         #
-        # We MUST slice to the valid cache length before
-        # attention, otherwise decode attends into:
-        #   - future positions
-        #   - zero-filled cache slots
-        #
-        # This is a critical autoregressive correctness
-        # invariant.
+        # We MUST slice to valid cache length
+        # before attention.
         #
 
         updated_cache = None
@@ -255,24 +280,37 @@ class LlamaAttention(nn.Module):
                 )
             )
 
-            kv_length = updated_cache.cache_position
+            kv_length = (
+                updated_cache
+                .cache_position
+            )
 
-            # Restrict visibility to valid cached tokens only
-            key_states = key_states[:, :kv_length, :, :]
-            value_states = value_states[:, :kv_length, :, :]
+            key_states = key_states[
+                :,
+                :kv_length,
+                :,
+                :,
+            ]
 
-        # ──────────────────────────────────────────
+            value_states = value_states[
+                :,
+                :kv_length,
+                :,
+                :,
+            ]
+
+        # --------------------------------------------------
         # Transpose for attention
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
         #
         # Q:
         #   [B, Tq, QH, Dh]
-        #     ->
+        #       ->
         #   [B, QH, Tq, Dh]
         #
         # K/V:
         #   [B, Tk, KVH, Dh]
-        #     ->
+        #       ->
         #   [B, KVH, Tk, Dh]
         #
 
@@ -291,9 +329,9 @@ class LlamaAttention(nn.Module):
             (0, 2, 1, 3),
         )
 
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
         # GQA expansion
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
 
         key_states = repeat_kv(
             key_states,
@@ -305,13 +343,17 @@ class LlamaAttention(nn.Module):
             num_kv_groups,
         )
 
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
         # Attention
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
 
         attn_weights = jnp.matmul(
             query_states,
-            jnp.swapaxes(key_states, -1, -2),
+            jnp.swapaxes(
+                key_states,
+                -1,
+                -2,
+            ),
         )
 
         attn_weights = (
@@ -320,24 +362,31 @@ class LlamaAttention(nn.Module):
         )
 
         if attention_mask is not None:
+
             attn_weights = (
                 attn_weights
                 + attention_mask
             )
 
-        attn_weights = jax.nn.softmax(
-            attn_weights.astype(jnp.float32),
-            axis=-1,
-        ).astype(query_states.dtype)
+        attn_weights = (
+            jax.nn.softmax(
+                attn_weights.astype(
+                    jnp.float32
+                ),
+                axis=-1,
+            ).astype(
+                query_states.dtype
+            )
+        )
 
         attn_output = jnp.matmul(
             attn_weights,
             value_states,
         )
 
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
         # Output reshape
-        # ──────────────────────────────────────────
+        # --------------------------------------------------
 
         attn_output = jnp.transpose(
             attn_output,
@@ -350,6 +399,11 @@ class LlamaAttention(nn.Module):
             config.hidden_size,
         )
 
-        attn_output = o_proj(attn_output)
+        attn_output = o_proj(
+            attn_output
+        )
 
-        return attn_output, updated_cache
+        return (
+            attn_output,
+            updated_cache,
+        )
