@@ -1,73 +1,70 @@
 """
 LaughLM/model/llama/kv_cache.py
 
-Canonical static KV cache for Llama-style autoregressive decoding.
+Canonical static KV cache for Llama inference.
 
-Design goals:
-- deterministic decode semantics
-- static shapes for JAX/XLA
-- HF-compatible cache behavior
-- backend-agnostic semantics
-- future-compatible with:
-    - GSPMD
-    - paged attention
-    - continuous batching
-    - vLLM-style schedulers
+Design goals
+------------
+- deterministic cache semantics
+- HF-compatible static cache behavior
+- backend-agnostic implementation
+- compile-friendly static shapes
+- exact decode parity
 
-Tensor conventions
-------------------
-key/value:
-    [batch, max_seq_len, num_key_value_heads, head_dim]
+Cache layout
+-------------
+key:
+    [B, max_seq_len, KVH, Dh]
 
-query:
-    [batch, query_seq_len, num_attention_heads, head_dim]
+value:
+    [B, max_seq_len, KVH, Dh]
 
-Valid cache region:
-    [:, :cache_position]
+IMPORTANT
+---------
+The cache always stores FULL static tensors.
 
-Important invariants
---------------------
-- RoPE is applied BEFORE cache insertion
-- cache_position is the next write index
-- update() returns ONLY valid cache slices
-- attention never sees invalid cache regions
+Attention masking and slicing determine visible tokens.
+
+The cache itself is never dynamically resized.
 """
 
-from dataclasses import dataclass
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 
 
-@dataclass
-class KVCache:
+class KVCache(NamedTuple):
 
     key: jnp.ndarray
-
     value: jnp.ndarray
 
     cache_position: jnp.ndarray
 
 
-def create_kv_cache(
+def init_kv_cache(
     batch_size: int,
     max_seq_len: int,
-    num_key_value_heads: int,
+    num_kv_heads: int,
     head_dim: int,
-    dtype: jnp.dtype,
+    dtype=jnp.bfloat16,
 ) -> KVCache:
     """
-    Create empty static KV cache.
+    Initialize static KV cache.
 
-    Returns
-    -------
-    KVCache
+    Shapes
+    ------
+    key:
+        [B, S, KVH, Dh]
+
+    value:
+        [B, S, KVH, Dh]
     """
 
     shape = (
         batch_size,
         max_seq_len,
-        num_key_value_heads,
+        num_kv_heads,
         head_dim,
     )
 
@@ -88,73 +85,85 @@ def update_kv_cache(
     jnp.ndarray,
 ]:
     """
-    Append new KV states into static cache.
+    Update static KV cache.
 
     Parameters
     ----------
     key_states:
-        [B, T_new, KVH, Dh]
+        [B, T, KVH, Dh]
 
     value_states:
-        [B, T_new, KVH, Dh]
+        [B, T, KVH, Dh]
 
     Returns
     -------
-    updated_cache
+    updated_cache:
+        Updated static cache
 
-    valid_key_states:
-        [B, cache_seq_len, KVH, Dh]
+    full_key_states:
+        [B, S, KVH, Dh]
 
-    valid_value_states:
-        [B, cache_seq_len, KVH, Dh]
+    full_value_states:
+        [B, S, KVH, Dh]
 
-    Important
+    IMPORTANT
     ---------
-    Returned tensors contain ONLY valid cache entries.
-    Invalid/uninitialized cache regions are never exposed
-    to attention.
+    Returns FULL cache tensors.
+
+    Attention logic is responsible for:
+    - causal masking
+    - valid-length restriction
+    - decode visibility
     """
 
-    insert_pos = cache.cache_position
+    start = cache.cache_position
 
     seq_len = key_states.shape[1]
 
-    new_key = jax.lax.dynamic_update_slice(
+    updated_keys = jax.lax.dynamic_update_slice(
         cache.key,
         key_states.astype(cache.key.dtype),
-        (0, insert_pos, 0, 0),
+        (
+            0,
+            start,
+            0,
+            0,
+        ),
     )
 
-    new_value = jax.lax.dynamic_update_slice(
+    updated_values = jax.lax.dynamic_update_slice(
         cache.value,
         value_states.astype(cache.value.dtype),
-        (0, insert_pos, 0, 0),
+        (
+            0,
+            start,
+            0,
+            0,
+        ),
     )
-
-    new_position = insert_pos + seq_len
 
     updated_cache = KVCache(
-        key=new_key,
-        value=new_value,
-        cache_position=new_position,
+        key=updated_keys,
+        value=updated_values,
+        cache_position=start + seq_len,
     )
-
-    valid_key_states = new_key[
-        :,
-        :new_position,
-        :,
-        :,
-    ]
-
-    valid_value_states = new_value[
-        :,
-        :new_position,
-        :,
-        :,
-    ]
 
     return (
         updated_cache,
-        valid_key_states,
-        valid_value_states,
+        updated_keys,
+        updated_values,
     )
+
+
+def get_cache_length(
+    cache: KVCache,
+) -> jnp.ndarray:
+    """
+    Current valid cache length.
+
+    Returns
+    -------
+    scalar int32
+    """
+
+    return cache.cache_position
