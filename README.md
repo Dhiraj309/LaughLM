@@ -1,7 +1,3 @@
----
-tags:
-- ml-intern
----
 # LaughLM
 
 A high-performance **decoder-only transformer training system** built with **JAX + Flax** and optimized for **TPU training**.
