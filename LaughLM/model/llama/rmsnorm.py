@@ -7,12 +7,14 @@ Design goals:
 - HF-compatible parameter semantics
 - deterministic numerics
 - stable bf16/fp16 training
+- TPU-native bf16 compute
 - minimal architecture surface
 
 Semantics match Hugging Face LlamaRMSNorm:
 - parameter name: "weight"
 - variance computed in float32
-- output cast back to input dtype
+- output computed in configurable compute dtype
+- parameters stored in fp32
 
 Tensor shapes
 --------------
@@ -24,6 +26,7 @@ Output:
 """
 
 from flax import linen as nn
+
 import jax
 import jax.numpy as jnp
 
@@ -39,6 +42,15 @@ class RMSNorm(nn.Module):
 
     eps: float = 1e-6
 
+    #
+    # Frontier dtype policy
+    #
+    # - params: fp32
+    # - compute: bf16
+    #
+
+    dtype: jnp.dtype = jnp.bfloat16
+
     param_dtype: jnp.dtype = jnp.float32
 
     @nn.compact
@@ -46,8 +58,6 @@ class RMSNorm(nn.Module):
         self,
         hidden_states: jnp.ndarray,
     ) -> jnp.ndarray:
-
-        input_dtype = hidden_states.dtype
 
         weight = self.param(
             "weight",
@@ -78,17 +88,17 @@ class RMSNorm(nn.Module):
         )
 
         # --------------------------------------------------
-        # Cast back to activation dtype
+        # TPU-native compute dtype
         # --------------------------------------------------
 
         hidden_states_normed = (
             hidden_states_normed.astype(
-                input_dtype
+                self.dtype
             )
         )
 
         weight = weight.astype(
-            input_dtype
+            self.dtype
         )
 
         return (

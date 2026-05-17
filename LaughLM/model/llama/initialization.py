@@ -72,21 +72,30 @@ def create_dense(
     """
     Canonical Dense layer factory.
 
-    Ensures:
-    - deterministic kernel init
-    - explicit param dtype
-    - HF-compatible semantics
+    TPU frontier policy:
+    - params stored fp32
+    - compute in bf16
+    - outputs bf16
     """
 
     return nn.Dense(
         features=features,
         use_bias=use_bias,
+
         kernel_init=llama_kernel_init(
             config.initializer_range
         ),
+
         bias_init=llama_bias_init(),
-        dtype=jnp.float32,
-        param_dtype=DEFAULT_PARAM_DTYPE,
+
+        #
+        # Frontier dtype policy
+        #
+
+        param_dtype=config.param_dtype,
+
+        dtype=config.compute_dtype,
+
         name=name,
     )
 
@@ -105,10 +114,14 @@ def create_embedding(
     return nn.Embed(
         num_embeddings=num_embeddings,
         features=features,
+
         embedding_init=llama_kernel_init(
             config.initializer_range
         ),
-        dtype=jnp.float32,
-        param_dtype=DEFAULT_PARAM_DTYPE,
+
+        param_dtype=config.param_dtype,
+
+        dtype=config.compute_dtype,
+
         name=name,
     )
