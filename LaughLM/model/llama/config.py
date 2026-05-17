@@ -30,6 +30,8 @@ It does NOT contain:
 from dataclasses import dataclass
 from typing import Optional
 
+import jax.numpy as jnp
+
 
 @dataclass
 class LlamaConfig:
@@ -121,6 +123,17 @@ class LlamaConfig:
     # ──────────────────────────────────────────────────────────
 
     use_cache: bool = True
+
+
+    # ──────────────────────────────────────────────────────────
+    # DTypes
+    # ──────────────────────────────────────────────────────────
+
+    param_dtype: jnp.dtype = jnp.float32
+
+    compute_dtype: jnp.dtype = jnp.bfloat16
+
+    output_dtype: jnp.dtype = jnp.float32
 
     # ──────────────────────────────────────────────────────────
     # Validation / derived fields
