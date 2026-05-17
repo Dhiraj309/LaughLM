@@ -10,23 +10,6 @@ Design goals
 - explicit train/prefill/decode modes
 - minimal abstraction surface
 - future-ready sharding compatibility
-
-Tensor conventions
-------------------
-input_ids:
-    [B, T]
-
-position_ids:
-    [B, T]
-
-hidden_states:
-    [B, T, D]
-
-attention_mask:
-    [B, 1, Tq, Tk]
-
-logits:
-    [B, T, V]
 """
 
 from typing import Optional
@@ -63,12 +46,24 @@ class LlamaModel(nn.Module):
             name="embed_tokens",
         )
 
+        #
+        # IMPORTANT:
+        #
+        # Use scan-compatible/list-compatible HF hierarchy:
+        #
+        # model.layers.0
+        # model.layers.1
+        #
+        # NOT:
+        #
+        # model.layers_0
+        #
+
         self.layers = [
             LlamaDecoderLayer(
                 config=config,
-                name=f"layers_{i}",
             )
-            for i in range(
+            for _ in range(
                 config.num_hidden_layers
             )
         ]
@@ -90,26 +85,6 @@ class LlamaModel(nn.Module):
         jnp.ndarray,
         Optional[list[KVCache]],
     ]:
-        """
-        Parameters
-        ----------
-        input_ids:
-            [B, T]
-
-        position_ids:
-            [B, T]
-
-        kv_caches:
-            per-layer KV caches
-
-        use_cache:
-            whether to update and return KV cache
-
-        mode:
-            "train"
-            "prefill"
-            "decode"
-        """
 
         B, T = input_ids.shape
 
@@ -255,18 +230,6 @@ class LlamaForCausalLM(nn.Module):
         jnp.ndarray,
         Optional[list[KVCache]],
     ]:
-        """
-        Parameters
-        ----------
-        input_ids:
-            [B, T]
-
-        position_ids:
-            [B, T]
-
-        kv_caches:
-            per-layer KV caches
-        """
 
         hidden_states, updated_caches = (
             self.model(
