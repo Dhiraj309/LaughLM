@@ -2,50 +2,9 @@
 LaughLM/model/llama/attention.py
 
 Canonical Llama attention.
-
-Frontier-grade SPMD additions:
-────────────────────────────────────────────────────
-1. Logical activation constraints
-2. Tensor-parallel aware Q/K/V sharding
-3. KV-head-aware GQA partitioning
-4. Mesh-safe attention layouts
-5. Stable bf16 softmax path
-6. Sequence-parallel ready tensor semantics
-7. GSPMD-compatible attention pipeline
-
-Design goals:
-- HF-compatible semantics
-- deterministic KV-cache behavior
-- explicit prefill/decode modes
-- stable GQA implementation
-- minimal architecture surface
-- deterministic initialization semantics
-- tensor-parallel compatible layouts
-
-Tensor conventions
-──────────────────
-
-Input hidden states:
-    [B, T, D]
-
-Pre-attention Q layout:
-    [B, T, QH, Dh]
-
-Pre-attention K/V layout:
-    [B, T, KVH, Dh]
-
-Attention-kernel Q layout:
-    [B, QH, T, Dh]
-
-Attention-kernel K/V layout:
-    [B, KVH, T, Dh]
-
-Attention output:
-    [B, T, D]
-
-KV cache storage:
-    [B, S, KVH, Dh]
 """
+
+from __future__ import annotations
 
 from typing import Optional
 
@@ -80,16 +39,16 @@ from LaughLM.distributed.sharding import (
 )
 
 
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # GQA helper
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 def repeat_kv(
     hidden_states: jnp.ndarray,
     n_rep: int,
 ) -> jnp.ndarray:
     """
-    Repeat KV heads for grouped-query attention.
+    Expand KV heads for GQA.
 
     Input:
         [B, KVH, T, Dh]
@@ -101,7 +60,7 @@ def repeat_kv(
     if n_rep == 1:
         return hidden_states
 
-    batch, num_kv_heads, seq_len, head_dim = (
+    b, kvh, t, dh = (
         hidden_states.shape
     )
 
@@ -116,25 +75,25 @@ def repeat_kv(
     hidden_states = jnp.broadcast_to(
         hidden_states,
         (
-            batch,
-            num_kv_heads,
+            b,
+            kvh,
             n_rep,
-            seq_len,
-            head_dim,
+            t,
+            dh,
         ),
     )
 
     return hidden_states.reshape(
-        batch,
-        num_kv_heads * n_rep,
-        seq_len,
-        head_dim,
+        b,
+        kvh * n_rep,
+        t,
+        dh,
     )
 
 
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # Attention
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 class LlamaAttention(nn.Module):
 
@@ -152,35 +111,14 @@ class LlamaAttention(nn.Module):
         jnp.ndarray,
         Optional[KVCache],
     ]:
-        """
-        Parameters
-        ----------
-        hidden_states:
-            [B, T, D]
-
-        positions:
-            [B, T]
-
-        attention_mask:
-            [B, 1, T_q, T_kv]
-
-        mode:
-            "train"
-            "prefill"
-            "decode"
-        """
-
-        # --------------------------------------------------
-        # Hidden-state constraint
-        # --------------------------------------------------
 
         hidden_states = constrain_hidden_states(
             hidden_states
         )
 
-        B, T, _ = hidden_states.shape
-
         config = self.config
+
+        B, T, _ = hidden_states.shape
 
         num_heads = (
             config.num_attention_heads
@@ -196,32 +134,26 @@ class LlamaAttention(nn.Module):
             num_heads // num_kv_heads
         )
 
-        # --------------------------------------------------
+        # ====================================================
         # Projections
-        # --------------------------------------------------
+        # ====================================================
 
         q_proj = create_dense(
-            features=(
-                num_heads * head_dim
-            ),
+            features=num_heads * head_dim,
             config=config,
             use_bias=config.attention_bias,
             name="q_proj",
         )
 
         k_proj = create_dense(
-            features=(
-                num_kv_heads * head_dim
-            ),
+            features=num_kv_heads * head_dim,
             config=config,
             use_bias=config.attention_bias,
             name="k_proj",
         )
 
         v_proj = create_dense(
-            features=(
-                num_kv_heads * head_dim
-            ),
+            features=num_kv_heads * head_dim,
             config=config,
             use_bias=config.attention_bias,
             name="v_proj",
@@ -234,9 +166,9 @@ class LlamaAttention(nn.Module):
             name="o_proj",
         )
 
-        # --------------------------------------------------
+        # ====================================================
         # QKV projections
-        # --------------------------------------------------
+        # ====================================================
 
         query_states = q_proj(
             hidden_states
@@ -250,15 +182,9 @@ class LlamaAttention(nn.Module):
             hidden_states
         )
 
-        # --------------------------------------------------
-        # Pre-attention reshape
-        #
-        # Q:
-        #   [B, T, QH, Dh]
-        #
-        # K/V:
-        #   [B, T, KVH, Dh]
-        # --------------------------------------------------
+        # ====================================================
+        # Reshape
+        # ====================================================
 
         query_states = query_states.reshape(
             B,
@@ -281,11 +207,9 @@ class LlamaAttention(nn.Module):
             head_dim,
         )
 
-        # --------------------------------------------------
+        # ====================================================
         # RoPE
-        #
-        # Applied BEFORE attention transpose.
-        # --------------------------------------------------
+        # ====================================================
 
         rotary_emb = RotaryEmbedding(
             config
@@ -296,21 +220,21 @@ class LlamaAttention(nn.Module):
             positions,
         )
 
-        query_states, key_states = (
-            apply_rotary_pos_emb(
-                query_states,
-                key_states,
-                cos,
-                sin,
-            )
+        (
+            query_states,
+            key_states,
+        ) = apply_rotary_pos_emb(
+            query_states,
+            key_states,
+            cos,
+            sin,
         )
 
-        # --------------------------------------------------
-        # KV cache constraints
+        # ====================================================
+        # KV cache layout constraints
         #
-        # Cache layout:
-        #   [B, S, KVH, Dh]
-        # --------------------------------------------------
+        # [B, S, KVH, Dh]
+        # ====================================================
 
         key_states = constrain_kv_cache(
             key_states
@@ -320,9 +244,9 @@ class LlamaAttention(nn.Module):
             value_states
         )
 
-        # --------------------------------------------------
+        # ====================================================
         # KV cache update
-        # --------------------------------------------------
+        # ====================================================
 
         updated_cache = None
 
@@ -343,6 +267,15 @@ class LlamaAttention(nn.Module):
                 .cache_position
             )
 
+            # ------------------------------------------------
+            # IMPORTANT
+            #
+            # Slice BEFORE transpose.
+            #
+            # key/value layout currently:
+            #   [B, S, KVH, Dh]
+            # ------------------------------------------------
+
             key_states = key_states[
                 :,
                 :kv_length,
@@ -357,19 +290,9 @@ class LlamaAttention(nn.Module):
                 :,
             ]
 
-        # --------------------------------------------------
-        # Attention-kernel transpose
-        #
-        # Q:
-        #   [B, Tq, QH, Dh]
-        #       ->
-        #   [B, QH, Tq, Dh]
-        #
-        # K/V:
-        #   [B, Tk, KVH, Dh]
-        #       ->
-        #   [B, KVH, Tk, Dh]
-        # --------------------------------------------------
+        # ====================================================
+        # Attention transpose
+        # ====================================================
 
         query_states = jnp.transpose(
             query_states,
@@ -386,9 +309,9 @@ class LlamaAttention(nn.Module):
             (0, 2, 1, 3),
         )
 
-        # --------------------------------------------------
-        # Attention-layout logical constraints
-        # --------------------------------------------------
+        # ====================================================
+        # Logical constraints
+        # ====================================================
 
         query_states = constrain_attention_q(
             query_states
@@ -402,9 +325,9 @@ class LlamaAttention(nn.Module):
             value_states
         )
 
-        # --------------------------------------------------
+        # ====================================================
         # GQA expansion
-        # --------------------------------------------------
+        # ====================================================
 
         key_states = repeat_kv(
             key_states,
@@ -416,12 +339,9 @@ class LlamaAttention(nn.Module):
             num_kv_groups,
         )
 
-        # --------------------------------------------------
+        # ====================================================
         # Attention logits
-        #
-        # IMPORTANT:
-        # matmul accumulates in fp32.
-        # --------------------------------------------------
+        # ====================================================
 
         attn_weights = jnp.matmul(
             query_states,
@@ -438,9 +358,9 @@ class LlamaAttention(nn.Module):
             * (head_dim ** -0.5)
         )
 
-        # --------------------------------------------------
-        # Attention mask
-        # --------------------------------------------------
+        # ====================================================
+        # Mask
+        # ====================================================
 
         if attention_mask is not None:
 
@@ -449,18 +369,14 @@ class LlamaAttention(nn.Module):
                 + attention_mask
             )
 
-        # --------------------------------------------------
-        # Numerically stable fp32 softmax
-        #
-        # bf16 logits
-        #   ->
-        # fp32 softmax
-        #   ->
-        # cast back
-        # --------------------------------------------------
+        # ====================================================
+        # Stable fp32 softmax
+        # ====================================================
 
-        attn_weights = attn_weights.astype(
-            jnp.float32
+        attn_weights = (
+            attn_weights.astype(
+                jnp.float32
+            )
         )
 
         attn_weights = jax.nn.softmax(
@@ -468,16 +384,15 @@ class LlamaAttention(nn.Module):
             axis=-1,
         )
 
-        attn_weights = attn_weights.astype(
-            query_states.dtype
+        attn_weights = (
+            attn_weights.astype(
+                query_states.dtype
+            )
         )
 
-        # --------------------------------------------------
+        # ====================================================
         # Attention output
-        #
-        # IMPORTANT:
-        # matmul accumulates in fp32.
-        # --------------------------------------------------
+        # ====================================================
 
         attn_output = jnp.matmul(
             attn_weights,
@@ -485,9 +400,9 @@ class LlamaAttention(nn.Module):
             preferred_element_type=jnp.float32,
         )
 
-        # --------------------------------------------------
-        # Output reshape
-        # --------------------------------------------------
+        # ====================================================
+        # Restore hidden-state layout
+        # ====================================================
 
         attn_output = jnp.transpose(
             attn_output,
@@ -500,25 +415,17 @@ class LlamaAttention(nn.Module):
             config.hidden_size,
         )
 
-        # --------------------------------------------------
-        # Hidden-state constraint
-        # --------------------------------------------------
-
         attn_output = constrain_hidden_states(
             attn_output
         )
 
-        # --------------------------------------------------
+        # ====================================================
         # Output projection
-        # --------------------------------------------------
+        # ====================================================
 
         attn_output = o_proj(
             attn_output
         )
-
-        # --------------------------------------------------
-        # Final activation constraint
-        # --------------------------------------------------
 
         attn_output = constrain_hidden_states(
             attn_output

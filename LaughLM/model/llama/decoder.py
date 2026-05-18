@@ -2,42 +2,15 @@
 LaughLM/model/llama/decoder.py
 
 Canonical Llama decoder layer.
-
-Frontier-grade SPMD additions:
-────────────────────────────────────────────────────
-1. Logical activation constraints
-2. Tensor-parallel-safe residual joins
-3. Parallel-block compatibility hooks
-4. Remat-safe structure
-5. Stable bf16 residual semantics
-6. Sequence-parallel-ready layouts
-7. Communication-minimized activation flow
-
-Design goals:
-- HF-compatible semantics
-- deterministic residual ordering
-- explicit architecture structure
-- minimal abstraction surface
-- tensor-parallel compatibility
-- GSPMD-safe residual structure
-
-Tensor conventions
-------------------
-hidden_states:
-    [B, T, D]
-
-attention_mask:
-    [B, 1, T_q, T_kv]
-
-positions:
-    [B, T]
 """
+
+from __future__ import annotations
 
 from typing import Optional
 
-from flax import linen as nn
-
 import jax.numpy as jnp
+
+from flax import linen as nn
 
 from LaughLM.model.llama.config import (
     LlamaConfig,
@@ -80,80 +53,52 @@ class LlamaDecoderLayer(nn.Module):
         jnp.ndarray,
         Optional[KVCache],
     ]:
-        """
-        Parameters
-        ----------
-        hidden_states:
-            [B, T, D]
-
-        positions:
-            [B, T]
-
-        attention_mask:
-            [B, 1, T_q, T_kv]
-
-        mode:
-            "train"
-            "prefill"
-            "decode"
-        """
 
         config = self.config
-
-        # --------------------------------------------------
-        # Input layout constraint
-        # --------------------------------------------------
 
         hidden_states = constrain_hidden_states(
             hidden_states
         )
 
-        # ==================================================
-        # Standard serial residual path
-        # ==================================================
+        # ====================================================
+        # Standard serial block
+        # ====================================================
 
-        if not getattr(
-            config,
-            "parallel_block",
-            False,
-        ):
+        if not config.parallel_block:
 
-            # ──────────────────────────────────────────
+            # ------------------------------------------------
             # Attention block
-            # ──────────────────────────────────────────
+            # ------------------------------------------------
 
             residual = hidden_states
 
             hidden_states = RMSNorm(
                 hidden_size=config.hidden_size,
                 eps=config.rms_norm_eps,
+                dtype=config.compute_dtype,
+                param_dtype=config.param_dtype,
                 name="input_layernorm",
-            )(hidden_states)
-
-            hidden_states = constrain_hidden_states(
+            )(
                 hidden_states
-            )
-
-            hidden_states, updated_cache = (
-                LlamaAttention(
-                    config=config,
-                    name="self_attn",
-                )(
-                    hidden_states=hidden_states,
-                    positions=positions,
-                    attention_mask=attention_mask,
-                    kv_cache=kv_cache,
-                    mode=mode,
-                )
             )
 
             hidden_states = constrain_hidden_states(
                 hidden_states
             )
 
-            # ------------------------------------------
-            # Residual join
-            # ------------------------------------------
+            (
+                hidden_states,
+                updated_cache,
+            ) = LlamaAttention(
+                config=config,
+                name="self_attn",
+            )(
+                hidden_states=hidden_states,
+                positions=positions,
+                attention_mask=attention_mask,
+                kv_cache=kv_cache,
+                mode=mode,
+            )
 
             hidden_states = (
                 residual + hidden_states
@@ -163,17 +108,21 @@ class LlamaDecoderLayer(nn.Module):
                 hidden_states
             )
 
-            # ──────────────────────────────────────────
+            # ------------------------------------------------
             # MLP block
-            # ──────────────────────────────────────────
+            # ------------------------------------------------
 
             residual = hidden_states
 
             hidden_states = RMSNorm(
                 hidden_size=config.hidden_size,
                 eps=config.rms_norm_eps,
+                dtype=config.compute_dtype,
+                param_dtype=config.param_dtype,
                 name="post_attention_layernorm",
-            )(hidden_states)
+            )(
+                hidden_states
+            )
 
             hidden_states = constrain_hidden_states(
                 hidden_states
@@ -182,15 +131,9 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states = LlamaMLP(
                 config=config,
                 name="mlp",
-            )(hidden_states)
-
-            hidden_states = constrain_hidden_states(
+            )(
                 hidden_states
             )
-
-            # ------------------------------------------
-            # Residual join
-            # ------------------------------------------
 
             hidden_states = (
                 residual + hidden_states
@@ -205,62 +148,51 @@ class LlamaDecoderLayer(nn.Module):
                 updated_cache,
             )
 
-        # ==================================================
-        # Parallel block path (PaLM / GPT-J / MPT)
-        # ==================================================
-        #
-        # out =
-        #   x
-        #   + Attn(Norm(x))
-        #   + MLP(Norm(x))
-        #
-        # Advantages:
-        # - fewer synchronization points
-        # - better tensor-parallel overlap
-        # - reduced pipeline bubbles
-        #
-        # Used in:
-        # - PaLM
-        # - GPT-J
-        # - MPT
-        #
+        # ====================================================
+        # Parallel block
+        # ====================================================
 
         residual = hidden_states
 
         normed_hidden = RMSNorm(
             hidden_size=config.hidden_size,
             eps=config.rms_norm_eps,
+            dtype=config.compute_dtype,
+            param_dtype=config.param_dtype,
             name="input_layernorm",
-        )(hidden_states)
+        )(
+            hidden_states
+        )
 
         normed_hidden = constrain_hidden_states(
             normed_hidden
         )
 
-        # --------------------------------------------------
+        # ----------------------------------------------------
         # Attention branch
-        # --------------------------------------------------
+        # ----------------------------------------------------
 
-        attn_output, updated_cache = (
-            LlamaAttention(
-                config=config,
-                name="self_attn",
-            )(
-                hidden_states=normed_hidden,
-                positions=positions,
-                attention_mask=attention_mask,
-                kv_cache=kv_cache,
-                mode=mode,
-            )
+        (
+            attn_output,
+            updated_cache,
+        ) = LlamaAttention(
+            config=config,
+            name="self_attn",
+        )(
+            hidden_states=normed_hidden,
+            positions=positions,
+            attention_mask=attention_mask,
+            kv_cache=kv_cache,
+            mode=mode,
         )
 
         attn_output = constrain_hidden_states(
             attn_output
         )
 
-        # --------------------------------------------------
+        # ----------------------------------------------------
         # MLP branch
-        # --------------------------------------------------
+        # ----------------------------------------------------
 
         mlp_output = LlamaMLP(
             config=config,
@@ -273,9 +205,9 @@ class LlamaDecoderLayer(nn.Module):
             mlp_output
         )
 
-        # --------------------------------------------------
-        # Parallel residual merge
-        # --------------------------------------------------
+        # ----------------------------------------------------
+        # Residual merge
+        # ----------------------------------------------------
 
         hidden_states = (
             residual
