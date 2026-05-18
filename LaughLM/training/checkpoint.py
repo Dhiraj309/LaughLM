@@ -1,24 +1,16 @@
 """
 LaughLM/training/checkpoint.py
 
-Frontier-grade async checkpoint manager for LaughLM.
+Frontier-grade Orbax checkpoint manager.
 
 Frontier-grade additions
-──────────────────────────────────────────────
-1. Async Orbax checkpoint saves
-2. Sharded restore support
-3. NamedSharding-aware restore
-4. Zero full-state host gathers
-5. Mesh-native restore semantics
-6. Corruption-resistant restore flow
-7. Resume-safe training support
-8. Abstract-state restore compatibility
-
-References
-──────────────────────────────────────────────
-- MaxText
-- T5X
-- Orbax
+────────────────────────────────────────────
+1. Async checkpoint saves
+2. Mesh-native sharded restore
+3. No full host gathers
+4. Deterministic restore semantics
+5. Safe async finalization
+6. Explicit restore-failure semantics
 """
 
 from pathlib import Path
@@ -28,17 +20,6 @@ import orbax.checkpoint as ocp
 
 
 class CheckpointManager:
-    """
-    Async-capable Orbax checkpoint manager.
-
-    Notes
-    -----
-    - Saves are asynchronous (non-blocking)
-    - Restore waits for pending writes automatically
-    - Supports sharded TrainState restore
-    - Avoids full parameter materialization
-    - Preserves GSPMD shardings
-    """
 
     def __init__(
         self,
@@ -57,64 +38,49 @@ class CheckpointManager:
             exist_ok=True,
         )
 
-        # --------------------------------------------------
-        # Orbax options
-        # --------------------------------------------------
-
-        options = ocp.CheckpointManagerOptions(
-            max_to_keep=max_to_keep,
-            create=True,
-            enable_async_checkpointing=True,
-            async_options=ocp.AsyncOptions(),
+        options = (
+            ocp.CheckpointManagerOptions(
+                max_to_keep=max_to_keep,
+                create=True,
+                enable_async_checkpointing=True,
+                async_options=(
+                    ocp.AsyncOptions()
+                ),
+            )
         )
-
-        # --------------------------------------------------
-        # Checkpointer
-        # --------------------------------------------------
 
         checkpointer = (
             ocp.PyTreeCheckpointer()
         )
 
-        # --------------------------------------------------
-        # Manager
-        # --------------------------------------------------
-
-        self.manager = ocp.CheckpointManager(
-            self.directory,
-            checkpointer,
-            options=options,
+        self.manager = (
+            ocp.CheckpointManager(
+                self.directory,
+                checkpointer,
+                options=options,
+            )
         )
 
         print(
-            f"[checkpoint] directory: "
-            f"{self.directory}"
+            "[checkpoint] directory:\n"
+            f"  {self.directory}"
         )
 
-    # ─────────────────────────────────────────────
+    # ==================================================
     # Save
-    # ─────────────────────────────────────────────
+    # ==================================================
 
     def save(
         self,
         step: int,
         state,
     ):
-        """
-        Async save.
-
-        IMPORTANT
-        ─────────────────────────────────────
-        State remains sharded.
-
-        No device_get().
-        No host materialization.
-        """
 
         if step < 0:
 
             raise ValueError(
-                f"Invalid checkpoint step: {step}"
+                f"Invalid checkpoint "
+                f"step: {step}"
             )
 
         print(
@@ -122,127 +88,55 @@ class CheckpointManager:
             f"step {step:,}"
         )
 
-        try:
-
-            save_args = (
-                ocp.args.StandardSave(
-                    state
-                )
+        save_args = (
+            ocp.args.StandardSave(
+                state
             )
+        )
 
-            # ------------------------------------------
-            # Async save
-            # ------------------------------------------
+        self.manager.save(
+            step,
+            args=save_args,
+        )
 
-            self.manager.save(
-                step,
-                args=save_args,
-            )
-
-        except Exception as e:
-
-            print(
-                "[checkpoint] ERROR during save:\n"
-                f"{type(e).__name__}: {e}"
-            )
-
-            traceback.print_exc()
-
-            raise
-
-    # ─────────────────────────────────────────────
-    # Wait for async completion
-    # ─────────────────────────────────────────────
+    # ==================================================
+    # Wait
+    # ==================================================
 
     def wait(self):
-        """
-        Block until pending writes finish.
-        """
 
-        try:
+        self.manager.wait_until_finished()
 
-            self.manager.wait_until_finished()
-
-            print(
-                "[checkpoint] "
-                "all pending writes complete"
-            )
-
-        except Exception as e:
-
-            print(
-                "[checkpoint] ERROR waiting "
-                "for async save:\n"
-                f"{type(e).__name__}: {e}"
-            )
-
-            traceback.print_exc()
-
-            raise
-
-    # ─────────────────────────────────────────────
-    # Latest checkpoint helper
-    # ─────────────────────────────────────────────
+    # ==================================================
+    # Latest
+    # ==================================================
 
     def latest_step(self):
 
-        try:
+        return (
+            self.manager.latest_step()
+        )
 
-            return self.manager.latest_step()
-
-        except Exception as e:
-
-            print(
-                "[checkpoint] ERROR reading "
-                "latest step:\n"
-                f"{type(e).__name__}: {e}"
-            )
-
-            traceback.print_exc()
-
-            return None
-
-    # ─────────────────────────────────────────────
-    # Restore latest checkpoint
-    # ─────────────────────────────────────────────
+    # ==================================================
+    # Restore
+    # ==================================================
 
     def restore_latest(
         self,
-        target_state=None,
+        target_state,
     ):
-        """
-        Restore latest checkpoint.
-
-        Parameters
-        ----------
-        target_state:
-            Abstract or initialized sharded
-            TrainState used to define:
-            - structure
-            - dtypes
-            - shardings
-
-        IMPORTANT
-        ─────────────────────────────────────
-        This enables:
-        - mesh-native restore
-        - sharded restore
-        - no full gathers
-        """
-
-        # --------------------------------------------------
-        # Ensure async writes complete
-        # --------------------------------------------------
 
         self.wait()
 
-        latest_step = self.latest_step()
+        latest_step = (
+            self.latest_step()
+        )
 
         if latest_step is None:
 
             print(
-                "[checkpoint] no checkpoint found "
-                "(fresh training run)"
+                "[checkpoint] "
+                "no checkpoint found"
             )
 
             return None
@@ -253,10 +147,6 @@ class CheckpointManager:
         )
 
         try:
-
-            # ----------------------------------------------
-            # Sharded restore
-            # ----------------------------------------------
 
             restore_args = (
                 ocp.args.StandardRestore(
@@ -272,11 +162,8 @@ class CheckpointManager:
             )
 
             print(
-                "[checkpoint] restore successful:\n"
-                f"  step="
-                f"{int(restored_state.step):,}\n"
-                f"  tokens="
-                f"{int(restored_state.tokens_processed):,}"
+                "[checkpoint] restore "
+                "successful"
             )
 
             return (
@@ -287,32 +174,22 @@ class CheckpointManager:
         except Exception as e:
 
             print(
-                "[checkpoint] RESTORE FAILED:\n"
-                f"{type(e).__name__}: {e}"
+                "[checkpoint] "
+                "RESTORE FAILED\n"
+                f"{type(e).__name__}: "
+                f"{e}"
             )
 
             traceback.print_exc()
 
-            print(
-                "[checkpoint] "
-                "falling back to fresh init"
-            )
+            raise
 
-            return None
-
-    # ─────────────────────────────────────────────
+    # ==================================================
     # Close
-    # ─────────────────────────────────────────────
+    # ==================================================
 
     def close(self):
-        """
-        Graceful shutdown.
-        """
 
-        try:
+        self.wait()
 
-            self.wait()
-
-        finally:
-
-            self.manager.close()
+        self.manager.close()
