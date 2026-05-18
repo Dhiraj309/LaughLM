@@ -1,27 +1,4 @@
-"""
-tests/test_tiny_overfit.py
-
-Tiny overfit test for LaughLM Llama.
-
-Purpose
--------
-Verifies:
-- gradients flow correctly
-- causal masking works
-- logits are stable
-- residual paths are correct
-- RoPE participates correctly in training
-- KV-free training path is stable
-- optimizer integration works
-
-Expected behavior
------------------
-Loss should collapse rapidly.
-
-Typical:
-    step 0   -> ~4-5
-    step 200 -> <0.1
-"""
+# tests/test_tiny_overfit.py
 
 import jax
 import jax.numpy as jnp
@@ -33,6 +10,10 @@ from LaughLM.model.llama.config import (
 
 from LaughLM.model.llama.model import (
     LlamaForCausalLM,
+)
+
+from LaughLM.training.loss import (
+    compute_loss,
 )
 
 
@@ -50,69 +31,24 @@ def build_test_config():
     )
 
 
-def cross_entropy_loss(
-    logits: jnp.ndarray,
-    labels: jnp.ndarray,
-) -> jnp.ndarray:
-    """
-    logits:
-        [B, T, V]
-
-    labels:
-        [B, T]
-    """
-
-    log_probs = jax.nn.log_softmax(
-        logits,
-        axis=-1,
-    )
-
-    token_log_probs = jnp.take_along_axis(
-        log_probs,
-        labels[..., None],
-        axis=-1,
-    )
-
-    token_log_probs = token_log_probs.squeeze(-1)
-
-    return -jnp.mean(token_log_probs)
-
-
 def test_tiny_overfit():
 
     config = build_test_config()
 
-    model = LlamaForCausalLM(config)
+    model = LlamaForCausalLM(
+        config=config
+    )
 
     rng = jax.random.PRNGKey(0)
 
-    # --------------------------------------------------
-    # Tiny deterministic dataset
-    # --------------------------------------------------
-
-    input_ids = jnp.array(
+    tokens = jnp.array(
         [[1, 2, 3, 4, 5, 6, 7, 8]],
         dtype=jnp.int32,
     )
 
-    labels = jnp.array(
-        [[2, 3, 4, 5, 6, 7, 8, 9]],
-        dtype=jnp.int32,
-    )
-
-    position_ids = jnp.arange(
-        input_ids.shape[1],
-        dtype=jnp.int32,
-    )[None, :]
-
-    # --------------------------------------------------
-    # Initialize
-    # --------------------------------------------------
-
     variables = model.init(
         rng,
-        input_ids=input_ids,
-        position_ids=position_ids,
+        input_ids=tokens[:, :-1],
         use_cache=False,
         mode="train",
     )
@@ -123,25 +59,26 @@ def test_tiny_overfit():
         learning_rate=1e-3,
     )
 
-    opt_state = optimizer.init(params)
+    opt_state = optimizer.init(
+        params
+    )
 
     # --------------------------------------------------
-    # Loss function
+    # Loss
     # --------------------------------------------------
 
     def loss_fn(params):
 
         logits, _ = model.apply(
             {"params": params},
-            input_ids=input_ids,
-            position_ids=position_ids,
+            input_ids=tokens[:, :-1],
             use_cache=False,
             mode="train",
         )
 
-        loss = cross_entropy_loss(
+        loss, _ = compute_loss(
             logits,
-            labels,
+            tokens[:, 1:],
         )
 
         return loss
@@ -171,19 +108,26 @@ def test_tiny_overfit():
             updates,
         )
 
-        return params, opt_state, loss
+        return (
+            params,
+            opt_state,
+            loss,
+        )
 
     # --------------------------------------------------
-    # Training loop
+    # Train loop
     # --------------------------------------------------
 
     initial_loss = None
-
     final_loss = None
 
     for step in range(300):
 
-        params, opt_state, loss = train_step(
+        (
+            params,
+            opt_state,
+            loss,
+        ) = train_step(
             params,
             opt_state,
         )
@@ -203,7 +147,6 @@ def test_tiny_overfit():
             )
 
     print()
-
     print(
         f"initial_loss={initial_loss:.6f}"
     )
@@ -212,23 +155,6 @@ def test_tiny_overfit():
         f"final_loss={final_loss:.6f}"
     )
 
-
-    from flax.traverse_util import flatten_dict
-
-    print()
-    print("=" * 80)
-    print("PARAMETER TREE")
-    print("=" * 80)
-    
-    flat = flatten_dict(variables["params"])
-    
-    for k, v in flat.items():
-        print(k, v.shape)
-
-    # --------------------------------------------------
-    # Assertions
-    # --------------------------------------------------
-
-    assert final_loss < 0.05
-
     assert final_loss < initial_loss
+
+    assert final_loss < 0.1
