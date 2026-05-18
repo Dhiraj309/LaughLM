@@ -1,6 +1,6 @@
-"""
-LaughLM/model/llama/model.py
+# LaughLM/model/llama/model.py
 
+"""
 Canonical Llama decoder-only language model.
 
 Frontier-grade SPMD additions:
@@ -49,15 +49,10 @@ KV cache:
 """
 
 from typing import Optional
-from functools import partial
 
 import jax.numpy as jnp
 
 from flax import linen as nn
-
-from flax.linen import (
-    partitioning as nn_partitioning,
-)
 
 from LaughLM.model.llama.config import (
     LlamaConfig,
@@ -67,6 +62,9 @@ from LaughLM.model.llama.initialization import (
     create_dense,
     create_embedding,
     constrain_hidden_states,
+)
+
+from LaughLM.distributed.sharding import (
     constrain_logits,
 )
 
@@ -103,16 +101,6 @@ class LlamaModel(nn.Module):
         # --------------------------------------------------
         # Token embeddings
         # --------------------------------------------------
-        #
-        # Logical shape:
-        #
-        #   [vocab, embed]
-        #
-        # Standard frontier sharding:
-        #
-        #   vocab -> fsdp
-        #   embed -> tensor/fsdp
-        #
 
         self.embed_tokens = create_embedding(
             num_embeddings=config.vocab_size,
@@ -147,27 +135,19 @@ class LlamaModel(nn.Module):
         # Decoder stack
         # --------------------------------------------------
         #
-        # Frontier-grade scan stack.
+        # IMPORTANT
+        # ─────────────────────────────────────────────
+        # Current scan implementation supports:
         #
-        # Benefits:
+        # - training
+        # - prefill
         #
-        # - O(1) compile graph size
-        # - dramatically lower compile time
-        # - lower HBM pressure
-        # - remat-compatible
-        # - future FSDP compatible
-        # - future pipeline parallel compatible
+        # It does NOT yet support:
         #
-        # Parameter layout:
+        # - autoregressive KV-cache decode
         #
-        #   params["layers"][layer_idx]
-        #
-        # instead of:
-        #
-        #   params["layers_0"]
-        #   params["layers_1"]
-        #
-        # This matches MaxText/T5X/Pax conventions.
+        # because scanned mutable cache carries
+        # require a more advanced carry structure.
         #
 
         if getattr(
@@ -191,10 +171,6 @@ class LlamaModel(nn.Module):
                 out_axes=nn.broadcast,
 
                 length=config.num_hidden_layers,
-
-                metadata_params={
-                    "partition_name": "layers",
-                },
             )
 
             self.layers = ScanLayer(
@@ -235,26 +211,23 @@ class LlamaModel(nn.Module):
         jnp.ndarray,
         Optional[list[KVCache]],
     ]:
-        """
-        Parameters
-        ----------
-        input_ids:
-            [B, T]
 
-        position_ids:
-            [B, T]
+        # --------------------------------------------------
+        # Scan limitation
+        # --------------------------------------------------
 
-        kv_caches:
-            list[KVCache]
-
-        use_cache:
-            Whether to return updated caches.
-
-        mode:
-            "train"
-            "prefill"
-            "decode"
-        """
+        if (
+            getattr(
+                self.config,
+                "scan_layers",
+                False,
+            )
+            and use_cache
+        ):
+            raise ValueError(
+                "scan_layers with KV cache "
+                "is not yet supported"
+            )
 
         B, T = input_ids.shape
 
@@ -265,10 +238,6 @@ class LlamaModel(nn.Module):
         hidden_states = self.embed_tokens(
             input_ids
         )
-
-        # --------------------------------------------------
-        # Logical activation constraint
-        # --------------------------------------------------
 
         hidden_states = constrain_hidden_states(
             hidden_states
@@ -294,11 +263,14 @@ class LlamaModel(nn.Module):
 
                 start_pos = 0
 
-            position_ids = jnp.arange(
-                start_pos,
-                start_pos + T,
-                dtype=jnp.int32,
-            )[None, :]
+            position_ids = jnp.broadcast_to(
+                jnp.arange(
+                    start_pos,
+                    start_pos + T,
+                    dtype=jnp.int32,
+                )[None, :],
+                (B, T),
+            )
 
         # --------------------------------------------------
         # Attention mask
@@ -349,22 +321,18 @@ class LlamaModel(nn.Module):
         # Decoder stack
         # --------------------------------------------------
 
-        # --------------------------------------------------
-        # Scan path
-        # --------------------------------------------------
-
         if getattr(
             self.config,
             "scan_layers",
             False,
         ):
 
-            hidden_states, updated_caches = (
+            hidden_states, _ = (
                 self.layers(
                     hidden_states=hidden_states,
                     positions=position_ids,
                     attention_mask=attention_mask,
-                    kv_cache=kv_caches,
+                    kv_cache=None,
                     mode=mode,
                 )
             )
@@ -373,9 +341,7 @@ class LlamaModel(nn.Module):
                 hidden_states
             )
 
-        # --------------------------------------------------
-        # Non-scan fallback
-        # --------------------------------------------------
+            updated_caches = None
 
         else:
 
@@ -453,13 +419,6 @@ class LlamaForCausalLM(nn.Module):
         # --------------------------------------------------
         # LM head
         # --------------------------------------------------
-        #
-        # Logical shape:
-        #
-        #   [embed, vocab]
-        #
-        # Tensor/vocab parallel compatible.
-        #
 
         self.lm_head = create_dense(
             features=config.vocab_size,
@@ -479,20 +438,6 @@ class LlamaForCausalLM(nn.Module):
         jnp.ndarray,
         Optional[list[KVCache]],
     ]:
-        """
-        Parameters
-        ----------
-        input_ids:
-            [B, T]
-
-        position_ids:
-            [B, T]
-
-        Returns
-        -------
-        logits:
-            [B, T, vocab_size]
-        """
 
         hidden_states, updated_caches = (
             self.model(
@@ -516,14 +461,6 @@ class LlamaForCausalLM(nn.Module):
                 .embedding
             )
 
-            #
-            # embedding:
-            #   [vocab, embed]
-            #
-            # logits:
-            #   [batch, seq, vocab]
-            #
-
             logits = jnp.einsum(
                 "btd,vd->btv",
                 hidden_states,
@@ -536,6 +473,14 @@ class LlamaForCausalLM(nn.Module):
             logits = self.lm_head(
                 hidden_states
             )
+
+        # --------------------------------------------------
+        # Stable fp32 logits
+        # --------------------------------------------------
+
+        logits = logits.astype(
+            jnp.float32
+        )
 
         # --------------------------------------------------
         # Logical logits constraint
