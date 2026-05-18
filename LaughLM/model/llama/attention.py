@@ -24,19 +24,26 @@ Design goals:
 
 Tensor conventions
 ──────────────────
+
 Input hidden states:
     [B, T, D]
 
-Q:
+Pre-attention Q layout:
+    [B, T, QH, Dh]
+
+Pre-attention K/V layout:
+    [B, T, KVH, Dh]
+
+Attention-kernel Q layout:
     [B, QH, T, Dh]
 
-K/V:
+Attention-kernel K/V layout:
     [B, KVH, T, Dh]
 
 Attention output:
     [B, T, D]
 
-Cache storage:
+KV cache storage:
     [B, S, KVH, Dh]
 """
 
@@ -66,6 +73,10 @@ from LaughLM.model.llama.rope import (
 from LaughLM.model.llama.kv_cache import (
     KVCache,
     update_kv_cache,
+)
+
+from LaughLM.distributed.sharding import (
+    constrain_kv_cache,
 )
 
 
@@ -240,7 +251,13 @@ class LlamaAttention(nn.Module):
         )
 
         # --------------------------------------------------
-        # Reshape
+        # Pre-attention reshape
+        #
+        # Q:
+        #   [B, T, QH, Dh]
+        #
+        # K/V:
+        #   [B, T, KVH, Dh]
         # --------------------------------------------------
 
         query_states = query_states.reshape(
@@ -266,6 +283,8 @@ class LlamaAttention(nn.Module):
 
         # --------------------------------------------------
         # RoPE
+        #
+        # Applied BEFORE attention transpose.
         # --------------------------------------------------
 
         rotary_emb = RotaryEmbedding(
@@ -284,6 +303,21 @@ class LlamaAttention(nn.Module):
                 cos,
                 sin,
             )
+        )
+
+        # --------------------------------------------------
+        # KV cache constraints
+        #
+        # Cache layout:
+        #   [B, S, KVH, Dh]
+        # --------------------------------------------------
+
+        key_states = constrain_kv_cache(
+            key_states
+        )
+
+        value_states = constrain_kv_cache(
+            value_states
         )
 
         # --------------------------------------------------
@@ -324,8 +358,7 @@ class LlamaAttention(nn.Module):
             ]
 
         # --------------------------------------------------
-        # Transpose for attention
-        # --------------------------------------------------
+        # Attention-kernel transpose
         #
         # Q:
         #   [B, Tq, QH, Dh]
@@ -336,7 +369,7 @@ class LlamaAttention(nn.Module):
         #   [B, Tk, KVH, Dh]
         #       ->
         #   [B, KVH, Tk, Dh]
-        #
+        # --------------------------------------------------
 
         query_states = jnp.transpose(
             query_states,
@@ -354,7 +387,7 @@ class LlamaAttention(nn.Module):
         )
 
         # --------------------------------------------------
-        # Logical constraints
+        # Attention-layout logical constraints
         # --------------------------------------------------
 
         query_states = constrain_attention_q(
@@ -385,6 +418,9 @@ class LlamaAttention(nn.Module):
 
         # --------------------------------------------------
         # Attention logits
+        #
+        # IMPORTANT:
+        # matmul accumulates in fp32.
         # --------------------------------------------------
 
         attn_weights = jnp.matmul(
@@ -394,6 +430,7 @@ class LlamaAttention(nn.Module):
                 -1,
                 -2,
             ),
+            preferred_element_type=jnp.float32,
         )
 
         attn_weights = (
@@ -413,37 +450,39 @@ class LlamaAttention(nn.Module):
             )
 
         # --------------------------------------------------
-        # Numerically-stable softmax
+        # Numerically stable fp32 softmax
+        #
+        # bf16 logits
+        #   ->
+        # fp32 softmax
+        #   ->
+        # cast back
         # --------------------------------------------------
-        #
-        # Always compute softmax in fp32.
-        #
-        # Frontier standard:
-        #   bf16 logits
-        #       ->
-        #   fp32 softmax
-        #       ->
-        #   cast back
-        #
 
-        attn_weights = (
-            jax.nn.softmax(
-                attn_weights.astype(
-                    jnp.float32
-                ),
-                axis=-1,
-            ).astype(
-                query_states.dtype
-            )
+        attn_weights = attn_weights.astype(
+            jnp.float32
+        )
+
+        attn_weights = jax.nn.softmax(
+            attn_weights,
+            axis=-1,
+        )
+
+        attn_weights = attn_weights.astype(
+            query_states.dtype
         )
 
         # --------------------------------------------------
         # Attention output
+        #
+        # IMPORTANT:
+        # matmul accumulates in fp32.
         # --------------------------------------------------
 
         attn_output = jnp.matmul(
             attn_weights,
             value_states,
+            preferred_element_type=jnp.float32,
         )
 
         # --------------------------------------------------
