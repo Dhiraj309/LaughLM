@@ -1,3 +1,4 @@
+
 """
 LaughLM/distributed/sharding.py
 
@@ -12,6 +13,8 @@ Frontier-grade SPMD helpers:
 5. Activation constraints
 6. Loss/logit constraints
 7. Future-ready sequence parallel hooks
+8. Replicated scalar shardings
+9. Canonical activation shardings
 
 References:
 ────────────────────────────────────────────
@@ -21,6 +24,12 @@ References:
 - Pax
 """
 
+from __future__ import annotations
+
+from typing import Any
+
+import flax.linen as nn
+
 from flax.linen import (
     partitioning as nn_partitioning,
 )
@@ -29,8 +38,6 @@ from jax.sharding import (
     NamedSharding,
     PartitionSpec as P,
 )
-
-import flax.linen as nn
 
 
 # ─────────────────────────────────────────────────────────────
@@ -77,15 +84,18 @@ def logical_to_sharding(
     config,
 ):
     """
-    Convert logical PartitionSpec
-    tree into NamedSharding tree.
+    Convert logical PartitionSpec tree
+    into NamedSharding tree.
     """
 
-    return nn.logical_to_mesh_sharding(
-        logical_annotations,
-        mesh,
-        get_logical_axis_rules(config),
-    )
+    with nn_partitioning.axis_rules(
+        get_logical_axis_rules(config)
+    ):
+
+        return nn.logical_to_mesh_sharding(
+            logical_annotations,
+            mesh,
+        )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -115,11 +125,35 @@ def create_named_sharding(
 
 
 # ─────────────────────────────────────────────────────────────
+# Replicated sharding
+# ─────────────────────────────────────────────────────────────
+
+def replicated_sharding(
+    mesh,
+):
+    """
+    Fully replicated sharding.
+
+    Used for:
+    - scalar losses
+    - metrics
+    - RNG seeds
+    - counters
+    """
+
+    return NamedSharding(
+        mesh,
+        P(),
+    )
+
+
+# ─────────────────────────────────────────────────────────────
 # Input sharding
 # ─────────────────────────────────────────────────────────────
 
 def create_input_sharding(
     mesh,
+    config,
 ):
     """
     Create canonical input batch sharding.
@@ -132,23 +166,100 @@ def create_input_sharding(
     ─────────────────────────────────────────
     grad_accum -> replicated
     global_batch -> batch/data axis
-    sequence -> replicated
-
-    Result:
-    ─────────────────────────────────────────
-    PartitionSpec(
-        None,
-        "data",
-        None,
-    )
+    sequence -> optional sequence axis
     """
+
+    rules = config.spmd.axis_rules
 
     return NamedSharding(
         mesh,
         P(
             None,
-            "data",
-            None,
+            rules.batch,
+            rules.sequence,
+        ),
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# Token tensor sharding
+# ─────────────────────────────────────────────────────────────
+
+def create_token_sharding(
+    mesh,
+    config,
+):
+    """
+    Standard token tensor sharding.
+
+    Shape:
+    ─────────────────────────────────────────
+    [batch, sequence]
+    """
+
+    rules = config.spmd.axis_rules
+
+    return NamedSharding(
+        mesh,
+        P(
+            rules.batch,
+            rules.sequence,
+        ),
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# Hidden-state sharding
+# ─────────────────────────────────────────────────────────────
+
+def create_activation_sharding(
+    mesh,
+    config,
+):
+    """
+    Standard hidden-state sharding.
+
+    Shape:
+    ─────────────────────────────────────────
+    [batch, sequence, embed]
+    """
+
+    rules = config.spmd.axis_rules
+
+    return NamedSharding(
+        mesh,
+        P(
+            rules.batch,
+            rules.sequence,
+            rules.embed,
+        ),
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# Logits sharding
+# ─────────────────────────────────────────────────────────────
+
+def create_logits_sharding(
+    mesh,
+    config,
+):
+    """
+    Standard logits sharding.
+
+    Shape:
+    ─────────────────────────────────────────
+    [batch, sequence, vocab]
+    """
+
+    rules = config.spmd.axis_rules
+
+    return NamedSharding(
+        mesh,
+        P(
+            rules.batch,
+            rules.sequence,
+            rules.vocab,
         ),
     )
 
@@ -180,7 +291,9 @@ def constrain_batch(batch):
 # Hidden-state constraints
 # ─────────────────────────────────────────────────────────────
 
-def constrain_hidden_states(hidden_states):
+def constrain_hidden_states(
+    hidden_states,
+):
     """
     Apply canonical hidden-state constraints.
 
@@ -297,4 +410,27 @@ def constrain_loss_tensor(
             "batch",
             "sequence",
         ),
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# Explicit data placement
+# ─────────────────────────────────────────────────────────────
+
+def shard_data(
+    data: Any,
+    sharding,
+):
+    """
+    Explicitly place data onto mesh.
+
+    Useful for:
+    - input batches
+    - eval batches
+    - token tensors
+    """
+
+    return nn_partitioning.with_sharding_constraint(
+        data,
+        sharding.spec,
     )
