@@ -1,4 +1,3 @@
-
 """
 LaughLM/training/trainer.py
 
@@ -12,6 +11,7 @@ Architecture:
 - Mesh-native parameter initialization
 - Sharded optimizer state
 - Explicit input batch sharding
+- Explicit compile warmup
 - Resume-safe checkpoints
 - CPU-side async prefetch
 - Static-shape training loop
@@ -386,6 +386,46 @@ class Trainer:
             )
 
         # --------------------------------------------------
+        # Explicit compile warmup
+        # --------------------------------------------------
+
+        print(
+            "[trainer] compiling train step..."
+        )
+
+        shaped_batch = (
+            jax.ShapeDtypeStruct(
+                (
+                    self.grad_accum,
+                    global_batch_size,
+                    config.runtime.seq_len,
+                ),
+                jnp.int32,
+            )
+        )
+
+        with (
+            jax.set_mesh(self.mesh),
+            self.mesh,
+            nn_partitioning.axis_rules(
+                get_logical_axis_rules(config)
+            ),
+        ):
+
+            lowered = self.train_step.lower(
+                self.abstract_state,
+                shaped_batch,
+            )
+
+            self.compiled_train_step = (
+                lowered.compile()
+            )
+
+        print(
+            "[trainer] train step compiled"
+        )
+
+        # --------------------------------------------------
         # Logging
         # --------------------------------------------------
 
@@ -557,11 +597,6 @@ class Trainer:
 
             # ------------------------------------------
             # Explicit input sharding
-            #
-            # IMPORTANT:
-            # No implicit placement.
-            # No hidden resharding.
-            # Canonical GSPMD semantics.
             # ------------------------------------------
 
             batch = jax.device_put(
@@ -574,7 +609,7 @@ class Trainer:
             # ------------------------------------------
 
             self.state, metrics = (
-                self.train_step(
+                self.compiled_train_step(
                     self.state,
                     batch,
                 )
@@ -596,10 +631,6 @@ class Trainer:
 
             # ------------------------------------------
             # Scalar extraction ONLY
-            #
-            # IMPORTANT:
-            # Never device_get full state
-            # inside hot loop.
             # ------------------------------------------
 
             tokens_seen = int(
