@@ -1,4 +1,3 @@
-
 """
 LaughLM/distributed/sharding.py
 
@@ -32,6 +31,7 @@ import flax.linen as nn
 
 from flax.linen import (
     partitioning as nn_partitioning,
+    with_logical_constraint,
 )
 
 from jax.sharding import (
@@ -277,7 +277,7 @@ def constrain_batch(batch):
     [grad_accum, batch, sequence]
     """
 
-    return nn_partitioning.with_logical_constraint(
+    return with_logical_constraint(
         batch,
         (
             None,
@@ -302,7 +302,7 @@ def constrain_hidden_states(
     [batch, sequence, embed]
     """
 
-    return nn_partitioning.with_logical_constraint(
+    return with_logical_constraint(
         hidden_states,
         (
             "batch",
@@ -327,7 +327,7 @@ def constrain_attention_tensor(
     [batch, heads, sequence, head_dim]
     """
 
-    return nn_partitioning.with_logical_constraint(
+    return with_logical_constraint(
         tensor,
         (
             "batch",
@@ -353,7 +353,7 @@ def constrain_kv_cache(
     [batch, sequence, kv_heads, head_dim]
     """
 
-    return nn_partitioning.with_logical_constraint(
+    return with_logical_constraint(
         tensor,
         (
             "batch",
@@ -379,7 +379,7 @@ def constrain_logits(
     [batch, sequence, vocab]
     """
 
-    return nn_partitioning.with_logical_constraint(
+    return with_logical_constraint(
         logits,
         (
             "batch",
@@ -404,7 +404,7 @@ def constrain_loss_tensor(
     [batch, sequence]
     """
 
-    return nn_partitioning.with_logical_constraint(
+    return with_logical_constraint(
         tensor,
         (
             "batch",
