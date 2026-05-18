@@ -1,27 +1,5 @@
 """
 LaughLM/training/train_step.py
-
-Frontier-grade GSPMD training step.
-
-Architecture
-────────────────────────────────────────────────────────
-- Pure GSPMD / SPMD execution
-- No pmap
-- No pmean
-- Global sharded arrays
-- Mesh-aware jit compilation
-- Explicit sharding contracts
-- Float32 gradient accumulation
-- Static-shape compilation
-- XLA collective insertion via partitioner
-- No hidden host synchronization
-- Stateless RNG semantics
-
-Inspired by:
-- MaxText
-- T5X
-- Levanter
-- Pax
 """
 
 from __future__ import annotations
@@ -45,20 +23,18 @@ from LaughLM.distributed.sharding import (
     get_logical_axis_rules,
     constrain_batch,
     constrain_logits,
-    constrain_loss_tensor,
+    replicated_sharding,
 )
 
 
 Params = Any
-OptState = Any
 Batch = jnp.ndarray
-
 Metrics = Dict[str, jnp.ndarray]
 
 
-# ============================================================
-# Train Step
-# ============================================================
+# ─────────────────────────────────────────────────────────────
+# Train step
+# ─────────────────────────────────────────────────────────────
 
 def create_train_step(
     *,
@@ -68,51 +44,22 @@ def create_train_step(
     mesh,
     state_shardings,
     data_sharding,
-    grad_accum: int,
-    max_grad_norm: float = 1.0,
-) -> Callable:
-    """
-    Create fully-sharded GSPMD training step.
+    grad_accum,
+    max_grad_norm=1.0,
+):
 
-    Returns
-    -------
-    jitted_train_step:
-        (state, batch) -> (new_state, metrics)
-
-    Batch shape:
-        [grad_accum, global_batch, seq_len]
-
-    IMPORTANT
-    ─────────────────────────────────────────────
-    This function operates on GLOBAL arrays.
-
-    XLA/GSPMD automatically inserts collectives
-    from logical shardings and PartitionSpecs.
-    """
-
-    # --------------------------------------------------------
-    # Loss function
-    # --------------------------------------------------------
+    metrics_sharding = (
+        replicated_sharding(mesh)
+    )
 
     def loss_fn(
-        params: Params,
-        micro_batch: Batch,
+        params,
+        micro_batch,
     ):
-        """
-        Single microbatch loss.
-        """
-
-        # ----------------------------------------------------
-        # Token shifting
-        # ----------------------------------------------------
 
         inputs, targets = shift_tokens(
             micro_batch
         )
-
-        # ----------------------------------------------------
-        # Forward
-        # ----------------------------------------------------
 
         logits, _ = model.apply(
             {"params": params},
@@ -124,44 +71,17 @@ def create_train_step(
             logits
         )
 
-        # ----------------------------------------------------
-        # Cross entropy
-        # ----------------------------------------------------
-
         loss, metrics = compute_loss(
             logits,
             targets,
         )
 
-        loss = constrain_loss_tensor(
-            loss
-        )
-
         return loss, metrics
-
-    # --------------------------------------------------------
-    # Train step
-    # --------------------------------------------------------
 
     def train_step(
         state,
         batch,
     ):
-        """
-        Single optimizer step.
-
-        Parameters
-        ----------
-        state:
-            Global sharded TrainState
-
-        batch:
-            [grad_accum, global_batch, seq_len]
-        """
-
-        # ----------------------------------------------------
-        # Batch logical constraints
-        # ----------------------------------------------------
 
         batch = constrain_batch(
             batch
@@ -169,39 +89,20 @@ def create_train_step(
 
         params = state.params
 
-        opt_state = state.opt_state
-
-        # ----------------------------------------------------
-        # Stateless RNG
-        #
-        # Fold step into base key.
-        #
-        # Frontier standard:
-        # avoids mutable RNG-in-state semantics.
-        # ----------------------------------------------------
-
         step_rng = jax.random.fold_in(
             state.rng_key,
             state.step,
         )
 
-        # ----------------------------------------------------
-        # FP32 gradient accumulator
-        #
-        # Mandatory for stable bf16 training.
-        # ----------------------------------------------------
-
-        grads_accum = jax.tree_util.tree_map(
-            lambda p: jnp.zeros_like(
-                p,
-                dtype=jnp.float32,
-            ),
-            params,
+        grads_accum = (
+            jax.tree_util.tree_map(
+                lambda p: jnp.zeros_like(
+                    p,
+                    dtype=jnp.float32,
+                ),
+                params,
+            )
         )
-
-        # ----------------------------------------------------
-        # Gradient accumulation scan
-        # ----------------------------------------------------
 
         def scan_fn(
             carry,
@@ -210,13 +111,9 @@ def create_train_step(
 
             grads_accum, rng = carry
 
-            rng, subkey = jax.random.split(
+            rng, _ = jax.random.split(
                 rng
             )
-
-            # ------------------------------------------------
-            # Forward + backward
-            # ------------------------------------------------
 
             (
                 (loss, metrics),
@@ -229,14 +126,10 @@ def create_train_step(
                 micro_batch,
             )
 
-            # ------------------------------------------------
-            # Accumulate grads in fp32
-            # ------------------------------------------------
-
             grads_accum = (
                 jax.tree_util.tree_map(
-                    lambda g_acc, g:
-                    g_acc + g.astype(jnp.float32),
+                    lambda a, g:
+                    a + g.astype(jnp.float32),
                     grads_accum,
                     grads,
                 )
@@ -244,24 +137,21 @@ def create_train_step(
 
             return (
                 (grads_accum, rng),
-                (loss, metrics),
+                loss,
             )
 
         (
             (grads_accum, _),
-            (losses, metrics_list),
+            losses,
         ) = jax.lax.scan(
             scan_fn,
             (grads_accum, step_rng),
             batch,
         )
 
-        # ----------------------------------------------------
-        # Average accumulated grads
-        # ----------------------------------------------------
-
         grads = jax.tree_util.tree_map(
-            lambda g: g / grad_accum,
+            lambda g:
+            g / grad_accum,
             grads_accum,
         )
 
@@ -270,33 +160,16 @@ def create_train_step(
             dtype=jnp.float32,
         )
 
-        # ----------------------------------------------------
-        # IMPORTANT
-        #
-        # No pmean here.
-        #
-        # GSPMD inserts collectives automatically
-        # from PartitionSpecs.
-        # ----------------------------------------------------
-
-        # ----------------------------------------------------
-        # Global gradient norm
-        # ----------------------------------------------------
-
         grad_norm = optax.global_norm(
             grads
         )
-
-        # ----------------------------------------------------
-        # Clip AFTER reductions
-        # ----------------------------------------------------
 
         clip_scale = jnp.minimum(
             1.0,
             max_grad_norm
             / jnp.maximum(
                 grad_norm,
-                1e-8,
+                1e-6,
             ),
         )
 
@@ -305,46 +178,34 @@ def create_train_step(
             grads,
         )
 
-        # ----------------------------------------------------
-        # Optimizer update
-        # ----------------------------------------------------
-
         updates, new_opt_state = (
             optimizer.update(
                 grads,
-                opt_state,
+                state.opt_state,
                 params,
             )
         )
 
-        new_params = optax.apply_updates(
-            params,
-            updates,
+        new_params = (
+            optax.apply_updates(
+                params,
+                updates,
+            )
         )
 
-        # ----------------------------------------------------
-        # GLOBAL token accounting
-        # ----------------------------------------------------
-
-        tokens_in_step = (
+        tokens_in_step = int(
             batch.shape[0]
             * batch.shape[1]
             * batch.shape[2]
         )
 
-        # ----------------------------------------------------
-        # State update
-        # ----------------------------------------------------
-
-        new_state = state.apply_grad_step(
-            params=new_params,
-            opt_state=new_opt_state,
-            tokens_in_step=tokens_in_step,
+        new_state = (
+            state.apply_grad_step(
+                params=new_params,
+                opt_state=new_opt_state,
+                tokens_in_step=tokens_in_step,
+            )
         )
-
-        # ----------------------------------------------------
-        # Metrics
-        # ----------------------------------------------------
 
         metrics = {
             "loss": loss.astype(
@@ -360,12 +221,7 @@ def create_train_step(
             metrics,
         )
 
-    # ========================================================
-    # Mesh-aware compilation
-    # ========================================================
-
     with (
-        jax.set_mesh(mesh),
         mesh,
         nn_partitioning.axis_rules(
             get_logical_axis_rules(config)
@@ -382,27 +238,29 @@ def create_train_step(
 
             out_shardings=(
                 state_shardings,
-                None,
+                metrics_sharding,
             ),
 
             donate_argnums=(0,),
         )
 
 
-# ============================================================
-# Eval Step
-# ============================================================
+# ─────────────────────────────────────────────────────────────
+# Eval step
+# ─────────────────────────────────────────────────────────────
 
 def create_eval_step(
     *,
     model,
     config,
     mesh,
+    state_shardings,
     data_sharding,
 ):
-    """
-    Create GSPMD evaluation step.
-    """
+
+    metrics_sharding = (
+        replicated_sharding(mesh)
+    )
 
     def eval_step(
         state,
@@ -427,7 +285,7 @@ def create_eval_step(
             logits
         )
 
-        loss, metrics = compute_loss(
+        loss, _ = compute_loss(
             logits,
             targets,
         )
@@ -439,7 +297,6 @@ def create_eval_step(
         }
 
     with (
-        jax.set_mesh(mesh),
         mesh,
         nn_partitioning.axis_rules(
             get_logical_axis_rules(config)
@@ -454,5 +311,5 @@ def create_eval_step(
                 data_sharding,
             ),
 
-            out_shardings=None,
+            out_shardings=metrics_sharding,
         )
