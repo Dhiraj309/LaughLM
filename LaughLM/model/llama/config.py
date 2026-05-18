@@ -2,29 +2,6 @@
 LaughLM/model/llama/config.py
 
 Canonical Llama-family architecture configuration.
-
-Design goals:
-- HF-compatible semantics
-- deterministic architecture invariants
-- minimal architectural surface
-- no transformer-zoo polymorphism
-- future-compatible with:
-    - HF checkpoint conversion
-    - PEFT / LoRA / QLoRA
-    - tensor parallelism
-    - GSPMD sharding
-
-This config intentionally models only:
-- decoder-only
-- text-only
-- Llama-style architectures
-
-It does NOT contain:
-- training config
-- optimizer config
-- runtime config
-- distributed config
-- kernel dispatch config
 """
 
 from dataclasses import dataclass
@@ -35,30 +12,16 @@ import jax.numpy as jnp
 
 @dataclass
 class LlamaConfig:
-    """
-    Minimal canonical Llama architecture config.
 
-    Tensor conventions
-    ------------------
-    hidden_states:
-        [batch, seq, hidden_size]
-
-    attention q/k/v:
-        [batch, seq, num_heads, head_dim]
-
-    KV cache:
-        [batch, cache_seq, num_key_value_heads, head_dim]
-    """
-
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
     # Vocabulary
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
 
     vocab_size: int = 32000
 
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
     # Core architecture
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
 
     hidden_size: int = 4096
 
@@ -74,9 +37,9 @@ class LlamaConfig:
 
     max_position_embeddings: int = 2048
 
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
     # Attention / RoPE
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
 
     rope_theta: float = 10000.0
 
@@ -86,9 +49,9 @@ class LlamaConfig:
 
     attention_dropout: float = 0.0
 
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
     # MLP / normalization
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
 
     hidden_act: str = "silu"
 
@@ -96,21 +59,27 @@ class LlamaConfig:
 
     mlp_bias: bool = False
 
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
+    # Architecture
+    # =========================================================
+
+    parallel_block: bool = False
+
+    # =========================================================
     # Embeddings / logits
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
 
     tie_word_embeddings: bool = False
 
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
     # Initialization
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
 
     initializer_range: float = 0.02
 
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
     # Tokens
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
 
     pad_token_id: Optional[int] = None
 
@@ -118,16 +87,15 @@ class LlamaConfig:
 
     eos_token_id: int = 2
 
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
     # Cache
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
 
     use_cache: bool = True
 
-
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
     # DTypes
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
 
     param_dtype: jnp.dtype = jnp.float32
 
@@ -135,21 +103,37 @@ class LlamaConfig:
 
     output_dtype: jnp.dtype = jnp.float32
 
-    # ──────────────────────────────────────────────────────────
-    # Validation / derived fields
-    # ──────────────────────────────────────────────────────────
+    # =========================================================
+    # Validation
+    # =========================================================
 
     def __post_init__(self):
 
         if self.num_key_value_heads is None:
-            self.num_key_value_heads = self.num_attention_heads
-
-        if self.head_dim is None:
-            self.head_dim = (
-                self.hidden_size // self.num_attention_heads
+            self.num_key_value_heads = (
+                self.num_attention_heads
             )
 
-        if self.hidden_size % self.num_attention_heads != 0:
+        if self.hidden_size <= 0:
+            raise ValueError(
+                "hidden_size must be > 0"
+            )
+
+        if self.num_attention_heads <= 0:
+            raise ValueError(
+                "num_attention_heads must be > 0"
+            )
+
+        if self.num_key_value_heads <= 0:
+            raise ValueError(
+                "num_key_value_heads must be > 0"
+            )
+
+        if (
+            self.hidden_size
+            % self.num_attention_heads
+            != 0
+        ):
             raise ValueError(
                 "hidden_size must be divisible by "
                 "num_attention_heads"
@@ -161,17 +145,38 @@ class LlamaConfig:
             != 0
         ):
             raise ValueError(
-                "num_attention_heads must be divisible by "
-                "num_key_value_heads for GQA"
+                "num_attention_heads must be divisible "
+                "by num_key_value_heads"
+            )
+
+        if self.head_dim is None:
+
+            self.head_dim = (
+                self.hidden_size
+                // self.num_attention_heads
             )
 
         expected_hidden = (
-            self.num_attention_heads * self.head_dim
+            self.num_attention_heads
+            * self.head_dim
         )
 
         if expected_hidden != self.hidden_size:
+
             raise ValueError(
-                f"hidden_size mismatch: "
-                f"{expected_hidden=} != "
-                f"{self.hidden_size=}"
+                f"Inconsistent dimensions:\n"
+                f"  hidden_size={self.hidden_size}\n"
+                f"  num_attention_heads="
+                f"{self.num_attention_heads}\n"
+                f"  head_dim={self.head_dim}"
+            )
+
+        if self.intermediate_size <= 0:
+            raise ValueError(
+                "intermediate_size must be > 0"
+            )
+
+        if self.max_position_embeddings <= 0:
+            raise ValueError(
+                "max_position_embeddings must be > 0"
             )
