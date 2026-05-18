@@ -1,26 +1,5 @@
 """
 LaughLM/distributed/sharding.py
-
-Logical axis + NamedSharding utilities.
-
-Frontier-grade SPMD helpers:
-────────────────────────────────────────────
-1. Logical axis rules
-2. Logical → physical sharding conversion
-3. Explicit NamedSharding helpers
-4. Input batch sharding
-5. Activation constraints
-6. Loss/logit constraints
-7. Future-ready sequence parallel hooks
-8. Replicated scalar shardings
-9. Canonical activation shardings
-
-References:
-────────────────────────────────────────────
-- MaxText
-- T5X
-- Levanter
-- Pax
 """
 
 from __future__ import annotations
@@ -41,36 +20,77 @@ from jax.sharding import (
 
 
 # ─────────────────────────────────────────────────────────────
+# Axis helpers
+# ─────────────────────────────────────────────────────────────
+
+def _get_axis_names(config):
+    """
+    Unified axis extraction.
+
+    Supports:
+    - legacy global config
+    - standalone LlamaConfig
+    """
+
+    #
+    # Legacy config path
+    #
+
+    if hasattr(config, "spmd"):
+
+        rules = config.spmd.axis_rules
+
+        return {
+            "batch": rules.batch,
+            "embed": rules.embed,
+            "heads": rules.heads,
+            "kv_heads": rules.kv_heads,
+            "mlp": rules.mlp,
+            "vocab": rules.vocab,
+            "sequence": rules.sequence,
+            "layers": rules.layers,
+        }
+
+    #
+    # Standalone LlamaConfig path
+    #
+    # Current TPU runtime:
+    # 1D batch/data parallel only
+    #
+
+    return {
+        "batch": "batch",
+        "embed": None,
+        "heads": None,
+        "kv_heads": None,
+        "mlp": None,
+        "vocab": None,
+        "sequence": None,
+        "layers": None,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
 # Logical axis rules
 # ─────────────────────────────────────────────────────────────
 
 def get_logical_axis_rules(config):
     """
-    Convert config axis rules into Flax format.
-
-    Logical axes:
-    ─────────────────────────────────────────
-    batch
-    embed
-    heads
-    kv_heads
-    mlp
-    vocab
-    sequence
-    layers
+    Convert logical axis rules
+    into Flax axis_rules format.
     """
 
-    rules = config.spmd.axis_rules
+    axes = _get_axis_names(config)
 
     return (
-        ("batch", rules.batch),
-        ("embed", rules.embed),
-        ("heads", rules.heads),
-        ("kv_heads", rules.kv_heads),
-        ("mlp", rules.mlp),
-        ("vocab", rules.vocab),
-        ("sequence", rules.sequence),
-        ("layers", rules.layers),
+        ("batch", axes["batch"]),
+        ("embed", axes["embed"]),
+        ("heads", axes["heads"]),
+        ("kv_heads", axes["kv_heads"]),
+        ("mlp", axes["mlp"]),
+        ("vocab", axes["vocab"]),
+        ("sequence", axes["sequence"]),
+        ("layers", axes["layers"]),
     )
 
 
@@ -83,10 +103,6 @@ def logical_to_sharding(
     mesh,
     config,
 ):
-    """
-    Convert logical PartitionSpec tree
-    into NamedSharding tree.
-    """
 
     with nn_partitioning.axis_rules(
         get_logical_axis_rules(config)
@@ -106,17 +122,6 @@ def create_named_sharding(
     mesh,
     *axes,
 ):
-    """
-    Convenience helper.
-
-    Example
-    -------
-    create_named_sharding(
-        mesh,
-        "data",
-        "tensor",
-    )
-    """
 
     return NamedSharding(
         mesh,
@@ -131,15 +136,6 @@ def create_named_sharding(
 def replicated_sharding(
     mesh,
 ):
-    """
-    Fully replicated sharding.
-
-    Used for:
-    - scalar losses
-    - metrics
-    - RNG seeds
-    - counters
-    """
 
     return NamedSharding(
         mesh,
@@ -155,28 +151,15 @@ def create_input_sharding(
     mesh,
     config,
 ):
-    """
-    Create canonical input batch sharding.
 
-    Input batch shape:
-    ─────────────────────────────────────────
-    [grad_accum, global_batch, sequence]
-
-    Logical layout:
-    ─────────────────────────────────────────
-    grad_accum -> replicated
-    global_batch -> batch/data axis
-    sequence -> optional sequence axis
-    """
-
-    rules = config.spmd.axis_rules
+    axes = _get_axis_names(config)
 
     return NamedSharding(
         mesh,
         P(
             None,
-            rules.batch,
-            rules.sequence,
+            axes["batch"],
+            axes["sequence"],
         ),
     )
 
@@ -189,21 +172,14 @@ def create_token_sharding(
     mesh,
     config,
 ):
-    """
-    Standard token tensor sharding.
 
-    Shape:
-    ─────────────────────────────────────────
-    [batch, sequence]
-    """
-
-    rules = config.spmd.axis_rules
+    axes = _get_axis_names(config)
 
     return NamedSharding(
         mesh,
         P(
-            rules.batch,
-            rules.sequence,
+            axes["batch"],
+            axes["sequence"],
         ),
     )
 
@@ -216,22 +192,15 @@ def create_activation_sharding(
     mesh,
     config,
 ):
-    """
-    Standard hidden-state sharding.
 
-    Shape:
-    ─────────────────────────────────────────
-    [batch, sequence, embed]
-    """
-
-    rules = config.spmd.axis_rules
+    axes = _get_axis_names(config)
 
     return NamedSharding(
         mesh,
         P(
-            rules.batch,
-            rules.sequence,
-            rules.embed,
+            axes["batch"],
+            axes["sequence"],
+            axes["embed"],
         ),
     )
 
@@ -244,22 +213,15 @@ def create_logits_sharding(
     mesh,
     config,
 ):
-    """
-    Standard logits sharding.
 
-    Shape:
-    ─────────────────────────────────────────
-    [batch, sequence, vocab]
-    """
-
-    rules = config.spmd.axis_rules
+    axes = _get_axis_names(config)
 
     return NamedSharding(
         mesh,
         P(
-            rules.batch,
-            rules.sequence,
-            rules.vocab,
+            axes["batch"],
+            axes["sequence"],
+            axes["vocab"],
         ),
     )
 
@@ -269,13 +231,6 @@ def create_logits_sharding(
 # ─────────────────────────────────────────────────────────────
 
 def constrain_batch(batch):
-    """
-    Apply logical constraints to input batch.
-
-    Batch shape:
-    ─────────────────────────────────────────
-    [grad_accum, batch, sequence]
-    """
 
     return with_logical_constraint(
         batch,
@@ -294,13 +249,6 @@ def constrain_batch(batch):
 def constrain_hidden_states(
     hidden_states,
 ):
-    """
-    Apply canonical hidden-state constraints.
-
-    Shape:
-    ─────────────────────────────────────────
-    [batch, sequence, embed]
-    """
 
     return with_logical_constraint(
         hidden_states,
@@ -319,13 +267,6 @@ def constrain_hidden_states(
 def constrain_attention_tensor(
     tensor,
 ):
-    """
-    Constraint for attention tensors.
-
-    Shape:
-    ─────────────────────────────────────────
-    [batch, heads, sequence, head_dim]
-    """
 
     return with_logical_constraint(
         tensor,
@@ -345,13 +286,6 @@ def constrain_attention_tensor(
 def constrain_kv_cache(
     tensor,
 ):
-    """
-    Constraint KV cache tensors.
-
-    Shape:
-    ─────────────────────────────────────────
-    [batch, sequence, kv_heads, head_dim]
-    """
 
     return with_logical_constraint(
         tensor,
@@ -371,13 +305,6 @@ def constrain_kv_cache(
 def constrain_logits(
     logits,
 ):
-    """
-    Apply logits constraints.
-
-    Shape:
-    ─────────────────────────────────────────
-    [batch, sequence, vocab]
-    """
 
     return with_logical_constraint(
         logits,
@@ -396,13 +323,6 @@ def constrain_logits(
 def constrain_loss_tensor(
     tensor,
 ):
-    """
-    Constraint scalar-per-token losses.
-
-    Shape:
-    ─────────────────────────────────────────
-    [batch, sequence]
-    """
 
     return with_logical_constraint(
         tensor,
@@ -421,14 +341,6 @@ def shard_data(
     data: Any,
     sharding,
 ):
-    """
-    Explicitly place data onto mesh.
-
-    Useful for:
-    - input batches
-    - eval batches
-    - token tensors
-    """
 
     return nn_partitioning.with_sharding_constraint(
         data,
