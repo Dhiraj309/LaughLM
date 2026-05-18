@@ -2,35 +2,9 @@
 LaughLM/model/llama/mlp.py
 
 Canonical Llama SwiGLU MLP.
-
-Frontier-grade SPMD additions:
-────────────────────────────────────────────────────
-1. Logical activation constraints
-2. Tensor-parallel-aware MLP sharding
-3. Stable bf16 SwiGLU execution
-4. GSPMD-compatible activation layouts
-5. Explicit intermediate-axis semantics
-6. Sequence-parallel-ready activations
-
-Design goals:
-- HF-compatible parameter naming
-- deterministic semantics
-- HF-compatible initialization
-- minimal architecture surface
-- stable bf16/fp16 behavior
-- tensor-parallel compatible layouts
-
-Tensor conventions
-──────────────────
-Input:
-    [B, T, D]
-
-Intermediate:
-    [B, T, I]
-
-Output:
-    [B, T, D]
 """
+
+from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
@@ -44,7 +18,7 @@ from LaughLM.model.llama.config import (
 from LaughLM.model.llama.initialization import (
     create_dense,
     constrain_hidden_states,
-    constrain_mlp_intermediate,
+    constrain_mlp_activations,
 )
 
 
@@ -58,44 +32,36 @@ class LlamaMLP(nn.Module):
         hidden_states: jnp.ndarray,
     ) -> jnp.ndarray:
         """
-        Parameters
-        ----------
-        hidden_states:
+        Input:
             [B, T, D]
 
-        Returns
-        -------
-        hidden_states:
+        Output:
             [B, T, D]
         """
 
         config = self.config
 
-        # --------------------------------------------------
-        # Input activation constraint
-        # --------------------------------------------------
+        # ====================================================
+        # Input constraint
+        # ====================================================
 
         hidden_states = constrain_hidden_states(
             hidden_states
         )
 
-        # --------------------------------------------------
-        # SwiGLU projections
-        # --------------------------------------------------
+        # ====================================================
+        # Projections
+        # ====================================================
 
         gate_proj = create_dense(
-            features=(
-                config.intermediate_size
-            ),
+            features=config.intermediate_size,
             config=config,
             use_bias=config.mlp_bias,
             name="gate_proj",
         )
 
         up_proj = create_dense(
-            features=(
-                config.intermediate_size
-            ),
+            features=config.intermediate_size,
             config=config,
             use_bias=config.mlp_bias,
             name="up_proj",
@@ -108,66 +74,63 @@ class LlamaMLP(nn.Module):
             name="down_proj",
         )
 
-        # --------------------------------------------------
-        # Gate projection
-        # --------------------------------------------------
+        # ====================================================
+        # Gate path
+        # ====================================================
 
         gate = gate_proj(
             hidden_states
         )
 
-        gate = constrain_mlp_intermediate(
+        gate = constrain_mlp_activations(
             gate
         )
 
-        # --------------------------------------------------
+        # ----------------------------------------------------
         # SwiGLU activation
-        # --------------------------------------------------
         #
-        # Frontier standard:
-        #   silu in compute dtype
-        #   accumulation internally promoted by XLA
-        #
+        # Compute in compute_dtype.
+        # ----------------------------------------------------
 
         gate = jax.nn.silu(
             gate
         )
 
-        # --------------------------------------------------
-        # Up projection
-        # --------------------------------------------------
+        # ====================================================
+        # Up path
+        # ====================================================
 
         up = up_proj(
             hidden_states
         )
 
-        up = constrain_mlp_intermediate(
+        up = constrain_mlp_activations(
             up
         )
 
-        # --------------------------------------------------
+        # ====================================================
         # SwiGLU fusion
-        # --------------------------------------------------
+        # ====================================================
+
+        hidden_states = gate * up
 
         hidden_states = (
-            gate * up
+            constrain_mlp_activations(
+                hidden_states
+            )
         )
 
-        hidden_states = constrain_mlp_intermediate(
-            hidden_states
-        )
-
-        # --------------------------------------------------
+        # ====================================================
         # Down projection
-        # --------------------------------------------------
+        # ====================================================
 
         hidden_states = down_proj(
             hidden_states
         )
 
-        # --------------------------------------------------
-        # Output activation constraint
-        # --------------------------------------------------
+        # ====================================================
+        # Output constraint
+        # ====================================================
 
         hidden_states = constrain_hidden_states(
             hidden_states
