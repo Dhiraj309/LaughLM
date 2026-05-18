@@ -32,9 +32,9 @@ Batch = jnp.ndarray
 Metrics = Dict[str, jnp.ndarray]
 
 
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # Train step
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 def create_train_step(
     *,
@@ -44,13 +44,17 @@ def create_train_step(
     mesh,
     state_shardings,
     data_sharding,
-    grad_accum,
-    max_grad_norm=1.0,
+    grad_accum: int,
+    max_grad_norm: float = 1.0,
 ):
 
     metrics_sharding = (
         replicated_sharding(mesh)
     )
+
+    # --------------------------------------------------------
+    # Loss fn
+    # --------------------------------------------------------
 
     def loss_fn(
         params,
@@ -63,7 +67,8 @@ def create_train_step(
 
         logits, _ = model.apply(
             {"params": params},
-            inputs,
+            input_ids=inputs,
+            use_cache=False,
             mode="train",
         )
 
@@ -78,6 +83,10 @@ def create_train_step(
 
         return loss, metrics
 
+    # --------------------------------------------------------
+    # Train step
+    # --------------------------------------------------------
+
     def train_step(
         state,
         batch,
@@ -89,10 +98,18 @@ def create_train_step(
 
         params = state.params
 
+        # ----------------------------------------------------
+        # Stateless step RNG
+        # ----------------------------------------------------
+
         step_rng = jax.random.fold_in(
             state.rng_key,
             state.step,
         )
+
+        # ----------------------------------------------------
+        # FP32 grad accumulation
+        # ----------------------------------------------------
 
         grads_accum = (
             jax.tree_util.tree_map(
@@ -103,6 +120,10 @@ def create_train_step(
                 params,
             )
         )
+
+        # ----------------------------------------------------
+        # Microbatch scan
+        # ----------------------------------------------------
 
         def scan_fn(
             carry,
@@ -116,7 +137,7 @@ def create_train_step(
             )
 
             (
-                (loss, metrics),
+                (loss, _metrics),
                 grads,
             ) = jax.value_and_grad(
                 loss_fn,
@@ -126,10 +147,14 @@ def create_train_step(
                 micro_batch,
             )
 
+            # ------------------------------------------------
+            # Accumulate fp32 grads
+            # ------------------------------------------------
+
             grads_accum = (
                 jax.tree_util.tree_map(
-                    lambda a, g:
-                    a + g.astype(jnp.float32),
+                    lambda acc, g:
+                    acc + g.astype(jnp.float32),
                     grads_accum,
                     grads,
                 )
@@ -149,20 +174,39 @@ def create_train_step(
             batch,
         )
 
+        # ----------------------------------------------------
+        # Mean grads
+        # ----------------------------------------------------
+
         grads = jax.tree_util.tree_map(
             lambda g:
-            g / grad_accum,
+            g / jnp.asarray(
+                grad_accum,
+                dtype=jnp.float32,
+            ),
             grads_accum,
         )
+
+        # ----------------------------------------------------
+        # Mean loss
+        # ----------------------------------------------------
 
         loss = jnp.mean(
             losses,
             dtype=jnp.float32,
         )
 
+        # ----------------------------------------------------
+        # Global grad norm
+        # ----------------------------------------------------
+
         grad_norm = optax.global_norm(
             grads
         )
+
+        # ----------------------------------------------------
+        # Gradient clipping
+        # ----------------------------------------------------
 
         clip_scale = jnp.minimum(
             1.0,
@@ -174,9 +218,14 @@ def create_train_step(
         )
 
         grads = jax.tree_util.tree_map(
-            lambda g: g * clip_scale,
+            lambda g:
+            g * clip_scale,
             grads,
         )
+
+        # ----------------------------------------------------
+        # Optimizer update
+        # ----------------------------------------------------
 
         updates, new_opt_state = (
             optimizer.update(
@@ -193,11 +242,27 @@ def create_train_step(
             )
         )
 
-        tokens_in_step = int(
-            batch.shape[0]
-            * batch.shape[1]
-            * batch.shape[2]
+        # ----------------------------------------------------
+        # IMPORTANT
+        #
+        # Keep this JAX-native.
+        #
+        # Never use Python int(...)
+        # inside jit.
+        # ----------------------------------------------------
+
+        tokens_in_step = (
+            jnp.asarray(
+                batch.shape[0]
+                * batch.shape[1]
+                * batch.shape[2],
+                dtype=jnp.int32,
+            )
         )
+
+        # ----------------------------------------------------
+        # State update
+        # ----------------------------------------------------
 
         new_state = (
             state.apply_grad_step(
@@ -206,6 +271,10 @@ def create_train_step(
                 tokens_in_step=tokens_in_step,
             )
         )
+
+        # ----------------------------------------------------
+        # Metrics
+        # ----------------------------------------------------
 
         metrics = {
             "loss": loss.astype(
@@ -220,6 +289,10 @@ def create_train_step(
             new_state,
             metrics,
         )
+
+    # ========================================================
+    # Mesh-native compilation
+    # ========================================================
 
     with (
         mesh,
@@ -245,9 +318,9 @@ def create_train_step(
         )
 
 
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # Eval step
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 def create_eval_step(
     *,
@@ -277,7 +350,8 @@ def create_eval_step(
 
         logits, _ = model.apply(
             {"params": state.params},
-            inputs,
+            input_ids=inputs,
+            use_cache=False,
             mode="train",
         )
 
