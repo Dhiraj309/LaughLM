@@ -131,7 +131,6 @@ def _cross_entropy_with_logits_fwd(
             sum_exp,
             log_z,
             z_loss,
-            logits.dtype,
         ),
     )
 
@@ -149,7 +148,6 @@ def _cross_entropy_with_logits_bwd(
         sum_exp,
         log_z,
         z_loss,
-        logits_dtype,
     ) = res
 
     softmax = (
@@ -171,9 +169,7 @@ def _cross_entropy_with_logits_bwd(
     )
 
     return (
-        g_logits.astype(
-            logits_dtype
-        ),
+        g_logits,
         None,
         None,
     )
