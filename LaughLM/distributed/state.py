@@ -1,8 +1,21 @@
-"""
-LaughLM/distributed/state.py
+"""LaughLM/distributed/state.py
+
+Mesh-native abstract/sharded state utilities.
+
+Design goals
+------------
+- zero-allocation abstract init
+- mesh-native parameter initialization
+- deterministic logical partition extraction
+- GSPMD-safe sharded initialization
+- scan/remat compatibility
+- optimizer-state compatibility
+- checkpoint-safe structure
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -19,36 +32,56 @@ from LaughLM.distributed.sharding import (
 )
 
 
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # Dummy inputs
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 def create_dummy_inputs(
     input_shape,
 ):
     """
     Create abstract token inputs.
+
+    Parameters
+    ----------
+    input_shape:
+        [batch, sequence]
     """
 
-    input_ids = jax.ShapeDtypeStruct(
-        input_shape,
-        jnp.int32,
+    return jax.ShapeDtypeStruct(
+        shape=input_shape,
+        dtype=jnp.int32,
     )
 
-    return input_ids
 
-
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 # Abstract state
-# ─────────────────────────────────────────────────────────────
+# ============================================================
 
 def create_abstract_state(
+    *,
     model,
     config,
     mesh,
     rng,
     input_shape,
 ):
+    """
+    Create abstract initialized state.
+
+    Returns
+    -------
+    abstract_state
+    logical_specs
+    shardings
+
+    Notes
+    -----
+    Uses:
+    - jax.eval_shape
+    - logical partition extraction
+    - logical -> NamedSharding conversion
+    """
 
     dummy_inputs = create_dummy_inputs(
         input_shape
@@ -58,7 +91,9 @@ def create_abstract_state(
 
         return model.init(
             rng,
-            dummy_inputs,
+            input_ids=dummy_inputs,
+            use_cache=False,
+            mode="train",
         )
 
     with (
@@ -68,15 +103,27 @@ def create_abstract_state(
         ),
     ):
 
+        # ----------------------------------------------------
+        # Zero-allocation abstract initialization
+        # ----------------------------------------------------
+
         abstract_state = jax.eval_shape(
             init_fn
         )
+
+        # ----------------------------------------------------
+        # Extract logical PartitionSpecs
+        # ----------------------------------------------------
 
         logical_specs = (
             nn.get_partition_spec(
                 abstract_state
             )
         )
+
+        # ----------------------------------------------------
+        # Convert logical -> NamedSharding
+        # ----------------------------------------------------
 
         shardings = logical_to_sharding(
             logical_specs,
@@ -91,17 +138,30 @@ def create_abstract_state(
     )
 
 
-# ─────────────────────────────────────────────────────────────
-# Sharded init
-# ─────────────────────────────────────────────────────────────
+# ============================================================
+# Sharded initialization
+# ============================================================
 
 def create_sharded_state(
+    *,
     model,
     config,
     mesh,
     rng,
     input_shape,
 ):
+    """
+    Materialize sharded initialized state.
+
+    IMPORTANT
+    ---------
+    Avoids:
+    - replicated host initialization
+    - giant host memory spikes
+    - post-init resharding
+
+    This is the canonical TPU-safe path.
+    """
 
     dummy_inputs = create_dummy_inputs(
         input_shape
@@ -111,7 +171,9 @@ def create_sharded_state(
 
         return model.init(
             rng,
-            dummy_inputs,
+            input_ids=dummy_inputs,
+            use_cache=False,
+            mode="train",
         )
 
     (
@@ -119,11 +181,11 @@ def create_sharded_state(
         _logical_specs,
         shardings,
     ) = create_abstract_state(
-        model,
-        config,
-        mesh,
-        rng,
-        input_shape,
+        model=model,
+        config=config,
+        mesh=mesh,
+        rng=rng,
+        input_shape=input_shape,
     )
 
     with (
@@ -132,6 +194,10 @@ def create_sharded_state(
             get_logical_axis_rules(config)
         ),
     ):
+
+        # ----------------------------------------------------
+        # Mesh-native sharded initialization
+        # ----------------------------------------------------
 
         sharded_init_fn = jax.jit(
             init_fn,

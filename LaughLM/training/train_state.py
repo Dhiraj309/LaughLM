@@ -1,7 +1,27 @@
-from flax import struct
+"""
+LaughLM/training/train_state.py
+
+Canonical mesh-native TrainState.
+
+Design goals
+------------
+- immutable functional state
+- GSPMD-native semantics
+- optimizer-agnostic
+- compile-safe
+- checkpoint-safe
+- future EMA compatibility
+- future fp32-master-weight compatibility
+- no pmap assumptions
+"""
+
+from __future__ import annotations
+
 from typing import Any
 
 import jax
+
+from flax import struct
 
 
 @struct.dataclass
@@ -9,60 +29,78 @@ class TrainState:
     """
     Global sharded training state.
 
-    Frontier/GSPMD semantics
-    ──────────────────────────────────────────────
-    - params are globally sharded arrays
-    - opt_state is globally sharded
-    - step is global optimizer step
-    - tokens_processed is GLOBAL token count
-    - rng_key is a single global RNG stream
+    GSPMD semantics
+    ─────────────────────────────────────────────
+    Arrays may be:
+    - replicated
+    - fully sharded
+    - partially sharded
 
-    IMPORTANT
-    ──────────────────────────────────────────────
-    This state is NOT replicated.
+    XLA handles collectives automatically.
 
-    Under GSPMD:
-      - arrays may be partitioned across mesh axes
-      - optimizer states may be partitioned differently
-      - collectives are inserted automatically by XLA
-
-    No pmap/pmean semantics exist here.
+    No pmap/pmean semantics exist.
     """
 
-    # ------------------------------------------------------------
-    # Core training state
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+    # Model state
+    # --------------------------------------------------------
 
     params: Any
 
     opt_state: Any
 
-    step: int
+    # --------------------------------------------------------
+    # Training progress
+    # --------------------------------------------------------
 
-    tokens_processed: int
+    step: int = 0
 
-    # ------------------------------------------------------------
+    tokens_processed: int = 0
+
+    # --------------------------------------------------------
     # RNG state
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
 
-    rng_key: Any
+    rng_key: jax.Array | None = None
 
-    # ------------------------------------------------------------
-    # RNG utilities
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
+    # Optional future extensions
+    # --------------------------------------------------------
 
-    def next_rng(self):
+    #
+    # Future:
+    # - EMA weights
+    # - fp32 master params
+    # - grad scaler
+    # - metrics accumulators
+    #
+
+    extra_state: Any = None
+
+    # ========================================================
+    # RNG helpers
+    # ========================================================
+
+    def next_rng(
+        self,
+    ):
         """
-        Split global RNG safely.
+        Split global RNG stream.
 
         Returns
         -------
         new_state:
-            Updated TrainState
+            Updated state
 
         subkey:
-            RNG key for current step
+            Per-step RNG key
         """
+
+        if self.rng_key is None:
+
+            raise ValueError(
+                "TrainState.rng_key is None"
+            )
 
         new_key, subkey = jax.random.split(
             self.rng_key
@@ -75,9 +113,9 @@ class TrainState:
             subkey,
         )
 
-    # ------------------------------------------------------------
-    # Optimizer update utility
-    # ------------------------------------------------------------
+    # ========================================================
+    # Optimizer step update
+    # ========================================================
 
     def apply_grad_step(
         self,
@@ -85,20 +123,24 @@ class TrainState:
         params,
         opt_state,
         tokens_in_step: int,
+        extra_state: Any | None = None,
     ):
         """
-        Standardized optimizer-step update.
+        Apply optimizer step update.
 
         Parameters
         ----------
         params:
-            Updated model parameters
+            Updated parameters
 
         opt_state:
             Updated optimizer state
 
         tokens_in_step:
-            GLOBAL tokens processed this step
+            GLOBAL tokens processed
+
+        extra_state:
+            Optional auxiliary state
         """
 
         return self.replace(
@@ -107,6 +149,50 @@ class TrainState:
             step=self.step + 1,
             tokens_processed=(
                 self.tokens_processed
-                + tokens_in_step
+                + jax.lax.convert_element_type(
+                    tokens_in_step,
+                    self.tokens_processed.dtype
+                    if hasattr(
+                        self.tokens_processed,
+                        "dtype",
+                    )
+                    else type(
+                        self.tokens_processed
+                    ),
+                )
+            ),
+            extra_state=(
+                self.extra_state
+                if extra_state is None
+                else extra_state
             ),
         )
+
+
+# ============================================================
+# Factory
+# ============================================================
+
+def create_train_state(
+    *,
+    params,
+    optimizer,
+    rng_key=None,
+    extra_state=None,
+):
+    """
+    Create initialized TrainState.
+    """
+
+    opt_state = optimizer.init(
+        params
+    )
+
+    return TrainState(
+        params=params,
+        opt_state=opt_state,
+        step=0,
+        tokens_processed=0,
+        rng_key=rng_key,
+        extra_state=extra_state,
+    )
