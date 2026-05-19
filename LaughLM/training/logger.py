@@ -76,7 +76,7 @@ def estimate_hardware_flops(config: LaughLMConfig, num_devices: int = None) -> f
     Estimate total hardware peak FLOPs across all devices.
 
     Uses bf16 tensor core peak for the configured hardware type.
-    
+
     Parameters
     ----------
     config : LaughLMConfig
@@ -85,7 +85,7 @@ def estimate_hardware_flops(config: LaughLMConfig, num_devices: int = None) -> f
     """
     accel   = config.hardware.accelerator
     hw_type = config.hardware.type.lower()
-    
+
     # Use actual device count, not config value
     if num_devices is None:
         num_devices = jax.device_count()
@@ -300,7 +300,8 @@ class TrainingLogger:
         flops_per_step = param_flops + attn_flops
         flops_per_sec  = flops_per_step / step_time
 
-        mfu = max(0.0, min((flops_per_sec / self._hw_flops) * 100, 100.0))
+        # mfu = max(0.0, min((flops_per_sec / self._hw_flops) * 100, 100.0))
+        mfu = (flops_per_sec / self._hw_flops) * 100
 
         # ── ETA from smoothed throughput ──────────────────────
         eta     = fmt_time(remaining / max(self._ema_toks_per_sec, 1))
