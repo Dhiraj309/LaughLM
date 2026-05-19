@@ -22,9 +22,13 @@ Frontier-grade fixes (2026):
 12. TPU-safe compile lowering
 13. Optax namedtuple-safe state handling
 14. Rank-aware PartitionSpec fixing
+15. TPU-safe immediate log flushing
+16. Correct logging after compiled step
+17. No skipped logs during async execution
 """
 
 import json
+import sys
 import time
 
 from pathlib import Path
@@ -122,43 +126,18 @@ def _scalar(x):
         return float("nan")
 
 
-def _is_scalar_array(x):
-
-    if np.isscalar(x):
-        return True
-
-    if hasattr(x, "shape"):
-        return len(x.shape) == 0
-
-    return False
-
-
 def _fix_sharding_for_rank(
     sharding,
     target,
 ):
     """
     Ensure PartitionSpec rank compatibility.
-
-    Examples
-    --------
-    rank-0 -> P()
-    rank-1 -> P(None)
-    rank-2 -> P(None, None)
     """
-
-    #
-    # Non-arrays
-    #
 
     if not hasattr(target, "shape"):
         return sharding
 
     rank = len(target.shape)
-
-    #
-    # Scalars
-    #
 
     if rank == 0:
         return NamedSharding(
@@ -166,24 +145,12 @@ def _fix_sharding_for_rank(
             P(),
         )
 
-    #
-    # Existing spec
-    #
-
     spec = sharding.spec
-
-    #
-    # Convert spec to tuple
-    #
 
     if spec == P():
         axes = ()
     else:
         axes = tuple(spec)
-
-    #
-    # Expand/truncate to rank
-    #
 
     if len(axes) < rank:
         axes = axes + (None,) * (
@@ -208,18 +175,6 @@ def _create_optimizer_shardings(
     param_shardings,
     replicated,
 ):
-    """
-    Create optimizer-state shardings.
-
-    TPU-safe
-    Structure-safe
-    Optax-safe
-    Rank-safe
-    """
-
-    # --------------------------------------------------
-    # Extract ONLY actual sharding leaves
-    # --------------------------------------------------
 
     param_leaves = []
 
@@ -233,17 +188,21 @@ def _create_optimizer_shardings(
         param_shardings,
     )
 
-    param_iter = iter(param_leaves)
+    # --------------------------------------------------------
+    # Iterator factory
+    # --------------------------------------------------------
 
-    # --------------------------------------------------
+    def make_iter():
+        return iter(param_leaves)
+
+    # --------------------------------------------------------
     # Rank-safe sharding fix
-    # --------------------------------------------------
+    # --------------------------------------------------------
 
-    def next_param_sharding(target):
-
-        #
-        # Scalars replicated
-        #
+    def next_param_sharding(
+        target,
+        param_iter,
+    ):
 
         if (
             np.isscalar(target)
@@ -254,26 +213,14 @@ def _create_optimizer_shardings(
         ):
             return replicated
 
-        #
-        # Metadata replicated
-        #
-
         if not hasattr(target, "shape"):
             return replicated
-
-        #
-        # Pull next param sharding
-        #
 
         try:
             sharding = next(param_iter)
 
         except StopIteration:
             return replicated
-
-        #
-        # Fix rank mismatch
-        #
 
         rank = len(target.shape)
 
@@ -292,36 +239,36 @@ def _create_optimizer_shardings(
             P(*spec),
         )
 
-    # --------------------------------------------------
+    # --------------------------------------------------------
     # Rebuild optimizer state
-    # --------------------------------------------------
+    # --------------------------------------------------------
 
     new_states = []
 
     for state in opt_state:
-
-        #
-        # Adam-style state
-        #
 
         if (
             hasattr(state, "mu")
             and hasattr(state, "nu")
         ):
 
+            mu_iter = make_iter()
+
             mu_sharding = jax.tree_util.tree_map(
-                next_param_sharding,
+                lambda x: next_param_sharding(
+                    x,
+                    mu_iter,
+                ),
                 state.mu,
             )
 
-            #
-            # Reset iterator for nu
-            #
-
-            param_iter = iter(param_leaves)
+            nu_iter = make_iter()
 
             nu_sharding = jax.tree_util.tree_map(
-                next_param_sharding,
+                lambda x: next_param_sharding(
+                    x,
+                    nu_iter,
+                ),
                 state.nu,
             )
 
@@ -381,7 +328,8 @@ class Trainer:
         print(
             f"[trainer] using "
             f"{self.num_devices} devices "
-            f"mesh={self.mesh.axis_names}"
+            f"mesh={self.mesh.axis_names}",
+            flush=True,
         )
 
         # --------------------------------------------------
@@ -595,6 +543,30 @@ class Trainer:
 
             state, restored_step = restored
 
+            #
+            # Re-apply mesh shardings after Orbax restore
+            #
+            # Orbax may restore replicated scalars as
+            # SingleDeviceSharding which breaks compiled
+            # SPMD executables expecting NamedSharding.
+            #
+
+            state = jax.device_put(
+                state,
+                self.state_shardings,
+            )
+
+            #
+            # Force synchronization
+            #
+
+            jax.tree_util.tree_map(
+                lambda x: x.block_until_ready()
+                if hasattr(x, "block_until_ready")
+                else x,
+                state,
+            )
+
             print(
                 f"[trainer] resumed "
                 f"from step={restored_step:,}"
@@ -603,7 +575,8 @@ class Trainer:
         else:
 
             print(
-                "[trainer] fresh run"
+                "[trainer] fresh run",
+                flush=True,
             )
 
         self.state = state
@@ -661,7 +634,8 @@ class Trainer:
         # --------------------------------------------------
 
         print(
-            "[trainer] compiling train step..."
+            "[trainer] compiling train step...",
+            flush=True,
         )
 
         shaped_batch = jax.ShapeDtypeStruct(
@@ -703,7 +677,8 @@ class Trainer:
             )
 
         print(
-            "[trainer] compile complete"
+            "[trainer] compile complete",
+            flush=True,
         )
 
         # --------------------------------------------------
@@ -757,7 +732,8 @@ class Trainer:
 
         print(
             f"\nTraining for "
-            f"{total_steps:,} steps\n"
+            f"{total_steps:,} steps\n",
+            flush=True,
         )
 
         prefetched_loader = (
@@ -779,9 +755,9 @@ class Trainer:
 
         while host_step < total_steps:
 
-            # ------------------------------------------
+            # ------------------------------------------------
             # Build batch
-            # ------------------------------------------
+            # ------------------------------------------------
 
             micro_batches = []
 
@@ -822,9 +798,9 @@ class Trainer:
                 self.input_sharding,
             )
 
-            # ------------------------------------------
+            # ------------------------------------------------
             # TRUE synchronous timing
-            # ------------------------------------------
+            # ------------------------------------------------
 
             step_start = time.perf_counter()
 
@@ -834,6 +810,10 @@ class Trainer:
                     batch,
                 )
             )
+
+            # ------------------------------------------------
+            # FORCE synchronization
+            # ------------------------------------------------
 
             metrics = jax.tree_util.tree_map(
                 lambda x: x.block_until_ready(),
@@ -847,12 +827,29 @@ class Trainer:
                 - step_start
             )
 
-            # ------------------------------------------
+            # ------------------------------------------------
+            # ALWAYS refresh actual step
+            # ------------------------------------------------
+
+            current_step = int(
+                jax.device_get(
+                    self.state.step
+                )
+            )
+
+            tokens_seen = int(
+                jax.device_get(
+                    self.state
+                    .tokens_processed
+                )
+            )
+
+            # ------------------------------------------------
             # Logging
-            # ------------------------------------------
+            # ------------------------------------------------
 
             if (
-                host_step
+                current_step
                 % cfg.runtime.log_interval
                 == 0
             ):
@@ -863,19 +860,6 @@ class Trainer:
                             jax.device_get(x)
                         ),
                         metrics,
-                    )
-                )
-
-                current_step = int(
-                    jax.device_get(
-                        self.state.step
-                    )
-                )
-
-                tokens_seen = int(
-                    jax.device_get(
-                        self.state
-                        .tokens_processed
                     )
                 )
 
@@ -905,15 +889,18 @@ class Trainer:
                     step_time=step_time,
                 )
 
-                host_step = current_step
+                # TPU notebook flush
+                sys.stdout.flush()
 
-            else:
+            # ------------------------------------------------
+            # Update host step
+            # ------------------------------------------------
 
-                host_step += 1
+            host_step = current_step
 
-            # ------------------------------------------
+            # ------------------------------------------------
             # Checkpoint
-            # ------------------------------------------
+            # ------------------------------------------------
 
             if (
                 host_step > 0
@@ -921,6 +908,12 @@ class Trainer:
                 % self.checkpoint_interval
                 == 0
             ):
+
+                print(
+                    f"[checkpoint] saving step "
+                    f"{host_step}",
+                    flush=True,
+                )
 
                 self.checkpoints.save(
                     host_step,
