@@ -1,11 +1,24 @@
 """
 LaughLM/model/llama/initialization.py
+
+Frontier-grade parameter initialization +
+logical partition metadata.
+
+2026 TPU/FSDP upgrades:
+────────────────────────────────────────
+1. Explicit logical partition metadata
+2. Stable FSDP parameter annotations
+3. Scan-compatible parameter axes
+4. Future tensor-parallel compatibility
+5. TPU-safe precision defaults
+6. Stable embedding sharding semantics
 """
 
 from __future__ import annotations
 
 from flax import linen as nn
 
+import jax
 import jax.numpy as jnp
 
 
@@ -42,16 +55,22 @@ def get_dense_logical_axes(
 ):
     """
     Logical axes for Dense kernels.
+
+    Kernel layout:
+        [input_dim, output_dim]
     """
 
     # --------------------------------------------------------
-    # Attention
+    # Attention projections
     # --------------------------------------------------------
 
     if name == "q_proj":
         return ("embed", "heads")
 
-    if name in {"k_proj", "v_proj"}:
+    if name in {
+        "k_proj",
+        "v_proj",
+    }:
         return ("embed", "kv_heads")
 
     if name == "o_proj":
@@ -61,7 +80,10 @@ def get_dense_logical_axes(
     # MLP
     # --------------------------------------------------------
 
-    if name in {"gate_proj", "up_proj"}:
+    if name in {
+        "gate_proj",
+        "up_proj",
+    }:
         return ("embed", "mlp")
 
     if name == "down_proj":
@@ -168,6 +190,14 @@ def create_dense(
 ):
     """
     Frontier-grade Dense factory.
+
+    Features:
+    ─────────────────────────────────────
+    • logical parameter partitioning
+    • FSDP-safe metadata
+    • tensor-parallel-ready axes
+    • bf16 compute
+    • fp32 params
     """
 
     logical_axes = (
@@ -213,7 +243,7 @@ def create_dense(
 
         dtype=config.compute_dtype,
 
-        precision=None,
+        precision=jax.lax.Precision.DEFAULT,
 
         name=name,
     )
@@ -232,6 +262,9 @@ def create_embedding(
 ):
     """
     Frontier-grade embedding layer.
+
+    Embedding layout:
+        [vocab, embed]
     """
 
     embedding_init = (

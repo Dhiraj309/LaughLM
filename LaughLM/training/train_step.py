@@ -1,10 +1,22 @@
 """
 LaughLM/training/train_step.py
+
+Frontier-grade mesh-native train step.
+
+2026 TPU/FSDP upgrades:
+────────────────────────────────────────────
+1. Correct cross-device gradient reduction
+2. Global grad norm across mesh
+3. TPU-safe accumulation semantics
+4. Correct replicated metric reduction
+5. Stable FSDP-compatible optimizer updates
+6. Future tensor-parallel compatibility
+7. No silent multi-host desync
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict
+from typing import Any, Dict
 
 import jax
 import jax.numpy as jnp
@@ -51,6 +63,12 @@ def create_train_step(
     metrics_sharding = (
         replicated_sharding(mesh)
     )
+
+    # --------------------------------------------------------
+    # Mesh axes
+    # --------------------------------------------------------
+
+    mesh_axes = tuple(mesh.axis_names)
 
     # --------------------------------------------------------
     # Loss fn
@@ -175,7 +193,7 @@ def create_train_step(
         )
 
         # ----------------------------------------------------
-        # Mean grads
+        # Mean microbatch grads
         # ----------------------------------------------------
 
         grads = jax.tree_util.tree_map(
@@ -187,6 +205,17 @@ def create_train_step(
             grads_accum,
         )
 
+        # ====================================================
+        # GLOBAL gradient reduction
+        # ====================================================
+
+        if len(mesh_axes) > 0:
+
+            grads = jax.lax.pmean(
+                grads,
+                axis_name=mesh_axes,
+            )
+
         # ----------------------------------------------------
         # Mean loss
         # ----------------------------------------------------
@@ -196,13 +225,31 @@ def create_train_step(
             dtype=jnp.float32,
         )
 
-        # ----------------------------------------------------
+        # ====================================================
+        # GLOBAL loss reduction
+        # ====================================================
+
+        if len(mesh_axes) > 0:
+
+            loss = jax.lax.pmean(
+                loss,
+                axis_name=mesh_axes,
+            )
+
+        # ====================================================
         # Global grad norm
-        # ----------------------------------------------------
+        # ====================================================
 
         grad_norm = optax.global_norm(
             grads
         )
+
+        if len(mesh_axes) > 0:
+
+            grad_norm = jax.lax.pmean(
+                grad_norm,
+                axis_name=mesh_axes,
+            )
 
         # ----------------------------------------------------
         # Gradient clipping
@@ -243,12 +290,7 @@ def create_train_step(
         )
 
         # ----------------------------------------------------
-        # IMPORTANT
-        #
-        # Keep this JAX-native.
-        #
-        # Never use Python int(...)
-        # inside jit.
+        # Tokens processed
         # ----------------------------------------------------
 
         tokens_in_step = (
@@ -259,6 +301,17 @@ def create_train_step(
                 dtype=jnp.int32,
             )
         )
+
+        # ====================================================
+        # GLOBAL token accounting
+        # ====================================================
+
+        if len(mesh_axes) > 0:
+
+            tokens_in_step = (
+                tokens_in_step
+                * jax.device_count()
+            )
 
         # ----------------------------------------------------
         # State update
@@ -335,6 +388,8 @@ def create_eval_step(
         replicated_sharding(mesh)
     )
 
+    mesh_axes = tuple(mesh.axis_names)
+
     def eval_step(
         state,
         batch,
@@ -364,10 +419,19 @@ def create_eval_step(
             targets,
         )
 
+        loss = loss.astype(
+            jnp.float32
+        )
+
+        if len(mesh_axes) > 0:
+
+            loss = jax.lax.pmean(
+                loss,
+                axis_name=mesh_axes,
+            )
+
         return {
-            "loss": loss.astype(
-                jnp.float32
-            ),
+            "loss": loss,
         }
 
     with (
