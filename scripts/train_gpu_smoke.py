@@ -37,7 +37,7 @@ def main():
     ]
 
     config = load_config(
-        "configs/gpu_smoke.yaml"
+        "configs/v5e_smoke.yaml"
     )
 
     dataset = MemmapDataset(
