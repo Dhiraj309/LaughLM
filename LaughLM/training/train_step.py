@@ -5,13 +5,16 @@ Frontier-grade mesh-native train step.
 
 2026 TPU/FSDP upgrades:
 ────────────────────────────────────────────
-1. Correct cross-device gradient reduction
-2. Global grad norm across mesh
-3. TPU-safe accumulation semantics
-4. Correct replicated metric reduction
-5. Stable FSDP-compatible optimizer updates
-6. Future tensor-parallel compatibility
-7. No silent multi-host desync
+1. Correct PJIT-native gradient semantics
+2. Removed invalid PMAP collectives
+3. Global grad norm support
+4. TPU-safe accumulation semantics
+5. Correct replicated metric handling
+6. Stable FSDP-compatible optimizer updates
+7. Future tensor-parallel compatibility
+8. No silent multi-host desync
+9. Mesh-native GSPMD-compatible execution
+10. No unbound axis_name failures
 """
 
 from __future__ import annotations
@@ -65,12 +68,6 @@ def create_train_step(
     )
 
     # --------------------------------------------------------
-    # Mesh axes
-    # --------------------------------------------------------
-
-    mesh_axes = tuple(mesh.axis_names)
-
-    # --------------------------------------------------------
     # Loss fn
     # --------------------------------------------------------
 
@@ -117,7 +114,7 @@ def create_train_step(
         params = state.params
 
         # ----------------------------------------------------
-        # Stateless step RNG
+        # Stateless RNG
         # ----------------------------------------------------
 
         step_rng = jax.random.fold_in(
@@ -126,7 +123,7 @@ def create_train_step(
         )
 
         # ----------------------------------------------------
-        # FP32 grad accumulation
+        # FP32 grad accumulation buffer
         # ----------------------------------------------------
 
         grads_accum = (
@@ -166,7 +163,7 @@ def create_train_step(
             )
 
             # ------------------------------------------------
-            # Accumulate fp32 grads
+            # FP32 accumulation
             # ------------------------------------------------
 
             grads_accum = (
@@ -193,7 +190,7 @@ def create_train_step(
         )
 
         # ----------------------------------------------------
-        # Mean microbatch grads
+        # Mean grads
         # ----------------------------------------------------
 
         grads = jax.tree_util.tree_map(
@@ -206,15 +203,17 @@ def create_train_step(
         )
 
         # ====================================================
-        # GLOBAL gradient reduction
+        # IMPORTANT
+        #
+        # PJIT/GSPMD automatically handles
+        # cross-device synchronization.
+        #
+        # DO NOT use:
+        #
+        #   jax.lax.pmean(...)
+        #
+        # unless inside pmap/shard_map.
         # ====================================================
-
-        if len(mesh_axes) > 0:
-
-            grads = jax.lax.pmean(
-                grads,
-                axis_name=mesh_axes,
-            )
 
         # ----------------------------------------------------
         # Mean loss
@@ -225,31 +224,13 @@ def create_train_step(
             dtype=jnp.float32,
         )
 
-        # ====================================================
-        # GLOBAL loss reduction
-        # ====================================================
-
-        if len(mesh_axes) > 0:
-
-            loss = jax.lax.pmean(
-                loss,
-                axis_name=mesh_axes,
-            )
-
-        # ====================================================
+        # ----------------------------------------------------
         # Global grad norm
-        # ====================================================
+        # ----------------------------------------------------
 
         grad_norm = optax.global_norm(
             grads
-        )
-
-        if len(mesh_axes) > 0:
-
-            grad_norm = jax.lax.pmean(
-                grad_norm,
-                axis_name=mesh_axes,
-            )
+        ).astype(jnp.float32)
 
         # ----------------------------------------------------
         # Gradient clipping
@@ -290,28 +271,21 @@ def create_train_step(
         )
 
         # ----------------------------------------------------
-        # Tokens processed
+        # Token accounting
         # ----------------------------------------------------
 
-        tokens_in_step = (
-            jnp.asarray(
-                batch.shape[0]
-                * batch.shape[1]
-                * batch.shape[2],
-                dtype=jnp.int32,
-            )
+        #
+        # batch shape:
+        #
+        # [grad_accum, global_batch, seq_len]
+        #
+
+        tokens_in_step = jnp.asarray(
+            batch.shape[0]
+            * batch.shape[1]
+            * batch.shape[2],
+            dtype=jnp.int32,
         )
-
-        # ====================================================
-        # GLOBAL token accounting
-        # ====================================================
-
-        if len(mesh_axes) > 0:
-
-            tokens_in_step = (
-                tokens_in_step
-                * jax.device_count()
-            )
 
         # ----------------------------------------------------
         # State update
@@ -388,8 +362,6 @@ def create_eval_step(
         replicated_sharding(mesh)
     )
 
-    mesh_axes = tuple(mesh.axis_names)
-
     def eval_step(
         state,
         batch,
@@ -422,13 +394,6 @@ def create_eval_step(
         loss = loss.astype(
             jnp.float32
         )
-
-        if len(mesh_axes) > 0:
-
-            loss = jax.lax.pmean(
-                loss,
-                axis_name=mesh_axes,
-            )
 
         return {
             "loss": loss,

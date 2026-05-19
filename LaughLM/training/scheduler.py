@@ -125,18 +125,57 @@ def build_cosine_scheduler(
     Good for:
     - fine-tuning
     - short pretraining
-
-    Not ideal for very long training extension because
-    cosine naturally decays toward minimum LR.
     """
 
-    warmup = config.scheduler.warmup_steps
     lr = config.optimizer.learning_rate
     min_ratio = config.scheduler.min_lr_ratio
 
     total_steps = compute_total_steps(
         config,
         num_devices,
+    )
+
+    # --------------------------------------------------------
+    # Warmup resolution
+    # --------------------------------------------------------
+
+    if config.scheduler.warmup_steps is not None:
+
+        warmup = config.scheduler.warmup_steps
+
+    elif (
+        config.scheduler.warmup_fraction
+        is not None
+    ):
+
+        warmup = int(
+            total_steps
+            * config.scheduler.warmup_fraction
+        )
+
+    else:
+
+        # safe default
+        warmup = max(
+            int(total_steps * 0.01),
+            1,
+        )
+
+    # --------------------------------------------------------
+    # Safety
+    # --------------------------------------------------------
+
+    if warmup >= total_steps:
+
+        raise ValueError(
+            f"warmup_steps ({warmup}) "
+            f"must be < total_steps "
+            f"({total_steps})"
+        )
+
+    print(
+        f"[scheduler] cosine warmup: "
+        f"{warmup:,}"
     )
 
     return optax.warmup_cosine_decay_schedule(

@@ -8,7 +8,7 @@ Frontier-grade fixes (2026):
 1. Correct TrainState sharding tree
 2. Correct param subtree extraction
 3. Proper mesh-native compilation
-4. Real synchronous timing (accurate tok/s + MFU)
+4. Real synchronous timing
 5. No async timing inflation
 6. Stable checkpoint semantics
 7. Exact structure match between:
@@ -18,6 +18,10 @@ Frontier-grade fixes (2026):
 8. Safe metrics synchronization
 9. TRUE optimizer-state sharding
 10. FSDP-ready optimizer partition propagation
+11. Scalar-safe optimizer sharding
+12. TPU-safe compile lowering
+13. Optax namedtuple-safe state handling
+14. Rank-aware PartitionSpec fixing
 """
 
 import json
@@ -118,8 +122,85 @@ def _scalar(x):
         return float("nan")
 
 
+def _is_scalar_array(x):
+
+    if np.isscalar(x):
+        return True
+
+    if hasattr(x, "shape"):
+        return len(x.shape) == 0
+
+    return False
+
+
+def _fix_sharding_for_rank(
+    sharding,
+    target,
+):
+    """
+    Ensure PartitionSpec rank compatibility.
+
+    Examples
+    --------
+    rank-0 -> P()
+    rank-1 -> P(None)
+    rank-2 -> P(None, None)
+    """
+
+    #
+    # Non-arrays
+    #
+
+    if not hasattr(target, "shape"):
+        return sharding
+
+    rank = len(target.shape)
+
+    #
+    # Scalars
+    #
+
+    if rank == 0:
+        return NamedSharding(
+            sharding.mesh,
+            P(),
+        )
+
+    #
+    # Existing spec
+    #
+
+    spec = sharding.spec
+
+    #
+    # Convert spec to tuple
+    #
+
+    if spec == P():
+        axes = ()
+    else:
+        axes = tuple(spec)
+
+    #
+    # Expand/truncate to rank
+    #
+
+    if len(axes) < rank:
+        axes = axes + (None,) * (
+            rank - len(axes)
+        )
+
+    elif len(axes) > rank:
+        axes = axes[:rank]
+
+    return NamedSharding(
+        sharding.mesh,
+        P(*axes),
+    )
+
+
 # ============================================================
-# Helper
+# Optimizer sharding helper
 # ============================================================
 
 def _create_optimizer_shardings(
@@ -130,50 +211,148 @@ def _create_optimizer_shardings(
     """
     Create optimizer-state shardings.
 
-    IMPORTANT
-    ─────────────────────────────────────────
-    Adam moments MUST shard identically
-    to parameters for real FSDP memory scaling.
-
-    Falls back to replicated for scalar
-    optimizer metadata.
+    TPU-safe
+    Structure-safe
+    Optax-safe
+    Rank-safe
     """
 
-    flat_param_shardings = (
-        jax.tree_util.tree_leaves(
-            param_shardings
-        )
+    # --------------------------------------------------
+    # Extract ONLY actual sharding leaves
+    # --------------------------------------------------
+
+    param_leaves = []
+
+    def collect_shardings(x):
+
+        if isinstance(x, NamedSharding):
+            param_leaves.append(x)
+
+    jax.tree_util.tree_map(
+        collect_shardings,
+        param_shardings,
     )
 
-    param_iter = iter(
-        flat_param_shardings
-    )
+    param_iter = iter(param_leaves)
 
-    def map_leaf(x):
+    # --------------------------------------------------
+    # Rank-safe sharding fix
+    # --------------------------------------------------
+
+    def next_param_sharding(target):
 
         #
-        # Scalar metadata
+        # Scalars replicated
         #
 
         if (
-            np.isscalar(x)
-            or not hasattr(x, "shape")
+            np.isscalar(target)
+            or (
+                hasattr(target, "shape")
+                and len(target.shape) == 0
+            )
         ):
             return replicated
 
         #
-        # Match parameter sharding
+        # Metadata replicated
+        #
+
+        if not hasattr(target, "shape"):
+            return replicated
+
+        #
+        # Pull next param sharding
         #
 
         try:
-            return next(param_iter)
+            sharding = next(param_iter)
 
         except StopIteration:
             return replicated
 
-    return jax.tree_util.tree_map(
-        map_leaf,
-        opt_state,
+        #
+        # Fix rank mismatch
+        #
+
+        rank = len(target.shape)
+
+        spec = tuple(sharding.spec)
+
+        if len(spec) < rank:
+            spec = spec + (None,) * (
+                rank - len(spec)
+            )
+
+        elif len(spec) > rank:
+            spec = spec[:rank]
+
+        return NamedSharding(
+            sharding.mesh,
+            P(*spec),
+        )
+
+    # --------------------------------------------------
+    # Rebuild optimizer state
+    # --------------------------------------------------
+
+    new_states = []
+
+    for state in opt_state:
+
+        #
+        # Adam-style state
+        #
+
+        if (
+            hasattr(state, "mu")
+            and hasattr(state, "nu")
+        ):
+
+            mu_sharding = jax.tree_util.tree_map(
+                next_param_sharding,
+                state.mu,
+            )
+
+            #
+            # Reset iterator for nu
+            #
+
+            param_iter = iter(param_leaves)
+
+            nu_sharding = jax.tree_util.tree_map(
+                next_param_sharding,
+                state.nu,
+            )
+
+            state_sharding = state._replace(
+
+                count=replicated,
+
+                mu=mu_sharding,
+
+                nu=nu_sharding,
+            )
+
+            new_states.append(
+                state_sharding
+            )
+
+        else:
+
+            replicated_state = (
+                jax.tree_util.tree_map(
+                    lambda _: replicated,
+                    state,
+                )
+            )
+
+            new_states.append(
+                replicated_state
+            )
+
+    return type(opt_state)(
+        new_states
     )
 
 
@@ -298,7 +477,7 @@ class Trainer:
         )
 
         # --------------------------------------------------
-        # Abstract state metadata
+        # Abstract metadata
         # --------------------------------------------------
 
         (
@@ -312,14 +491,6 @@ class Trainer:
             rng=self.rng.next_key(),
             input_shape=input_shape,
         )
-
-        #
-        # full_shardings matches:
-        #
-        # {
-        #   "params": ...
-        # }
-        #
 
         param_shardings = (
             full_shardings["params"]
@@ -384,26 +555,13 @@ class Trainer:
         )
 
         # --------------------------------------------------
-        # TrainState shardings
+        # Shardings
         # --------------------------------------------------
 
         replicated = NamedSharding(
             self.mesh,
             P(),
         )
-
-        #
-        # IMPORTANT
-        #
-        # Optimizer states MUST shard
-        # with parameters.
-        #
-        # Otherwise:
-        #
-        # - Adam moments replicate
-        # - memory explodes on TPU
-        # - FSDP becomes fake
-        #
 
         opt_state_shardings = (
             _create_optimizer_shardings(
@@ -426,7 +584,7 @@ class Trainer:
         )
 
         # --------------------------------------------------
-        # Restore checkpoint
+        # Restore
         # --------------------------------------------------
 
         restored = self.checkpoints.restore_latest(
@@ -451,7 +609,7 @@ class Trainer:
         self.state = state
 
         # --------------------------------------------------
-        # Train / eval step
+        # Train step
         # --------------------------------------------------
 
         with (
@@ -499,7 +657,7 @@ class Trainer:
             )
 
         # --------------------------------------------------
-        # Explicit compile warmup
+        # Compile
         # --------------------------------------------------
 
         print(
@@ -515,8 +673,14 @@ class Trainer:
             jnp.int32,
         )
 
-        abstract_train_state = jax.eval_shape(
-            lambda: self.state
+        abstract_train_state = (
+            jax.tree_util.tree_map(
+                lambda x: jax.ShapeDtypeStruct(
+                    x.shape,
+                    x.dtype,
+                ),
+                self.state,
+            )
         )
 
         with (
@@ -640,17 +804,9 @@ class Trainer:
                         np.int32
                     )
 
-                expected = (
-                    global_batch_size
-                )
-
                 assert (
                     batch.shape[0]
-                    == expected
-                ), (
-                    f"Batch mismatch: "
-                    f"got {batch.shape[0]}, "
-                    f"expected {expected}"
+                    == global_batch_size
                 )
 
                 micro_batches.append(
@@ -678,10 +834,6 @@ class Trainer:
                     batch,
                 )
             )
-
-            #
-            # FORCE DEVICE SYNC
-            #
 
             metrics = jax.tree_util.tree_map(
                 lambda x: x.block_until_ready(),

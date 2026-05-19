@@ -1,29 +1,16 @@
-
 # ============================================================
 # LaughLM TPU v5e Smoke Test
-# Single-host TPU v5e-1
-# Mesh-native GSPMD validation
 # ============================================================
 
 model:
 
-  # ----------------------------------------------------------
-  # Small-but-real TPU smoke model
-  # ----------------------------------------------------------
-
-  vocab_size: 49152
-
+  vocab_size: 128256
   d_model: 768
-
   num_layers: 12
-
   num_heads: 12
-
   num_kv_heads: 12
-
   intermediate_size: 3072
-
-  max_seq_len: 512
+  max_seq_len: 1024
 
 
 # ============================================================
@@ -33,25 +20,18 @@ model:
 architecture:
 
   positional: rope
-
   normalization: rms_norm
-
   norm_placement: pre
 
   attention_variant: gqa
-
   attention_impl: standard
 
   ffn_type: swiglu
-
   residual: standard
-
   embeddings: standard
 
   bias: false
-
   weight_tying: false
-
   parallel_block: false
 
 
@@ -64,14 +44,44 @@ initialization:
   method: normal
 
   std: 0.02
-
   embedding_std: 0.02
-
   attention_std: 0.02
-
   mlp_std: 0.02
 
   residual_scale: 1.0
+
+
+# ============================================================
+# Optimizer
+# ============================================================
+
+optimizer:
+
+  type: adamw
+
+  learning_rate: 3.0e-4
+
+  beta1: 0.9
+  beta2: 0.95
+
+  eps: 1.0e-8
+
+  weight_decay: 0.1
+
+  gradient_clip: 1.0
+
+
+# ============================================================
+# Scheduler
+# ============================================================
+
+scheduler:
+
+  type: cosine
+
+  warmup_fraction: 0.01
+
+  min_lr_ratio: 0.1
 
 
 # ============================================================
@@ -80,10 +90,9 @@ initialization:
 
 runtime:
 
-  seq_len: 512
+  seq_len: 1024
 
-  # TPU likes larger batch
-  micro_batch_per_device: 64
+  micro_batch_per_device: 4
 
   gradient_accumulation: 1
 
@@ -97,23 +106,24 @@ runtime:
 
   checkpoint_max_to_keep: 2
 
-  checkpoint_dir: checkpoints
+  checkpoint_dir: checkpoints_v5e_smoke
 
 
 # ============================================================
-# Dataset
+# Data
 # ============================================================
 
 data:
 
   sources:
 
-    - name: fineweb_edu
+    - name: fineweb-edu
       weight: 1.0
+      split: train
 
-  max_seq_len: 512
+  max_seq_len: 1024
 
-  packing: false
+  packing: true
 
   eos_between_docs: true
 
@@ -128,7 +138,7 @@ tokenizer:
 
   algorithm: bpe
 
-  vocab_size: 49152
+  vocab_size: 128256
 
   pre_tokenizer: byte_level
 
@@ -138,41 +148,7 @@ tokenizer:
 
 
 # ============================================================
-# Optimizer
-# ============================================================
-
-optimizer:
-
-  type: adamw
-
-  learning_rate: 3.0e-4
-
-  weight_decay: 0.1
-
-  beta1: 0.9
-
-  beta2: 0.95
-
-  eps: 1.0e-8
-
-  gradient_clip: 1.0
-
-
-# ============================================================
-# Scheduler
-# ============================================================
-
-scheduler:
-
-  type: cosine
-
-  warmup_steps: 50
-
-  min_lr_ratio: 0.1
-
-
-# ============================================================
-# Legacy compatibility
+# Legacy Parallelism (required by schema)
 # ============================================================
 
 parallelism:
@@ -181,7 +157,6 @@ parallelism:
 
   model_parallel: 1
 
-  # TPU SHOULD use bf16 params too
   compute_dtype: bfloat16
 
   param_dtype: bfloat16
@@ -195,23 +170,15 @@ spmd:
 
   mesh:
 
-    # Single v5e-1
     ici_data_parallelism: 1
-
     ici_fsdp_parallelism: 1
-
     ici_tensor_parallelism: 1
-
     ici_sequence_parallelism: 1
-
     ici_pipeline_parallelism: 1
 
     dcn_data_parallelism: 1
-
     dcn_fsdp_parallelism: 1
-
     dcn_tensor_parallelism: 1
-
     dcn_pipeline_parallelism: 1
 
   axis_rules:
@@ -219,22 +186,15 @@ spmd:
     batch: data
 
     embed: null
-
     heads: null
-
     kv_heads: null
-
     mlp: null
-
     vocab: null
-
     sequence: null
-
     layers: null
 
   remat:
 
-    # TPU likes aggressive remat
     policy: dots_saveable
 
     granularity: block
@@ -245,7 +205,6 @@ spmd:
 
   dtype:
 
-    # TPU-native
     param_dtype: bfloat16
 
     compute_dtype: bfloat16
