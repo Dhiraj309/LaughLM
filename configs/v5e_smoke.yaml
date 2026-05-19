@@ -1,15 +1,25 @@
+
 # ============================================================
-# LaughLM TPU v5e Smoke Test
+# LaughLM TPU v5e-8 FULL-CORE Smoke Test
 # ============================================================
 
 model:
 
-  vocab_size: 128256
+  vocab_size: 49152
+
+  #
+  # ~282M params
+  #
+
   d_model: 768
+
   num_layers: 12
+
   num_heads: 12
   num_kv_heads: 12
+
   intermediate_size: 3072
+
   max_seq_len: 1024
 
 
@@ -20,6 +30,7 @@ model:
 architecture:
 
   positional: rope
+
   normalization: rms_norm
   norm_placement: pre
 
@@ -27,11 +38,15 @@ architecture:
   attention_impl: standard
 
   ffn_type: swiglu
+
   residual: standard
+
   embeddings: standard
 
   bias: false
+
   weight_tying: false
+
   parallel_block: false
 
 
@@ -44,6 +59,7 @@ initialization:
   method: normal
 
   std: 0.02
+
   embedding_std: 0.02
   attention_std: 0.02
   mlp_std: 0.02
@@ -90,23 +106,44 @@ scheduler:
 
 runtime:
 
+  #
+  # Sequence
+  #
+
   seq_len: 1024
 
-  micro_batch_per_device: 4
+  #
+  # IMPORTANT
+  #
+  # v5e-8:
+  # 8 TPU chips
+  #
+  # Global batch:
+  # 8 devices × 8 microbatch = 64
+  #
+  # Tokens/step:
+  # 64 × 1024 = 65,536
+  #
+
+  micro_batch_per_device: 16
 
   gradient_accumulation: 1
 
-  total_tokens: 2000000
+  #
+  # Real smoke test
+  #
 
-  eval_interval: 100
+  total_tokens: 100000000
 
-  log_interval: 1
+  eval_interval: 50
+
+  log_interval: 10
 
   checkpoint_interval: 100
 
   checkpoint_max_to_keep: 2
 
-  checkpoint_dir: checkpoints_v5e_smoke
+  checkpoint_dir: checkpoints
 
 
 # ============================================================
@@ -138,7 +175,7 @@ tokenizer:
 
   algorithm: bpe
 
-  vocab_size: 128256
+  vocab_size: 49152
 
   pre_tokenizer: byte_level
 
@@ -148,12 +185,16 @@ tokenizer:
 
 
 # ============================================================
-# Legacy Parallelism (required by schema)
+# Legacy Parallelism (schema compatibility)
 # ============================================================
 
 parallelism:
 
-  data_parallel: 1
+  #
+  # ALL 8 TPU CORES
+  #
+
+  data_parallel: 8
 
   model_parallel: 1
 
@@ -163,47 +204,117 @@ parallelism:
 
 
 # ============================================================
-# Frontier SPMD config
+# Frontier SPMD Config
 # ============================================================
 
 spmd:
 
   mesh:
 
-    ici_data_parallelism: 1
+    #
+    # v5e-8 single-host topology
+    #
+    # Use ALL 8 chips for DATA PARALLEL
+    #
+
+    ici_data_parallelism: 8
+
+    #
+    # No FSDP yet
+    #
+
     ici_fsdp_parallelism: 1
+
+    #
+    # No tensor parallel yet
+    #
+
     ici_tensor_parallelism: 1
+
     ici_sequence_parallelism: 1
+
     ici_pipeline_parallelism: 1
 
+    #
+    # Single host
+    #
+
     dcn_data_parallelism: 1
+
     dcn_fsdp_parallelism: 1
+
     dcn_tensor_parallelism: 1
+
     dcn_pipeline_parallelism: 1
+
+
+  # ==========================================================
+  # Axis Rules
+  # ==========================================================
 
   axis_rules:
 
+    #
+    # Batch sharded across ALL 8 cores
+    #
+
     batch: data
 
+    #
+    # Future TP/FSDP axes
+    #
+
     embed: null
+
     heads: null
+
     kv_heads: null
+
     mlp: null
+
     vocab: null
+
     sequence: null
+
     layers: null
+
+
+  # ==========================================================
+  # Remat
+  # ==========================================================
 
   remat:
 
+    #
+    # TPU-friendly
+    #
+
     policy: dots_saveable
 
+    #
+    # Remat whole transformer blocks
+    #
+
     granularity: block
+
+    #
+    # Lowers compile memory
+    #
 
     scan_layers: true
 
     prevent_cse: false
 
+
+  # ==========================================================
+  # Dtypes
+  # ==========================================================
+
   dtype:
+
+    #
+    # TPU-native
+    #
 
     param_dtype: bfloat16
 
@@ -231,4 +342,4 @@ hardware:
 
   accelerator: tpu
 
-  type: v5e
+  type: v5e-8

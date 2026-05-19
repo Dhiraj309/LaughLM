@@ -159,84 +159,52 @@ class CheckpointManager:
         target_state,
     ):
 
-        #
-        # ensure pending async saves finished
-        #
+        latest = self.manager.latest_step()
 
-        self.wait()
-
-        latest_step = self.latest_step()
-
-        if latest_step is None:
+        if latest is None:
 
             print(
-                "[checkpoint] no checkpoint found"
+                "[checkpoint] no checkpoint found",
+                flush=True,
             )
 
             return None
 
         print(
-            f"[checkpoint] restoring "
-            f"step {latest_step:,}"
+            f"[checkpoint] restoring step {latest}",
+            flush=True,
         )
 
         try:
 
-            #
-            # IMPORTANT
-            #
-            # Build restore args directly from
-            # target sharded arrays.
-            #
-            # This preserves:
-            # - NamedSharding
-            # - GSPMD layouts
-            # - mesh placement
-            # - avoids host replication
-            #
-
-            restore_args = (
-                checkpoint_utils
-                .construct_restore_args(
+            restored = self.manager.restore(
+                latest,
+                args=ocp.args.StandardRestore(
                     target_state
-                )
-            )
-
-            restored_state = (
-                self.manager.restore(
-                    latest_step,
-
-                    args=ocp.args.StandardRestore(
-                        item=target_state,
-                        restore_args=restore_args,
-                    ),
-                )
-            )
-
-            #
-            # Multi-host sync barrier
-            #
-
-            jax.experimental.multihost_utils.sync_global_devices(
-                f"checkpoint-restore-{latest_step}"
+                ),
             )
 
             print(
-                "[checkpoint] restore successful"
+                f"[checkpoint] restored step {latest}",
+                flush=True,
             )
 
-            return (
-                restored_state,
-                latest_step,
-            )
+            return restored, latest
 
         except Exception as e:
 
             print(
-                "[checkpoint] RESTORE FAILED\n"
-                f"{type(e).__name__}: {e}"
+                "[checkpoint] RESTORE FAILED",
+                flush=True,
             )
 
+            print(
+                type(e).__name__ + ":",
+                str(e),
+                flush=True,
+            )
+
+            import traceback
             traceback.print_exc()
 
             raise
