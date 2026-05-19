@@ -15,37 +15,13 @@ Frontier-grade SPMD additions:
 8. Future-ready GSPMD compatibility
 9. nn.scan transformer stack (MaxText/T5X-style)
 
-Design goals
-------------
-- HF-compatible architecture semantics
-- deterministic KV-cache behavior
-- explicit train/prefill/decode modes
-- deterministic initialization semantics
-- rematerialization-ready transformer stack
-- minimal abstraction surface
-- future-ready sharding compatibility
-
-Tensor conventions
-------------------
-input_ids:
-    [B, T]
-
-position_ids:
-    [B, T]
-
-hidden_states:
-    [B, T, D]
-
-attention_mask:
-    [B, 1, Tq, Tk]
-
-logits:
-    [B, T, V]
-
-KV cache:
-    per-layer static cache:
-        key/value:
-            [B, S, KVH, Dh]
+2026 TPU/FSDP fixes:
+────────────────────────────────────────────────────
+1. Stable scan parameter axes
+2. TPU-safe scan metadata
+3. Correct variable_broadcast semantics
+4. Remat+scan compatibility
+5. Future FSDP compatibility
 """
 
 from typing import Optional
@@ -90,6 +66,42 @@ from LaughLM.model.llama.masks import (
 )
 
 
+# ============================================================
+# Scanned decoder block
+# ============================================================
+
+class ScannedDecoderLayer(nn.Module):
+
+    config: LlamaConfig
+
+    @nn.compact
+    def __call__(
+        self,
+        hidden_states,
+        positions,
+        attention_mask,
+        kv_cache,
+        mode,
+    ):
+
+        layer = LlamaDecoderLayer(
+            config=self.config,
+            name="block",
+        )
+
+        return layer(
+            hidden_states=hidden_states,
+            positions=positions,
+            attention_mask=attention_mask,
+            kv_cache=kv_cache,
+            mode=mode,
+        )
+
+
+# ============================================================
+# Base model
+# ============================================================
+
 class LlamaModel(nn.Module):
 
     config: LlamaConfig
@@ -113,7 +125,7 @@ class LlamaModel(nn.Module):
         # Optional rematerialization
         # --------------------------------------------------
 
-        LayerCls = LlamaDecoderLayer
+        LayerCls = ScannedDecoderLayer
 
         if getattr(
             config,
@@ -122,7 +134,7 @@ class LlamaModel(nn.Module):
         ) is not None:
 
             LayerCls = remat_module(
-                LlamaDecoderLayer,
+                ScannedDecoderLayer,
                 policy=config.remat_policy,
                 prevent_cse=getattr(
                     config,
@@ -134,21 +146,6 @@ class LlamaModel(nn.Module):
         # --------------------------------------------------
         # Decoder stack
         # --------------------------------------------------
-        #
-        # IMPORTANT
-        # ─────────────────────────────────────────────
-        # Current scan implementation supports:
-        #
-        # - training
-        # - prefill
-        #
-        # It does NOT yet support:
-        #
-        # - autoregressive KV-cache decode
-        #
-        # because scanned mutable cache carries
-        # require a more advanced carry structure.
-        #
 
         if getattr(
             config,
@@ -157,20 +154,31 @@ class LlamaModel(nn.Module):
         ):
 
             ScanLayer = nn.scan(
+
                 LayerCls,
 
                 variable_axes={
                     "params": 0,
                 },
 
+                variable_broadcast={
+                    "cache",
+                },
+
                 split_rngs={
                     "params": True,
+                    "dropout": True,
                 },
 
                 in_axes=nn.broadcast,
+
                 out_axes=nn.broadcast,
 
                 length=config.num_hidden_layers,
+
+                metadata_params={
+                    "partition_name": "layers",
+                },
             )
 
             self.layers = ScanLayer(
@@ -181,7 +189,7 @@ class LlamaModel(nn.Module):
         else:
 
             self.layers = [
-                LayerCls(
+                LlamaDecoderLayer(
                     config=config,
                     name=f"layers_{i}",
                 )
@@ -327,14 +335,12 @@ class LlamaModel(nn.Module):
             False,
         ):
 
-            hidden_states, _ = (
-                self.layers(
-                    hidden_states=hidden_states,
-                    positions=position_ids,
-                    attention_mask=attention_mask,
-                    kv_cache=None,
-                    mode=mode,
-                )
+            hidden_states, _ = self.layers(
+                hidden_states=hidden_states,
+                positions=position_ids,
+                attention_mask=attention_mask,
+                kv_cache=None,
+                mode=mode,
             )
 
             hidden_states = constrain_hidden_states(
@@ -403,6 +409,10 @@ class LlamaModel(nn.Module):
         )
 
 
+# ============================================================
+# Causal LM wrapper
+# ============================================================
+
 class LlamaForCausalLM(nn.Module):
 
     config: LlamaConfig
@@ -415,10 +425,6 @@ class LlamaForCausalLM(nn.Module):
             config=config,
             name="model",
         )
-
-        # --------------------------------------------------
-        # LM head
-        # --------------------------------------------------
 
         self.lm_head = create_dense(
             features=config.vocab_size,
@@ -482,17 +488,9 @@ class LlamaForCausalLM(nn.Module):
             jnp.float32
         )
 
-        # --------------------------------------------------
-        # Logical logits constraint
-        # --------------------------------------------------
-
         logits = constrain_logits(
             logits
         )
-
-        # --------------------------------------------------
-        # Stable output dtype
-        # --------------------------------------------------
 
         logits = logits.astype(
             self.config.output_dtype

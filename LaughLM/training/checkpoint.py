@@ -1,23 +1,20 @@
 """
 LaughLM/training/checkpoint.py
 
-Modern Orbax checkpoint manager for LaughLM.
+Frontier-grade Orbax checkpoint manager.
 
-FIXES (2026)
-────────────────────────────────────────────
-1. Correct modern Orbax API usage
-2. Async checkpoint saves
-3. TPU-safe PyTree checkpointing
-4. Mesh-native restore semantics
-5. No handler mismatch crashes
-6. Safe finalization
-7. Compatible with TrainState pytrees
+TPU / multi-host safe.
 """
+
+from __future__ import annotations
 
 from pathlib import Path
 import traceback
 
+import jax
 import orbax.checkpoint as ocp
+
+from orbax.checkpoint import checkpoint_utils
 
 
 class CheckpointManager:
@@ -46,15 +43,23 @@ class CheckpointManager:
         options = ocp.CheckpointManagerOptions(
             max_to_keep=max_to_keep,
             create=True,
+
+            #
+            # async saves
+            #
             enable_async_checkpointing=True,
+
             async_options=ocp.AsyncOptions(),
+
+            #
+            # IMPORTANT
+            # Multi-host safe
+            #
+            enable_background_delete=True,
         )
 
         # ==================================================
-        # MODERN API
-        #
-        # Use StandardCheckpointHandler
-        # NOT PyTreeCheckpointer
+        # Standard handler
         # ==================================================
 
         checkpointer = ocp.Checkpointer(
@@ -70,6 +75,14 @@ class CheckpointManager:
         print(
             "[checkpoint] directory:\n"
             f"  {self.directory}"
+        )
+
+        print(
+            "[checkpoint] jax process:\n"
+            f"  process_index="
+            f"{jax.process_index()}\n"
+            f"  process_count="
+            f"{jax.process_count()}"
         )
 
     # ======================================================
@@ -89,13 +102,22 @@ class CheckpointManager:
             )
 
         print(
-            f"[checkpoint] saving step {step:,}"
+            f"[checkpoint] saving "
+            f"step {step:,}"
         )
 
         try:
 
+            #
+            # Multi-host sync barrier
+            #
+            jax.experimental.multihost_utils.sync_global_devices(
+                f"checkpoint-save-{step}"
+            )
+
             self.manager.save(
                 step,
+
                 args=ocp.args.StandardSave(
                     state
                 ),
@@ -137,7 +159,10 @@ class CheckpointManager:
         target_state,
     ):
 
+        #
         # ensure pending async saves finished
+        #
+
         self.wait()
 
         latest_step = self.latest_step()
@@ -151,19 +176,49 @@ class CheckpointManager:
             return None
 
         print(
-            f"[checkpoint] restoring step "
-            f"{latest_step:,}"
+            f"[checkpoint] restoring "
+            f"step {latest_step:,}"
         )
 
         try:
 
+            #
+            # IMPORTANT
+            #
+            # Build restore args directly from
+            # target sharded arrays.
+            #
+            # This preserves:
+            # - NamedSharding
+            # - GSPMD layouts
+            # - mesh placement
+            # - avoids host replication
+            #
+
+            restore_args = (
+                checkpoint_utils
+                .construct_restore_args(
+                    target_state
+                )
+            )
+
             restored_state = (
                 self.manager.restore(
                     latest_step,
+
                     args=ocp.args.StandardRestore(
-                        target_state
+                        item=target_state,
+                        restore_args=restore_args,
                     ),
                 )
+            )
+
+            #
+            # Multi-host sync barrier
+            #
+
+            jax.experimental.multihost_utils.sync_global_devices(
+                f"checkpoint-restore-{latest_step}"
             )
 
             print(
@@ -195,6 +250,10 @@ class CheckpointManager:
         try:
 
             self.wait()
+
+            jax.experimental.multihost_utils.sync_global_devices(
+                "checkpoint-close"
+            )
 
         finally:
 

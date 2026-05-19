@@ -3,7 +3,7 @@ LaughLM/training/trainer.py
 
 Mesh-native SPMD trainer for LaughLM.
 
-FIXES (2026):
+Frontier-grade fixes (2026):
 ────────────────────────────────────────────
 1. Correct TrainState sharding tree
 2. Correct param subtree extraction
@@ -16,6 +16,8 @@ FIXES (2026):
       abstract state
       shardings
 8. Safe metrics synchronization
+9. TRUE optimizer-state sharding
+10. FSDP-ready optimizer partition propagation
 """
 
 import json
@@ -114,6 +116,65 @@ def _scalar(x):
 
     except Exception:
         return float("nan")
+
+
+# ============================================================
+# Helper
+# ============================================================
+
+def _create_optimizer_shardings(
+    opt_state,
+    param_shardings,
+    replicated,
+):
+    """
+    Create optimizer-state shardings.
+
+    IMPORTANT
+    ─────────────────────────────────────────
+    Adam moments MUST shard identically
+    to parameters for real FSDP memory scaling.
+
+    Falls back to replicated for scalar
+    optimizer metadata.
+    """
+
+    flat_param_shardings = (
+        jax.tree_util.tree_leaves(
+            param_shardings
+        )
+    )
+
+    param_iter = iter(
+        flat_param_shardings
+    )
+
+    def map_leaf(x):
+
+        #
+        # Scalar metadata
+        #
+
+        if (
+            np.isscalar(x)
+            or not hasattr(x, "shape")
+        ):
+            return replicated
+
+        #
+        # Match parameter sharding
+        #
+
+        try:
+            return next(param_iter)
+
+        except StopIteration:
+            return replicated
+
+    return jax.tree_util.tree_map(
+        map_leaf,
+        opt_state,
+    )
 
 
 # ============================================================
@@ -252,14 +313,12 @@ class Trainer:
             input_shape=input_shape,
         )
 
-        # IMPORTANT:
-        # full_shardings matches variables tree:
+        #
+        # full_shardings matches:
         #
         # {
         #   "params": ...
         # }
-        #
-        # TrainState.params only wants subtree.
         #
 
         param_shardings = (
@@ -298,7 +357,9 @@ class Trainer:
             self.schedule,
         )
 
-        opt_state = self.optimizer.init(params)
+        opt_state = self.optimizer.init(
+            params
+        )
 
         # --------------------------------------------------
         # Train state
@@ -331,13 +392,31 @@ class Trainer:
             P(),
         )
 
+        #
+        # IMPORTANT
+        #
+        # Optimizer states MUST shard
+        # with parameters.
+        #
+        # Otherwise:
+        #
+        # - Adam moments replicate
+        # - memory explodes on TPU
+        # - FSDP becomes fake
+        #
+
+        opt_state_shardings = (
+            _create_optimizer_shardings(
+                opt_state=opt_state,
+                param_shardings=param_shardings,
+                replicated=replicated,
+            )
+        )
+
         self.state_shardings = TrainState(
             params=param_shardings,
 
-            opt_state=jax.tree_util.tree_map(
-                lambda _: replicated,
-                opt_state,
-            ),
+            opt_state=opt_state_shardings,
 
             step=replicated,
 
@@ -600,12 +679,8 @@ class Trainer:
                 )
             )
 
-            # FORCE DEVICE SYNC
             #
-            # Without this:
-            #   timing is fake
-            #   tok/s inflated
-            #   MFU inflated
+            # FORCE DEVICE SYNC
             #
 
             metrics = jax.tree_util.tree_map(
