@@ -33,6 +33,8 @@ import optax
 from flax import traverse_util
 from typing import Any, Callable
 
+import jax.numpy as jnp
+
 from LaughLM.config.schema import LaughLMConfig
 
 
@@ -61,37 +63,31 @@ def get_weight_decay_mask(params: Any) -> Any:
 # Optimizer builders
 # ────────────────────────────────────────────────────────────────
 
-def build_adamw(config: LaughLMConfig, schedule: Callable) -> optax.GradientTransformation:
-    """
-    AdamW with masked weight decay and LR schedule.
+def build_adamw(config, schedule):
 
-    Built manually via optax.chain:
-      1. scale_by_adam — moment estimation (β1=0.9, β2=0.95)
-      2. add_decayed_weights — masked decay (exclude norms/bias)
-      3. scale_by_learning_rate — apply LR schedule (flip_sign=True → descent)
-
-    The chain ordering matters:
-      - Adam moments are computed on the raw gradient
-      - Weight decay is applied to the Adam-scaled update
-      - LR schedule scales the final update and negates for descent
-
-    NOTE: clip_by_global_norm is NOT in the optimizer chain.
-    Gradient clipping happens in train_step.py on globally-reduced
-    gradients (after pmean) for correct distributed behavior.
-
-    β2=0.95: frontier standard (Llama 3, DeepSeek V3, MiniCPM).
-    Lower β2 adapts faster to gradient magnitude changes.
-    """
     return optax.chain(
+
         optax.scale_by_adam(
             b1=config.optimizer.beta1,
             b2=config.optimizer.beta2,
             eps=config.optimizer.eps,
+
+            #
+            # IMPORTANT:
+            # Keep Adam moments in fp32 even when
+            # params are bf16.
+            #
+            # Prevents bf16→fp32 dtype mutation
+            # after first optimizer step.
+            #
+            mu_dtype=jnp.float32,
         ),
+
         optax.add_decayed_weights(
             weight_decay=config.optimizer.weight_decay,
             mask=get_weight_decay_mask,
         ),
+
         optax.scale_by_learning_rate(schedule),
     )
 
