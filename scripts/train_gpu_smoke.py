@@ -47,7 +47,7 @@ def main():
             config.runtime.seq_len
         ),
 
-        batch_size=(
+        global_batch_size=(
             config.runtime
             .micro_batch_per_device
             * jax.device_count()
