@@ -8,8 +8,10 @@ TPU / multi-host safe.
 
 from __future__ import annotations
 
-from pathlib import Path
+import json
 import traceback
+
+from pathlib import Path
 
 import jax
 import orbax.checkpoint as ocp
@@ -32,6 +34,16 @@ class CheckpointManager:
         )
 
         self.directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        self.metadata_dir = (
+            self.directory
+            / "checkpoint_metadata"
+        )
+
+        self.metadata_dir.mkdir(
             parents=True,
             exist_ok=True,
         )
@@ -86,6 +98,54 @@ class CheckpointManager:
         )
 
     # ======================================================
+    # Metadata
+    # ======================================================
+
+    def _metadata_path(
+        self,
+        step: int,
+    ) -> Path:
+
+        return (
+            self.metadata_dir
+            / f"step_{step:08d}.json"
+        )
+
+    def save_metadata(
+        self,
+        *,
+        step: int,
+        metadata: dict,
+    ):
+
+        if jax.process_index() != 0:
+            return
+
+        path = self._metadata_path(step)
+
+        with open(path, "w") as f:
+
+            json.dump(
+                metadata,
+                f,
+                indent=2,
+                sort_keys=True,
+            )
+
+    def load_metadata(
+        self,
+        step: int,
+    ):
+
+        path = self._metadata_path(step)
+
+        if not path.exists():
+            return None
+
+        with open(path, "r") as f:
+            return json.load(f)
+
+    # ======================================================
     # Save
     # ======================================================
 
@@ -93,6 +153,7 @@ class CheckpointManager:
         self,
         step: int,
         state,
+        metadata: dict | None = None,
     ):
 
         if step < 0:
@@ -114,6 +175,12 @@ class CheckpointManager:
             jax.experimental.multihost_utils.sync_global_devices(
                 f"checkpoint-save-{step}"
             )
+
+            if metadata is not None:
+                self.save_metadata(
+                    step=step,
+                    metadata=metadata,
+                )
 
             self.manager.save(
                 step,
@@ -174,6 +241,18 @@ class CheckpointManager:
             f"[checkpoint] restoring step {latest}",
             flush=True,
         )
+
+        metadata = self.load_metadata(latest)
+
+        if metadata is not None:
+
+            print(
+                "[checkpoint] metadata:\n"
+                f"  step={metadata.get('step')}\n"
+                f"  tokens_processed="
+                f"{metadata.get('tokens_processed')}\n"
+                f"  mesh={metadata.get('mesh')}"
+            )
 
         try:
 

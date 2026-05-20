@@ -95,6 +95,12 @@ from LaughLM.training.checkpoint import (
     CheckpointManager,
 )
 
+from LaughLM.training.metadata import (
+    build_run_metadata,
+    build_checkpoint_metadata,
+    write_json,
+)
+
 from LaughLM.training.train_state import (
     TrainState,
 )
@@ -792,6 +798,36 @@ class Trainer:
                 config
             )
         )
+        
+        
+        # --------------------------------------------------
+        # Run metadata
+        # --------------------------------------------------
+
+        if jax.process_index() == 0:
+
+            run_metadata = build_run_metadata(
+                config=config,
+                mesh=self.mesh,
+                total_params=(
+                    param_info[
+                        "total_params"
+                    ]
+                ),
+                embedding_params=(
+                    param_info[
+                        "embedding_params"
+                    ]
+                ),
+            )
+
+            write_json(
+                Path(
+                    config.runtime.checkpoint_dir
+                )
+                / "run_metadata.json",
+                run_metadata,
+            )
 
         self.logger = (
             TrainingLogger(
@@ -1070,9 +1106,19 @@ class Trainer:
 
                     self.logger.flush()
 
+                    checkpoint_metadata = (
+                        build_checkpoint_metadata(
+                            config=self.config,
+                            mesh=self.mesh,
+                            step=current_step,
+                            tokens_processed=tokens_seen,
+                        )
+                    )
+
                     self.checkpoints.save(
                         step=current_step,
                         state=self.state,
+                        metadata=checkpoint_metadata,
                     )
 
                     print(
@@ -1097,9 +1143,19 @@ class Trainer:
             
             self.logger.flush()
             
+            checkpoint_metadata = (
+                build_checkpoint_metadata(
+                    config=self.config,
+                    mesh=self.mesh,
+                    step=current_step,
+                    tokens_processed=tokens_seen,
+                )
+            )
+
             self.checkpoints.save(
                 step=current_step,
                 state=self.state,
+                metadata=checkpoint_metadata,
             )
             
             self.checkpoints.wait()
