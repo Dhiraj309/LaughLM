@@ -125,7 +125,7 @@ runtime:
   # 64 × 1024 = 65,536
   #
 
-  micro_batch_per_device: 16
+  micro_batch_per_device: 6
 
   gradient_accumulation: 1
 
@@ -133,7 +133,7 @@ runtime:
   # Real smoke test
   #
 
-  total_tokens: 100000000
+  total_tokens: 1_000_000
 
   eval_interval: 50
 
@@ -194,7 +194,7 @@ parallelism:
   # ALL 8 TPU CORES
   #
 
-  data_parallel: 8
+  data_parallel: 2
 
   model_parallel: 1
 
@@ -217,7 +217,7 @@ spmd:
     # Use ALL 8 chips for DATA PARALLEL
     #
 
-    ici_data_parallelism: 8
+    ici_data_parallelism: 2
 
     #
     # No FSDP yet
@@ -340,6 +340,6 @@ monitoring:
 
 hardware:
 
-  accelerator: tpu
+  accelerator: gpu
 
-  type: v5e-8
+  type: t4
