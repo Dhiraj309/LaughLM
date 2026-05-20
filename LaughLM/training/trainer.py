@@ -1071,8 +1071,8 @@ class Trainer:
                     self.logger.flush()
 
                     self.checkpoints.save(
-                        self.state,
                         step=current_step,
+                        state=self.state,
                     )
 
                     print(
