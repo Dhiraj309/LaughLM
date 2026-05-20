@@ -125,7 +125,7 @@ runtime:
   # 64 × 1024 = 65,536
   #
 
-  micro_batch_per_device: 6
+  micro_batch_per_device: 4
 
   gradient_accumulation: 1
 
@@ -133,7 +133,7 @@ runtime:
   # Real smoke test
   #
 
-  total_tokens: 1_000_000
+  total_tokens: 1_500_000
 
   eval_interval: 50
 
