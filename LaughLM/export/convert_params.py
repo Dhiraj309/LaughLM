@@ -1,19 +1,5 @@
 """
 LaughLM/export/convert_params.py
-
-Convert LaughLM JAX/Flax parameters into
-Hugging Face-compatible tensor mappings.
-
-Design goals
-------------
-- scan-compatible
-- tied-embedding aware
-- safetensors-ready
-- deterministic naming
-- zero Torch dependency
-- NumPy serialization output
-- robust scan slicing
-- FrozenDict-safe traversal
 """
 
 from __future__ import annotations
@@ -28,109 +14,114 @@ import numpy as np
 # ============================================================
 
 
-import jax
-import numpy as np
-
-
 def _to_numpy(x):
     """
-    Convert JAX/Orbax arrays -> plain NumPy arrays.
-
-    Handles:
-    - jax.Array
-    - GlobalDeviceArray
-    - ShardedDeviceArray
-    - Orbax-restored leaves
-    - bf16 normalization
+    Robust conversion:
+    Orbax/JAX/Sharded -> NumPy
     """
 
-    # --------------------------------------------------------
-    # Materialize device array first
-    # --------------------------------------------------------
+    import jax
+    import numpy as np
 
-    try:
-        import jax
+    # ========================================================
+    # Unwrap nested dict wrappers
+    # ========================================================
 
-        x = jax.device_get(x)
+    while isinstance(x, dict):
 
-    except Exception:
-        pass
+        # common Orbax wrapper patterns
+        for key in (
+            "value",
+            "array",
+            "data",
+            "tensor",
+            "embedding",
+            "kernel",
+            "weight",
+        ):
 
-    # --------------------------------------------------------
-    # Convert to ndarray
-    # --------------------------------------------------------
+            if key in x:
 
-    x = np.asarray(x)
+                x = x[key]
+                break
 
-    # --------------------------------------------------------
-    # Orbax/JAX sometimes returns object arrays
-    # wrapping a real ndarray scalar/object.
-    # Unwrap recursively.
-    # --------------------------------------------------------
+        else:
 
-    while x.dtype == np.dtype("O"):
+            # fallback:
+            # single-key dict unwrap
+            if len(x) == 1:
 
-        # scalar object wrapper
-        if x.shape == ():
+                x = next(iter(x.values()))
 
-            x = x.item()
-            x = np.asarray(x)
-            continue
+            else:
 
-        # single-element object array
-        if x.size == 1:
+                raise TypeError(
+                    "Cannot unwrap dict.\n"
+                    f"keys={list(x.keys())}"
+                )
 
-            x = np.asarray(
-                x.reshape(-1)[0]
+    # ========================================================
+    # Materialize device arrays
+    # ========================================================
+
+    x = jax.device_get(x)
+
+    arr = np.asarray(x)
+
+    # ========================================================
+    # Object wrapper handling
+    # ========================================================
+
+    while arr.dtype == object:
+
+        if arr.shape == ():
+
+            x = arr.item()
+
+        elif arr.size == 1:
+
+            x = arr.reshape(-1)[0]
+
+        else:
+
+            raise TypeError(
+                "Unresolved object array.\n"
+                f"shape={arr.shape}"
             )
 
-            continue
+        # dict unwrap again
+        while isinstance(x, dict):
 
-        raise TypeError(
-            "Object dtype encountered during export.\n"
-            f"shape={x.shape}\n"
-            f"dtype={x.dtype}"
-        )
+            if len(x) == 1:
 
-    # --------------------------------------------------------
+                x = next(iter(x.values()))
+
+            else:
+
+                raise TypeError(
+                    "Nested dict wrapper unresolved.\n"
+                    f"keys={list(x.keys())}"
+                )
+
+        arr = np.asarray(x)
+
+    # ========================================================
     # bf16 -> fp32
-    # --------------------------------------------------------
+    # ========================================================
 
-    if str(x.dtype) == "bfloat16":
+    if str(arr.dtype) == "bfloat16":
 
-        x = x.astype(np.float32)
+        arr = arr.astype(np.float32)
 
-    # --------------------------------------------------------
-    # Final validation
-    # --------------------------------------------------------
-
-    if not np.issubdtype(
-        x.dtype,
-        np.number,
-    ):
-
-        raise TypeError(
-            f"Non-numeric dtype: {x.dtype}"
-        )
-
-    return x
+    return arr
+    
 
 def _kernel_to_weight(kernel):
-    """
-    Flax Dense kernel:
-        [in_features, out_features]
-
-    Torch Linear weight:
-        [out_features, in_features]
-    """
 
     return _to_numpy(kernel).T
 
 
 def _has_key(tree, key):
-    """
-    FrozenDict-safe key check.
-    """
 
     try:
         return key in tree
@@ -140,14 +131,6 @@ def _has_key(tree, key):
 
 
 def _is_mapping(x):
-    """
-    Generic mapping detection.
-
-    Works for:
-    - dict
-    - FrozenDict
-    - flax.core.FrozenDict
-    """
 
     return hasattr(x, "keys")
 
@@ -158,19 +141,6 @@ def _is_mapping(x):
 
 
 def _is_scan_layout(params):
-    """
-    Detect nn.scan parameter layout.
-
-    Expected structure:
-
-    params[
-        "model"
-    ][
-        "layers"
-    ][
-        "block"
-    ]
-    """
 
     if not _has_key(params, "model"):
         return False
@@ -196,16 +166,11 @@ def _extract_scan_layer(
     num_layers,
 ):
     """
-    Extract one layer from scanned parameter tree.
+    Extract one layer from scan layout.
 
-    ONLY tensors whose first dimension equals
-    num_layers are sliced.
-
-    This prevents corruption of:
-    - embeddings
-    - norm weights
-    - biases
-    - non-scanned tensors
+    IMPORTANT:
+    Never materializes tensors.
+    Uses shape metadata only.
     """
 
     block = params["model"]["layers"]["block"]
@@ -213,7 +178,7 @@ def _extract_scan_layer(
     def slice_tree(tree):
 
         # ----------------------------------------------------
-        # Recursive mappings
+        # Recursive mapping
         # ----------------------------------------------------
 
         if _is_mapping(tree):
@@ -227,31 +192,25 @@ def _extract_scan_layer(
         # Non-array leaves
         # ----------------------------------------------------
 
-        if not hasattr(tree, "shape"):
+        shape = getattr(tree, "shape", None)
 
+        if shape is None:
             return tree
-
-        arr = np.asarray(tree)
 
         # ----------------------------------------------------
         # Scalars
         # ----------------------------------------------------
 
-        if arr.ndim == 0:
-
+        if len(shape) == 0:
             return tree
 
         # ----------------------------------------------------
         # Slice ONLY scanned tensors
         # ----------------------------------------------------
 
-        if arr.shape[0] == num_layers:
+        if shape[0] == num_layers:
 
             return tree[layer_idx]
-
-        # ----------------------------------------------------
-        # Non-scanned tensor
-        # ----------------------------------------------------
 
         return tree
 
@@ -264,20 +223,15 @@ def _extract_scan_layer(
 
 
 def _extract_non_scan_layers(params):
-    """
-    Extract decoder layers from non-scanned layout.
-    """
 
     model = params["model"]
 
-    layer_keys = [
-        k
-        for k in model.keys()
-        if k.startswith("layers_")
-    ]
-
     layer_keys = sorted(
-        layer_keys,
+        [
+            k
+            for k in model.keys()
+            if k.startswith("layers_")
+        ],
         key=lambda x: int(
             x.split("_")[-1]
         ),
@@ -299,13 +253,6 @@ def _export_dense(
     flax_module,
     hf_prefix,
 ):
-    """
-    Export Dense layer.
-
-    Supports:
-    - kernel
-    - optional bias
-    """
 
     tensors[
         f"{hf_prefix}.weight"
@@ -327,9 +274,6 @@ def _export_norm(
     flax_module,
     hf_prefix,
 ):
-    """
-    Export RMSNorm.
-    """
 
     tensors[
         f"{hf_prefix}.weight"
@@ -348,9 +292,6 @@ def _convert_attention(
     layer,
     prefix,
 ):
-    """
-    Convert attention tensors.
-    """
 
     attn = layer["self_attn"]
 
@@ -384,9 +325,6 @@ def _convert_mlp(
     layer,
     prefix,
 ):
-    """
-    Convert SwiGLU MLP tensors.
-    """
 
     mlp = layer["mlp"]
 
@@ -414,9 +352,6 @@ def _convert_norms(
     layer,
     prefix,
 ):
-    """
-    Convert RMSNorm tensors.
-    """
 
     _export_norm(
         tensors,
@@ -436,9 +371,6 @@ def _convert_layer(
     layer,
     layer_idx,
 ):
-    """
-    Convert one decoder layer.
-    """
 
     prefix = f"model.layers.{layer_idx}"
 
@@ -469,13 +401,8 @@ def _convert_layer(
 def validate_exported_tensors(
     tensors,
 ):
-    """
-    Validate exported tensors before safetensors save.
-    """
 
-    print(
-        "[export] validating tensors..."
-    )
+    print("[export] validating tensors...")
 
     total_params = 0
 
@@ -498,12 +425,6 @@ def validate_exported_tensors(
 
         total_params += tensor.size
 
-        print(
-            f"{name:<60}"
-            f"{str(tensor.shape):<24}"
-            f"{tensor.dtype}"
-        )
-
     print(
         f"[export] validated "
         f"{len(tensors):,} tensors"
@@ -524,18 +445,6 @@ def convert_params_to_hf(
     params,
     config,
 ) -> Dict[str, np.ndarray]:
-    """
-    Convert LaughLM params ->
-    Hugging Face-compatible tensor dict.
-
-    Returns
-    -------
-    Dict[str, np.ndarray]
-
-    Compatible with:
-
-        safetensors.numpy.save_file(...)
-    """
 
     tensors = {}
 
@@ -545,19 +454,19 @@ def convert_params_to_hf(
     # Embeddings
     # ========================================================
 
-    embedding = model[
-        "embed_tokens"
-    ]["embedding"]
+    print("[export] embeddings...")
 
     tensors[
         "model.embed_tokens.weight"
     ] = _to_numpy(
-        embedding
+        model["embed_tokens"]["embedding"]
     )
 
     # ========================================================
-    # Decoder layers
+    # Layers
     # ========================================================
+
+    print("[export] layers...")
 
     if _is_scan_layout(params):
 
@@ -597,8 +506,10 @@ def convert_params_to_hf(
             )
 
     # ========================================================
-    # Final RMSNorm
+    # Final norm
     # ========================================================
+
+    print("[export] final norm...")
 
     _export_norm(
         tensors,
@@ -612,11 +523,11 @@ def convert_params_to_hf(
 
     if not config.tie_word_embeddings:
 
-        lm_head = params["lm_head"]
+        print("[export] lm_head...")
 
         _export_dense(
             tensors,
-            lm_head,
+            params["lm_head"],
             "lm_head",
         )
 

@@ -1,32 +1,10 @@
 """
 LaughLM/export/export_hf.py
-
-Canonical Hugging Face export pipeline for LaughLM.
-
-Pipeline
---------
-1. Restore checkpoint
-2. Extract params
-3. Convert tensors
-4. Build HF config
-5. Save safetensors
-6. Save config.json
-7. Save generation_config.json
-8. Copy tokenizer assets
-9. Validate export
-
-Design goals
-------------
-- deterministic
-- scan-compatible
-- tied-embedding aware
-- TPU-safe
-- safetensors-native
-- HF ecosystem compatible
 """
 
 from __future__ import annotations
 
+import gc
 import json
 import shutil
 
@@ -56,6 +34,7 @@ from LaughLM.training.train_state import (
 
 from LaughLM.export.convert_params import (
     convert_params_to_hf,
+    validate_exported_tensors,
 )
 
 from LaughLM.export.hf_config import (
@@ -76,9 +55,6 @@ def copy_tokenizer_files(
     source_dir,
     output_dir,
 ):
-    """
-    Copy tokenizer assets into HF export directory.
-    """
 
     source_dir = Path(source_dir)
 
@@ -139,9 +115,6 @@ def save_generation_config(
     output_dir,
     llama_config,
 ):
-    """
-    Save generation_config.json
-    """
 
     generation_config = (
         GenerationConfig(
@@ -186,9 +159,6 @@ def save_hf_config(
     output_dir,
     hf_config,
 ):
-    """
-    Save HF config.json
-    """
 
     output_dir = Path(output_dir)
 
@@ -226,9 +196,6 @@ def export_hf_checkpoint(
     tokenizer_dir,
     validate=True,
 ):
-    """
-    Export LaughLM checkpoint to Hugging Face format.
-    """
 
     output_dir = Path(output_dir)
 
@@ -238,7 +205,7 @@ def export_hf_checkpoint(
     )
 
     # ========================================================
-    # Load experiment config
+    # Config
     # ========================================================
 
     print(
@@ -312,6 +279,14 @@ def export_hf_checkpoint(
         config=llama_config,
     )
 
+    # ========================================================
+    # Validate tensors
+    # ========================================================
+
+    validate_exported_tensors(
+        tensors
+    )
+
     total_tensors = len(tensors)
 
     total_params = sum(
@@ -328,6 +303,13 @@ def export_hf_checkpoint(
         f"[export] total params: "
         f"{total_params:,}"
     )
+
+    # ========================================================
+    # Cleanup
+    # ========================================================
+
+    del state
+    gc.collect()
 
     # ========================================================
     # Save safetensors
@@ -401,7 +383,7 @@ def export_hf_checkpoint(
     )
 
     # ========================================================
-    # Validation
+    # Optional validation
     # ========================================================
 
     if validate:
