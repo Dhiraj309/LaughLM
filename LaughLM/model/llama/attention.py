@@ -1,102 +1,138 @@
 """
 LaughLM/model/llama/attention.py
 
-Canonical Llama attention.
+Canonical LLaMA attention for PMAP production.
+
+Uses jax.nn.dot_product_attention instead of manual
+matmul-softmax-matmul.
+
+Current backend policy:
+- standard / xla: official XLA dot_product_attention
+- flash / cudnn: try cuDNN dot_product_attention on GPU, fallback to XLA
+- decode: XLA dot_product_attention
+- no Splash/Pallas here yet
 """
 
 from __future__ import annotations
 
 from typing import Optional
+import warnings
 
 import jax
 import jax.numpy as jnp
-
 from flax import linen as nn
 
-from LaughLM.model.llama.config import (
-    LlamaConfig,
-)
-
+from LaughLM.model.llama.config import LlamaConfig
 from LaughLM.model.llama.initialization import (
     create_dense,
     constrain_hidden_states,
-    constrain_attention_q,
-    constrain_attention_kv,
 )
-
 from LaughLM.model.llama.rope import (
     RotaryEmbedding,
     apply_rotary_pos_emb,
 )
-
 from LaughLM.model.llama.kv_cache import (
     KVCache,
     update_kv_cache,
 )
-
-from LaughLM.distributed.sharding import (
-    constrain_kv_cache,
-)
+from LaughLM.distributed.sharding import constrain_kv_cache
 
 
-# ============================================================
-# GQA helper
-# ============================================================
+_LOGGED_BACKENDS = set()
 
-def repeat_kv(
-    hidden_states: jnp.ndarray,
-    n_rep: int,
+
+def _log_attention_backend(name: str):
+    if name not in _LOGGED_BACKENDS:
+        _LOGGED_BACKENDS.add(name)
+        print(f"[attention] using {name}", flush=True)
+
+
+def _attention_impl_from_config(config: LlamaConfig, mode: str) -> str | None:
+    """
+    Returns requested JAX dot_product_attention implementation.
+
+    None means JAX default/XLA path.
+    """
+
+    impl = getattr(config, "attention_impl", None)
+
+    # Current LlamaConfig may not carry attention_impl yet.
+    if impl is None:
+        return None
+
+    if mode == "decode":
+        return None
+
+    if impl in ("standard", "xla", "memory_efficient"):
+        return None
+
+    if impl in ("flash", "cudnn"):
+        return "cudnn"
+
+    return None
+
+
+def _dot_product_attention(
+    query_states: jnp.ndarray,
+    key_states: jnp.ndarray,
+    value_states: jnp.ndarray,
+    attention_mask: Optional[jnp.ndarray],
+    config: LlamaConfig,
+    mode: str,
 ) -> jnp.ndarray:
     """
-    Expand KV heads for GQA.
+    query/key/value layout:
+        [B, T, H, Dh]
 
-    Input:
-        [B, KVH, T, Dh]
+    attention_mask layout:
+        [1, 1, Tq, Tk]
 
-    Output:
-        [B, QH, T, Dh]
+    jax.nn.dot_product_attention supports GQA/MQA directly when
+    Q heads are divisible by KV heads, so we do not repeat KV heads.
     """
 
-    if n_rep == 1:
-        return hidden_states
+    # Convert existing mask layout [1, 1, Tq, Tk]
+    # to bias layout broadcastable against [B, H, Tq, Tk]
+    # used internally by SDPA implementations.
+    bias = attention_mask
 
-    b, kvh, t, dh = (
-        hidden_states.shape
+    requested_impl = _attention_impl_from_config(
+        config,
+        mode,
     )
 
-    hidden_states = hidden_states[
-        :,
-        :,
-        None,
-        :,
-        :,
-    ]
+    if requested_impl == "cudnn":
+        try:
+            _log_attention_backend("cudnn dot_product_attention")
 
-    hidden_states = jnp.broadcast_to(
-        hidden_states,
-        (
-            b,
-            kvh,
-            n_rep,
-            t,
-            dh,
-        ),
+            return jax.nn.dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                bias=bias,
+                is_causal=False,
+                implementation="cudnn",
+            )
+
+        except Exception as e:
+            warnings.warn(
+                "[attention] cuDNN attention failed "
+                f"({type(e).__name__}: {e}); falling back to XLA.",
+                RuntimeWarning,
+            )
+
+    _log_attention_backend("xla dot_product_attention")
+
+    return jax.nn.dot_product_attention(
+        query_states,
+        key_states,
+        value_states,
+        bias=bias,
+        is_causal=False,
     )
 
-    return hidden_states.reshape(
-        b,
-        kvh * n_rep,
-        t,
-        dh,
-    )
-
-
-# ============================================================
-# Attention
-# ============================================================
 
 class LlamaAttention(nn.Module):
-
     config: LlamaConfig
 
     @nn.compact
@@ -107,36 +143,17 @@ class LlamaAttention(nn.Module):
         attention_mask: Optional[jnp.ndarray] = None,
         kv_cache: Optional[KVCache] = None,
         mode: str = "train",
-    ) -> tuple[
-        jnp.ndarray,
-        Optional[KVCache],
-    ]:
+    ) -> tuple[jnp.ndarray, Optional[KVCache]]:
 
-        hidden_states = constrain_hidden_states(
-            hidden_states
-        )
+        hidden_states = constrain_hidden_states(hidden_states)
 
         config = self.config
 
         B, T, _ = hidden_states.shape
 
-        num_heads = (
-            config.num_attention_heads
-        )
-
-        num_kv_heads = (
-            config.num_key_value_heads
-        )
-
+        num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
         head_dim = config.head_dim
-
-        num_kv_groups = (
-            num_heads // num_kv_heads
-        )
-
-        # ====================================================
-        # Projections
-        # ====================================================
 
         q_proj = create_dense(
             features=num_heads * head_dim,
@@ -166,26 +183,11 @@ class LlamaAttention(nn.Module):
             name="o_proj",
         )
 
-        # ====================================================
-        # QKV projections
-        # ====================================================
+        query_states = q_proj(hidden_states)
+        key_states = k_proj(hidden_states)
+        value_states = v_proj(hidden_states)
 
-        query_states = q_proj(
-            hidden_states
-        )
-
-        key_states = k_proj(
-            hidden_states
-        )
-
-        value_states = v_proj(
-            hidden_states
-        )
-
-        # ====================================================
-        # Reshape
-        # ====================================================
-
+        # [B, T, H, Dh]
         query_states = query_states.reshape(
             B,
             T,
@@ -207,231 +209,61 @@ class LlamaAttention(nn.Module):
             head_dim,
         )
 
-        # ====================================================
-        # RoPE
-        # ====================================================
-
-        rotary_emb = RotaryEmbedding(
-            config
-        )
+        rotary_emb = RotaryEmbedding(config)
 
         cos, sin = rotary_emb(
             query_states,
             positions,
         )
 
-        (
-            query_states,
-            key_states,
-        ) = apply_rotary_pos_emb(
+        query_states, key_states = apply_rotary_pos_emb(
             query_states,
             key_states,
             cos,
             sin,
         )
 
-        # ====================================================
-        # KV cache layout constraints
-        #
-        # [B, S, KVH, Dh]
-        # ====================================================
-
-        key_states = constrain_kv_cache(
-            key_states
-        )
-
-        value_states = constrain_kv_cache(
-            value_states
-        )
-
-        # ====================================================
-        # KV cache update
-        # ====================================================
+        key_states = constrain_kv_cache(key_states)
+        value_states = constrain_kv_cache(value_states)
 
         updated_cache = None
 
         if kv_cache is not None:
-
-            (
-                updated_cache,
-                key_states,
-                value_states,
-            ) = update_kv_cache(
+            updated_cache, key_states, value_states = update_kv_cache(
                 kv_cache,
                 key_states,
                 value_states,
             )
 
-            kv_length = (
-                updated_cache
-                .cache_position
-            )
+            kv_length = updated_cache.cache_position
 
-            # ------------------------------------------------
-            # IMPORTANT
-            #
-            # Slice BEFORE transpose.
-            #
-            # key/value layout currently:
-            #   [B, S, KVH, Dh]
-            # ------------------------------------------------
+            key_states = key_states[:, :kv_length, :, :]
+            value_states = value_states[:, :kv_length, :, :]
 
-            key_states = key_states[
-                :,
-                :kv_length,
-                :,
-                :,
-            ]
+        query_states = query_states.astype(config.compute_dtype)
+        key_states = key_states.astype(config.compute_dtype)
+        value_states = value_states.astype(config.compute_dtype)
 
-            value_states = value_states[
-                :,
-                :kv_length,
-                :,
-                :,
-            ]
-
-        # ====================================================
-        # Attention transpose
-        # ====================================================
-
-        query_states = jnp.transpose(
-            query_states,
-            (0, 2, 1, 3),
+        attn_output = _dot_product_attention(
+            query_states=query_states,
+            key_states=key_states,
+            value_states=value_states,
+            attention_mask=attention_mask,
+            config=config,
+            mode=mode,
         )
 
-        key_states = jnp.transpose(
-            key_states,
-            (0, 2, 1, 3),
-        )
-
-        value_states = jnp.transpose(
-            value_states,
-            (0, 2, 1, 3),
-        )
-
-        # ====================================================
-        # Logical constraints
-        # ====================================================
-
-        query_states = constrain_attention_q(
-            query_states
-        )
-
-        key_states = constrain_attention_kv(
-            key_states
-        )
-
-        value_states = constrain_attention_kv(
-            value_states
-        )
-
-        # ====================================================
-        # GQA expansion
-        # ====================================================
-
-        key_states = repeat_kv(
-            key_states,
-            num_kv_groups,
-        )
-
-        value_states = repeat_kv(
-            value_states,
-            num_kv_groups,
-        )
-
-        # ====================================================
-        # Attention logits
-        # ====================================================
-
-        attn_weights = jnp.matmul(
-            query_states,
-            jnp.swapaxes(
-                key_states,
-                -1,
-                -2,
-            ),
-            preferred_element_type=jnp.float32,
-        )
-
-        attn_weights = (
-            attn_weights
-            * (head_dim ** -0.5)
-        )
-
-        # ====================================================
-        # Mask
-        # ====================================================
-
-        if attention_mask is not None:
-
-            attn_weights = (
-                attn_weights
-                + attention_mask
-            )
-
-        # ====================================================
-        # Stable fp32 softmax
-        # ====================================================
-
-        attn_weights = (
-            attn_weights.astype(
-                jnp.float32
-            )
-        )
-
-        attn_weights = jax.nn.softmax(
-            attn_weights,
-            axis=-1,
-        )
-
-        attn_weights = (
-            attn_weights.astype(
-                query_states.dtype
-            )
-        )
-
-        # ====================================================
-        # Attention output
-        # ====================================================
-
-        attn_output = jnp.matmul(
-            attn_weights,
-            value_states,
-            preferred_element_type=jnp.float32,
-        )
-
-        # ====================================================
-        # Restore hidden-state layout
-        # ====================================================
-
-        attn_output = jnp.transpose(
-            attn_output,
-            (0, 2, 1, 3),
-        )
-
+        # [B, T, H, Dh] -> [B, T, D]
         attn_output = attn_output.reshape(
             B,
             T,
             config.hidden_size,
         )
 
-        attn_output = constrain_hidden_states(
-            attn_output
-        )
+        attn_output = constrain_hidden_states(attn_output)
 
-        # ====================================================
-        # Output projection
-        # ====================================================
+        attn_output = o_proj(attn_output)
 
-        attn_output = o_proj(
-            attn_output
-        )
+        attn_output = constrain_hidden_states(attn_output)
 
-        attn_output = constrain_hidden_states(
-            attn_output
-        )
-
-        return (
-            attn_output,
-            updated_cache,
-        )
+        return attn_output, updated_cache
