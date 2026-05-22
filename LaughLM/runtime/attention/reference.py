@@ -4,6 +4,7 @@ LaughLM/runtime/attention/reference.py
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from .masking import build_mask
@@ -38,9 +39,13 @@ def reference_attention(
 
     groups = Hq // Hkv
 
-    #
+    # ======================================================
     # Reshape query into GQA groups
     #
+    # [B, T, Hq, D]
+    # ->
+    # [B, T, Hkv, G, D]
+    # ======================================================
 
     query = query.reshape(
         B,
@@ -50,19 +55,25 @@ def reference_attention(
         D,
     )
 
-    #
+    # ======================================================
     # QK
     #
+    # output:
+    # [B, Hkv, G, T, S]
+    # ======================================================
 
     logits = jnp.einsum(
         "bthgd,bshd->bhgts",
         query.astype(jnp.float32),
         key.astype(jnp.float32),
+        preferred_element_type=jnp.float32,
     )
 
-    #
+    logits = logits * (D ** -0.5)
+
+    # ======================================================
     # Mask
-    #
+    # ======================================================
 
     mask = build_mask(
         q_len=T,
@@ -76,24 +87,35 @@ def reference_attention(
         DEFAULT_MASK_VALUE,
     )[None, None, None, :, :]
 
-    #
+    # ======================================================
     # Softmax
-    #
+    # ======================================================
 
     probs = jax.nn.softmax(
         logits,
         axis=-1,
     )
 
-    #
+    probs = probs.astype(
+        value.dtype
+    )
+
+    # ======================================================
     # OV
     #
+    # [B, Hkv, G, T, D]
+    # ======================================================
 
     out = jnp.einsum(
         "bhgts,bshd->bthgd",
-        probs.astype(value.dtype),
+        probs,
         value,
+        preferred_element_type=jnp.float32,
     )
+
+    # ======================================================
+    # Restore head layout
+    # ======================================================
 
     out = out.reshape(
         B,
