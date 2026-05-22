@@ -162,6 +162,7 @@ class LlamaConfig:
             "flash",
             "cudnn",
             "memory_efficient",
+            "splash",
         }
 
         if self.attention_impl not in valid_attention_impls:
