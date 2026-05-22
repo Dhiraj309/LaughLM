@@ -1,45 +1,20 @@
 """
 LaughLM/training/trainer.py
 
-Mesh-native SPMD trainer for LaughLM.
+PMAP production trainer for current LLaMA model.
 
-Frontier-grade fixes (2026):
-────────────────────────────────────────────
-1. Correct TrainState sharding tree
-2. Correct param subtree extraction
-3. Proper mesh-native compilation
-4. Real synchronous timing
-5. No async timing inflation
-6. Stable checkpoint semantics
-7. Exact structure match between:
-      state
-      abstract state
-      shardings
-8. Safe metrics synchronization
-9. TRUE optimizer-state sharding
-10. FSDP-ready optimizer partition propagation
-11. Scalar-safe optimizer sharding
-12. TPU-safe compile lowering
-13. Optax namedtuple-safe state handling
-14. Rank-aware PartitionSpec fixing
-15. TPU-safe immediate log flushing
-16. Correct logging after compiled step
-17. No skipped logs during async execution
-
-Phase 0 metrics upgrades:
-────────────────────────────────────────────
-18. Every-step async JSONL metrics persistence
-19. Background metrics writer thread
-20. Non-blocking bounded metrics queue
-21. Separate console logging vs persistence cadence
-22. Host-only metrics serialization
-23. Topology-safe metrics writing
+Runtime:
+host batch [global_batch, seq_len]
+→ reshape [devices, grad_accum, micro_batch_per_device, seq_len]
+→ pmap train_step(axis_name="data")
+→ replicated optimizer update
+→ save host-unreplicated state
 """
 
-import json
-import sys
-import time
+from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 from typing import Iterator
 
@@ -47,833 +22,167 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from flax.linen import (
-    partitioning as nn_partitioning,
-)
+from LaughLM.config.schema import LaughLMConfig
+from LaughLM.model.llama.model import LlamaForCausalLM
+from LaughLM.model.llama.config_factory import build_llama_config
+from LaughLM.model.parameter_utils import generate_preflight_report, estimate_parameters
+from LaughLM.training.optimizer import build_optimizer
+from LaughLM.training.scheduler import build_scheduler, compute_total_steps
+from LaughLM.training.train_step import create_train_step, create_eval_step
+from LaughLM.training.logger import TrainingLogger
+from LaughLM.training.checkpoint import CheckpointManager
+from LaughLM.training.train_state import TrainState
+from LaughLM.utils.rng import create_rng
+from LaughLM.utils.prefetch import prefetch_to_device
 
-from jax.sharding import (
-    NamedSharding,
-    PartitionSpec as P,
-)
-
-from LaughLM.config.schema import (
-    LaughLMConfig,
-)
-
-from LaughLM.model.llama.model import (
-    LlamaForCausalLM,
-)
-
-from LaughLM.model.llama.config_factory import (
-    build_llama_config,
-)
-
-from LaughLM.model.parameter_utils import (
-    generate_preflight_report,
-    estimate_parameters,
-)
-
-from LaughLM.training.optimizer import (
-    build_optimizer,
-)
-
-from LaughLM.training.scheduler import (
-    build_scheduler,
-    compute_total_steps,
-)
-
-from LaughLM.training.train_step import (
-    create_train_step,
-    create_eval_step,
-)
-
-from LaughLM.training.logger import (
-    TrainingLogger,
-)
-
-from LaughLM.training.checkpoint import (
-    CheckpointManager,
-)
-
-from LaughLM.training.metadata import (
-    build_run_metadata,
-    build_checkpoint_metadata,
-    write_json,
-)
-
-from LaughLM.training.train_state import (
-    TrainState,
-)
-
-from LaughLM.utils.rng import (
-    create_rng,
-)
-
-from LaughLM.utils.prefetch import (
-    prefetch_to_device,
-)
-
-from LaughLM.distributed.mesh import (
-    create_mesh,
-)
-
-from LaughLM.distributed.state import (
-    create_abstract_state,
-    create_sharded_state,
-)
-
-from LaughLM.distributed.sharding import (
-    get_logical_axis_rules,
-    create_input_sharding,
-)
-
-
-# ============================================================
-# Utils
-# ============================================================
 
 def _scalar(x):
-
     try:
-        return float(
-            jax.device_get(x)
-        )
-
+        return float(jax.device_get(x))
     except Exception:
         return float("nan")
 
 
-def _fix_sharding_for_rank(
-    sharding,
-    target,
-):
-    """
-    Ensure PartitionSpec rank compatibility.
-    """
+def _unreplicate(tree):
+    return jax.tree_util.tree_map(lambda x: jax.device_get(x[0]), tree)
 
-    if not hasattr(target, "shape"):
-        return sharding
-
-    rank = len(target.shape)
-
-    if rank == 0:
-
-        return NamedSharding(
-            sharding.mesh,
-            P(),
-        )
-
-    spec = sharding.spec
-
-    if spec == P():
-        axes = ()
-
-    else:
-        axes = tuple(spec)
-
-    if len(axes) < rank:
-
-        axes = axes + (
-            None,
-        ) * (
-            rank - len(axes)
-        )
-
-    elif len(axes) > rank:
-
-        axes = axes[:rank]
-
-    return NamedSharding(
-        sharding.mesh,
-        P(*axes),
-    )
-
-
-# ============================================================
-# Optimizer sharding helper
-# ============================================================
-
-def _create_optimizer_shardings(
-    opt_state,
-    param_shardings,
-    replicated,
-):
-
-    param_leaves = []
-
-    def collect_shardings(x):
-
-        if isinstance(
-            x,
-            NamedSharding,
-        ):
-            param_leaves.append(x)
-
-    jax.tree_util.tree_map(
-        collect_shardings,
-        param_shardings,
-    )
-
-    # --------------------------------------------------------
-    # Iterator factory
-    # --------------------------------------------------------
-
-    def make_iter():
-        return iter(param_leaves)
-
-    # --------------------------------------------------------
-    # Rank-safe sharding fix
-    # --------------------------------------------------------
-
-    def next_param_sharding(
-        target,
-        param_iter,
-    ):
-
-        if (
-            np.isscalar(target)
-            or (
-                hasattr(target, "shape")
-                and len(target.shape) == 0
-            )
-        ):
-            return replicated
-
-        if not hasattr(target, "shape"):
-            return replicated
-
-        try:
-
-            sharding = next(
-                param_iter
-            )
-
-        except StopIteration:
-            return replicated
-
-        rank = len(target.shape)
-
-        spec = tuple(
-            sharding.spec
-        )
-
-        if len(spec) < rank:
-
-            spec = spec + (
-                None,
-            ) * (
-                rank - len(spec)
-            )
-
-        elif len(spec) > rank:
-
-            spec = spec[:rank]
-
-        return NamedSharding(
-            sharding.mesh,
-            P(*spec),
-        )
-
-    # --------------------------------------------------------
-    # Rebuild optimizer state
-    # --------------------------------------------------------
-
-    new_states = []
-
-    for state in opt_state:
-
-        if (
-            hasattr(state, "mu")
-            and hasattr(state, "nu")
-        ):
-
-            mu_iter = make_iter()
-
-            mu_sharding = (
-                jax.tree_util.tree_map(
-                    lambda x:
-                    next_param_sharding(
-                        x,
-                        mu_iter,
-                    ),
-                    state.mu,
-                )
-            )
-
-            nu_iter = make_iter()
-
-            nu_sharding = (
-                jax.tree_util.tree_map(
-                    lambda x:
-                    next_param_sharding(
-                        x,
-                        nu_iter,
-                    ),
-                    state.nu,
-                )
-            )
-
-            state_sharding = (
-                state._replace(
-
-                    count=replicated,
-
-                    mu=mu_sharding,
-
-                    nu=nu_sharding,
-                )
-            )
-
-            new_states.append(
-                state_sharding
-            )
-
-        else:
-
-            replicated_state = (
-                jax.tree_util.tree_map(
-                    lambda _:
-                    replicated,
-                    state,
-                )
-            )
-
-            new_states.append(
-                replicated_state
-            )
-
-    return type(opt_state)(
-        new_states
-    )
-
-
-# ============================================================
-# Trainer
-# ============================================================
 
 class Trainer:
-
-    def __init__(
-        self,
-        config: LaughLMConfig,
-        resume_dir: str | None = None,
-    ):
-
+    def __init__(self, config: LaughLMConfig, resume_dir: str | None = None):
         self.config = config
+        self.num_devices = jax.local_device_count()
+        self.devices = jax.local_devices()
 
-        # --------------------------------------------------
-        # Devices + mesh
-        # --------------------------------------------------
+        print(f"[trainer] using {self.num_devices} local devices with PMAP", flush=True)
 
-        self.num_devices = (
-            jax.device_count()
-        )
-
-        self.mesh = create_mesh(
-            config
-        )
-
-        print(
-            f"[trainer] using "
-            f"{self.num_devices} devices "
-            f"mesh={self.mesh.axis_names}",
-            flush=True,
-        )
-
-        # --------------------------------------------------
-        # Input sharding
-        # --------------------------------------------------
-
-        self.input_sharding = (
-            create_input_sharding(
-                self.mesh,
-                config,
-            )
-        )
-
-        # --------------------------------------------------
-        # RNG
-        # --------------------------------------------------
-
-        self.rng = create_rng(
-            seed=42
-        )
-
-        # --------------------------------------------------
-        # Reports
-        # --------------------------------------------------
-
-        generate_preflight_report(
-            config,
-            num_devices=self.num_devices,
-        )
-
-        # --------------------------------------------------
-        # Checkpoints
-        # --------------------------------------------------
-
-        ckpt_dir = (
-            resume_dir
-            or config.runtime.checkpoint_dir
-        )
-
-        self.checkpoints = (
-            CheckpointManager(
-                ckpt_dir,
-                max_to_keep=(
-                    config.runtime
-                    .checkpoint_max_to_keep
-                ),
-            )
-        )
-
-        self.checkpoint_interval = (
-            config.runtime
-            .checkpoint_interval
-        )
-
-        config_path = (
-            Path(ckpt_dir)
-            / "config.json"
-        )
-
-        if not config_path.exists():
-
-            config_path.parent.mkdir(
-                parents=True,
-                exist_ok=True,
+        if config.parallelism.data_parallel != self.num_devices:
+            print(
+                "[trainer] warning: config.parallelism.data_parallel="
+                f"{config.parallelism.data_parallel}, but local_device_count="
+                f"{self.num_devices}. PMAP will use local_device_count.",
+                flush=True,
             )
 
-            with open(
-                config_path,
-                "w",
-            ) as f:
+        self.rng = create_rng(seed=42)
 
-                json.dump(
-                    self.config.model_dump(),
-                    f,
-                    indent=2,
-                )
+        generate_preflight_report(config, num_devices=self.num_devices)
 
-        # --------------------------------------------------
-        # Model
-        # --------------------------------------------------
+        ckpt_dir = resume_dir or config.runtime.checkpoint_dir
 
-        llama_config = (
-            build_llama_config(
-                config
-            )
+        self.checkpoints = CheckpointManager(
+            ckpt_dir,
+            max_to_keep=config.runtime.checkpoint_max_to_keep,
         )
 
-        self.model = (
-            LlamaForCausalLM(
-                config=llama_config
-            )
+        self.checkpoint_interval = config.runtime.checkpoint_interval
+
+        config_path = Path(ckpt_dir) / "config.json"
+        if jax.process_index() == 0 and not config_path.exists():
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(config_path, "w") as f:
+                json.dump(self.config.model_dump(), f, indent=2)
+
+        llama_config = build_llama_config(config)
+        self.model = LlamaForCausalLM(config=llama_config)
+
+        self.grad_accum = config.runtime.gradient_accumulation
+
+        dummy = jnp.zeros(
+            (
+                config.runtime.micro_batch_per_device,
+                config.runtime.seq_len,
+            ),
+            dtype=jnp.int32,
         )
 
-        # --------------------------------------------------
-        # Runtime params
-        # --------------------------------------------------
-
-        self.grad_accum = (
-            config.runtime
-            .gradient_accumulation
-        )
-
-        global_batch_size = (
-            config.runtime
-            .micro_batch_per_device
-            * self.num_devices
-        )
-
-        input_shape = (
-            global_batch_size,
-            config.runtime.seq_len,
-        )
-
-        # --------------------------------------------------
-        # Abstract metadata
-        # --------------------------------------------------
-
-        (
-            _abstract_variables,
-            self.logical_specs,
-            full_shardings,
-        ) = create_abstract_state(
-            model=self.model,
-            config=config,
-            mesh=self.mesh,
-            rng=self.rng.next_key(),
-            input_shape=input_shape,
-        )
-
-        param_shardings = (
-            full_shardings["params"]
-        )
-
-        # --------------------------------------------------
-        # Materialize params
-        # --------------------------------------------------
-
-        variables = (
-            create_sharded_state(
-                model=self.model,
-                config=config,
-                mesh=self.mesh,
-                rng=self.rng.next_key(),
-                input_shape=input_shape,
-            )
+        variables = self.model.init(
+            self.rng.next_key(),
+            input_ids=dummy,
+            use_cache=False,
+            mode="train",
         )
 
         params = variables["params"]
 
-        # --------------------------------------------------
-        # Scheduler
-        # --------------------------------------------------
-
-        self.schedule = (
-            build_scheduler(
-                config,
-                num_devices=self.num_devices,
-            )
+        self.schedule = build_scheduler(
+            config,
+            num_devices=self.num_devices,
         )
 
-        # --------------------------------------------------
-        # Optimizer
-        # --------------------------------------------------
-
-        self.optimizer = (
-            build_optimizer(
-                config,
-                self.schedule,
-            )
+        self.optimizer = build_optimizer(
+            config,
+            self.schedule,
         )
 
-        opt_state = (
-            self.optimizer.init(
-                params
-            )
-        )
-
-        # --------------------------------------------------
-        # Train state
-        # --------------------------------------------------
+        opt_state = self.optimizer.init(params)
 
         state = TrainState(
             params=params,
-
             opt_state=opt_state,
-
-            step=jnp.array(
-                0,
-                dtype=jnp.int32,
-            ),
-
-            tokens_processed=jnp.array(
-                0,
-                dtype=jnp.int32,
-            ),
-
+            step=jnp.array(0, dtype=jnp.int32),
+            tokens_processed=jnp.array(0, dtype=jnp.int64),
             rng_key=self.rng.key,
         )
 
-        # --------------------------------------------------
-        # Shardings
-        # --------------------------------------------------
-
-        replicated = (
-            NamedSharding(
-                self.mesh,
-                P(),
-            )
-        )
-
-        opt_state_shardings = (
-            _create_optimizer_shardings(
-                opt_state=opt_state,
-                param_shardings=(
-                    param_shardings
-                ),
-                replicated=replicated,
-            )
-        )
-
-        self.state_shardings = (
-            TrainState(
-                params=param_shardings,
-
-                opt_state=(
-                    opt_state_shardings
-                ),
-
-                step=replicated,
-
-                tokens_processed=(
-                    replicated
-                ),
-
-                rng_key=replicated,
-            )
-        )
-
-        # --------------------------------------------------
-        # Restore
-        # --------------------------------------------------
-
-        restored = (
-            self.checkpoints
-            .restore_latest(
-                target_state=state
-            )
-        )
+        restored = self.checkpoints.restore_latest(target_state=state)
 
         if restored is not None:
-
-            (
-                state,
-                restored_step,
-            ) = restored
-
-            state = jax.device_put(
-                state,
-                self.state_shardings,
-            )
-
-            jax.tree_util.tree_map(
-                lambda x:
-                x.block_until_ready()
-                if hasattr(
-                    x,
-                    "block_until_ready",
-                )
-                else x,
-                state,
-            )
-
+            state, restored_step = restored
             print(
-                f"[trainer] resumed "
-                f"from step={restored_step:,}"
-            )
-
-        else:
-
-            print(
-                "[trainer] fresh run",
+                f"[trainer] resumed from step={int(state.step):,} "
+                f"tokens={int(state.tokens_processed):,}",
                 flush=True,
             )
+        else:
+            print("[trainer] fresh run", flush=True)
 
-        self.state = state
+        self.state = jax.device_put_replicated(state, self.devices)
 
-        # --------------------------------------------------
-        # Train step
-        # --------------------------------------------------
+        self.train_step = create_train_step(
+            model=self.model,
+            optimizer=self.optimizer,
+            grad_accum=self.grad_accum,
+            max_grad_norm=config.optimizer.gradient_clip,
+        )
 
-        with (
-            jax.set_mesh(
-                self.mesh
-            ),
+        self.eval_step = create_eval_step(model=self.model)
 
-            nn_partitioning.axis_rules(
-                get_logical_axis_rules(
-                    config
-                )
-            ),
-        ):
+        param_info = estimate_parameters(config)
 
-            self.train_step = (
-                create_train_step(
-                    model=self.model,
+        self.logger = TrainingLogger(
+            config,
+            total_params=param_info["total_params"],
+            embedding_params=param_info["embedding_params"],
+            num_devices=self.num_devices,
+        )
 
-                    optimizer=self.optimizer,
-
-                    config=config,
-
-                    mesh=self.mesh,
-
-                    state_shardings=(
-                        self.state_shardings
-                    ),
-
-                    data_sharding=(
-                        self.input_sharding
-                    ),
-
-                    grad_accum=(
-                        self.grad_accum
-                    ),
-
-                    max_grad_norm=(
-                        config.optimizer
-                        .gradient_clip
-                    ),
-                )
-            )
-
-            self.eval_step = (
-                create_eval_step(
-                    model=self.model,
-
-                    config=config,
-
-                    mesh=self.mesh,
-
-                    state_shardings=(
-                        self.state_shardings
-                    ),
-
-                    data_sharding=(
-                        self.input_sharding
-                    ),
-                )
-            )
-
-        # --------------------------------------------------
-        # Compile
-        # --------------------------------------------------
+        global_batch_size = config.runtime.micro_batch_per_device * self.num_devices
+        tokens_per_step = (
+            config.runtime.seq_len
+            * global_batch_size
+            * self.grad_accum
+        )
 
         print(
-            "[trainer] compiling "
-            "train step...",
+            "[trainer] runtime:\n"
+            f"  global_batch={global_batch_size}\n"
+            f"  per_device_batch={config.runtime.micro_batch_per_device}\n"
+            f"  seq_len={config.runtime.seq_len}\n"
+            f"  grad_accum={self.grad_accum}\n"
+            f"  tokens_per_step={tokens_per_step:,}",
             flush=True,
         )
 
-        shaped_batch = (
-            jax.ShapeDtypeStruct(
-                (
-                    self.grad_accum,
-                    global_batch_size,
-                    config.runtime.seq_len,
-                ),
-                jnp.int32,
-            )
-        )
-
-        abstract_train_state = (
-            jax.tree_util.tree_map(
-                lambda x:
-                jax.ShapeDtypeStruct(
-                    x.shape,
-                    x.dtype,
-                ),
-                self.state,
-            )
-        )
-
-        with (
-            jax.set_mesh(
-                self.mesh
-            ),
-
-            self.mesh,
-
-            nn_partitioning.axis_rules(
-                get_logical_axis_rules(
-                    config
-                )
-            ),
-        ):
-
-            lowered = (
-                self.train_step.lower(
-                    abstract_train_state,
-                    shaped_batch,
-                )
-            )
-
-            self.compiled_train_step = (
-                lowered.compile()
-            )
-
-        print(
-            "[trainer] compile complete",
-            flush=True,
-        )
-
-        # --------------------------------------------------
-        # Logger
-        # --------------------------------------------------
-
-        param_info = (
-            estimate_parameters(
-                config
-            )
-        )
-        
-        
-        # --------------------------------------------------
-        # Run metadata
-        # --------------------------------------------------
-
-        if jax.process_index() == 0:
-
-            run_metadata = build_run_metadata(
-                config=config,
-                mesh=self.mesh,
-                total_params=(
-                    param_info[
-                        "total_params"
-                    ]
-                ),
-                embedding_params=(
-                    param_info[
-                        "embedding_params"
-                    ]
-                ),
-            )
-
-            write_json(
-                Path(
-                    config.runtime.checkpoint_dir
-                )
-                / "run_metadata.json",
-                run_metadata,
-            )
-
-        self.logger = (
-            TrainingLogger(
-                config,
-
-                total_params=(
-                    param_info[
-                        "total_params"
-                    ]
-                ),
-
-                embedding_params=(
-                    param_info[
-                        "embedding_params"
-                    ]
-                ),
-
-                num_devices=(
-                    self.num_devices
-                ),
-            )
-        )
-
-    # ========================================================
-    # Train loop
-    # ========================================================
-
-    def train(
-        self,
-        dataloader: Iterator,
-    ):
-
+    def train(self, dataloader: Iterator):
         cfg = self.config
 
-        total_steps = (
-            compute_total_steps(
-                cfg,
-                num_devices=(
-                    self.num_devices
-                ),
-            )
+        total_steps = compute_total_steps(
+            cfg,
+            num_devices=self.num_devices,
         )
 
         global_batch_size = (
-            cfg.runtime
-            .micro_batch_per_device
+            cfg.runtime.micro_batch_per_device
             * self.num_devices
         )
 
@@ -884,299 +193,149 @@ class Trainer:
         )
 
         print(
-            f"\nTraining for "
-            f"{total_steps:,} steps\n",
+            f"\nTraining for {total_steps:,} optimizer steps with PMAP\n",
             flush=True,
         )
 
-        prefetched_loader = (
-            prefetch_to_device(
-                iter(dataloader),
-                size=8,
-            )
+        prefetched_loader = prefetch_to_device(
+            iter(dataloader),
+            size=8,
         )
 
-        data_iter = iter(
-            prefetched_loader
-        )
-
-        host_step = int(
-            jax.device_get(
-                self.state.step
-            )
-        )
-
-        current_step = host_step
-        tokens_seen = 0
+        data_iter = iter(prefetched_loader)
 
         try:
+            while True:
+                state_host = _unreplicate(self.state)
+                step = int(state_host.step)
 
-            while host_step < total_steps:
+                if step >= total_steps:
+                    break
 
-                # --------------------------------------------
-                # Build batch
-                # --------------------------------------------
+                step_start = time.perf_counter()
 
                 micro_batches = []
 
-                for _ in range(
-                    self.grad_accum
-                ):
+                for _ in range(self.grad_accum):
+                    batch = next(data_iter)
 
-                    batch = next(
-                        data_iter
+                    if not isinstance(batch, np.ndarray):
+                        batch = np.asarray(batch)
+
+                    if batch.dtype != np.int32:
+                        batch = batch.astype(np.int32)
+
+                    expected_shape = (
+                        global_batch_size,
+                        cfg.runtime.seq_len,
                     )
 
-                    if not isinstance(
-                        batch,
-                        np.ndarray,
-                    ):
-                        batch = np.asarray(
-                            batch
+                    if batch.shape != expected_shape:
+                        raise ValueError(
+                            f"Batch shape mismatch: got {batch.shape}, "
+                            f"expected {expected_shape}"
                         )
 
-                    if (
-                        batch.dtype
-                        != np.int32
-                    ):
-                        batch = (
-                            batch.astype(
-                                np.int32
-                            )
-                        )
+                    micro_batches.append(batch)
 
-                    assert (
-                        batch.shape[0]
-                        == global_batch_size
-                    )
+                batch = np.stack(micro_batches, axis=0)
 
-                    micro_batches.append(
-                        batch
-                    )
-
-                batch = np.stack(
-                    micro_batches
+                batch = batch.reshape(
+                    self.grad_accum,
+                    self.num_devices,
+                    cfg.runtime.micro_batch_per_device,
+                    cfg.runtime.seq_len,
                 )
 
-                batch = jax.device_put(
-                    batch,
-                    self.input_sharding,
-                )
+                batch = np.swapaxes(batch, 0, 1)
 
-                # --------------------------------------------
-                # TRUE synchronous timing
-                # --------------------------------------------
-
-                step_start = (
-                    time.perf_counter()
-                )
-
-                (
+                self.state, metrics = self.train_step(
                     self.state,
+                    jnp.asarray(batch),
+                )
+
+                metrics = jax.tree_util.tree_map(
+                    lambda x: x.block_until_ready(),
                     metrics,
-                ) = (
-                    self.compiled_train_step(
-                        self.state,
-                        batch,
-                    )
                 )
 
-                # --------------------------------------------
-                # FORCE synchronization
-                # --------------------------------------------
+                self.state.step.block_until_ready()
 
-                metrics = (
-                    jax.tree_util.tree_map(
-                        lambda x:
-                        x.block_until_ready(),
-                        metrics,
-                    )
+                step_time = time.perf_counter() - step_start
+
+                metrics_host = jax.tree_util.tree_map(
+                    lambda x: float(jax.device_get(x[0])),
+                    metrics,
                 )
 
-                (
-                    self.state.step
-                    .block_until_ready()
-                )
+                state_host = _unreplicate(self.state)
+                current_step = int(state_host.step)
+                tokens_seen = int(state_host.tokens_processed)
 
-                step_time = (
-                    time.perf_counter()
-                    - step_start
-                )
-
-                # --------------------------------------------
-                # Refresh host state
-                # --------------------------------------------
-
-                current_step = int(
-                    jax.device_get(
-                        self.state.step
-                    )
-                )
-
-                tokens_seen = int(
-                    jax.device_get(
-                        self.state
-                        .tokens_processed
-                    )
-                )
-
-                host_step = current_step
-
-                # --------------------------------------------
-                # Materialize metrics
-                # --------------------------------------------
-
-                metrics = (
-                    jax.tree_util.tree_map(
-                        lambda x:
-                        float(
-                            jax.device_get(x)
-                        ),
-                        metrics,
-                    )
-                )
-
-                lr = _scalar(
-                    self.schedule(
-                        current_step
-                    )
-                )
-
-                grad_norm = (
-                    metrics.get(
-                        "grad_norm"
-                    )
-                )
-
-                # --------------------------------------------
-                # Every-step async persistence
-                # --------------------------------------------
+                lr = _scalar(self.schedule(current_step))
 
                 self.logger.log_metrics(
                     step=current_step,
-                    metrics=metrics,
+                    metrics=metrics_host,
                     lr=lr,
-                    grad_norm=grad_norm,
+                    grad_norm=metrics_host.get("grad_norm"),
                     tokens_seen=tokens_seen,
-                    tokens_in_step=(
-                        tokens_per_step
-                    ),
+                    tokens_in_step=tokens_per_step,
                     step_time=step_time,
                 )
 
-                # --------------------------------------------
-                # Console logging
-                # --------------------------------------------
-
-                if (
-                    current_step
-                    % cfg.runtime
-                    .log_interval
-                    == 0
-                ):
-
+                if current_step % cfg.runtime.log_interval == 0:
                     self.logger.log_step(
                         step=current_step,
-                        metrics=metrics,
+                        metrics=metrics_host,
                         lr=lr,
-                        grad_norm=(
-                            grad_norm
-                        ),
-                        tokens_seen=(
-                            tokens_seen
-                        ),
-                        tokens_in_step=(
-                            tokens_per_step
-                        ),
-                        step_time=(
-                            step_time
-                        ),
+                        grad_norm=metrics_host.get("grad_norm"),
+                        tokens_seen=tokens_seen,
+                        tokens_in_step=tokens_per_step,
+                        step_time=step_time,
                     )
-
-                # --------------------------------------------
-                # Checkpointing
-                # --------------------------------------------
 
                 if (
                     current_step > 0
-                    and current_step
-                    % self.checkpoint_interval
-                    == 0
+                    and current_step % self.checkpoint_interval == 0
                 ):
-
                     self.logger.flush()
 
-                    checkpoint_metadata = (
-                        build_checkpoint_metadata(
-                            config=self.config,
-                            mesh=self.mesh,
-                            step=current_step,
-                            tokens_processed=tokens_seen,
-                        )
-                    )
+                    state_to_save = _unreplicate(self.state)
 
                     self.checkpoints.save(
                         step=current_step,
-                        state=self.state,
-                        metadata=checkpoint_metadata,
+                        state=state_to_save,
                     )
 
                     print(
-                        f"[trainer] "
-                        f"checkpoint saved "
-                        f"step={current_step:,}",
+                        f"[trainer] checkpoint saved step={current_step:,}",
                         flush=True,
                     )
 
-            # ------------------------------------------------
-            # Summary
-            # ------------------------------------------------
+            print("[trainer] saving final checkpoint...", flush=True)
 
-            # ------------------------------------------------
-            # Final checkpoint
-            # ------------------------------------------------
-            
-            print(
-                "[trainer] saving final checkpoint...",
-                flush=True,
-            )
-            
             self.logger.flush()
-            
-            checkpoint_metadata = (
-                build_checkpoint_metadata(
-                    config=self.config,
-                    mesh=self.mesh,
-                    step=current_step,
-                    tokens_processed=tokens_seen,
-                )
-            )
+
+            state_to_save = _unreplicate(self.state)
+            final_step = int(state_to_save.step)
 
             self.checkpoints.save(
-                step=current_step,
-                state=self.state,
-                metadata=checkpoint_metadata,
+                step=final_step,
+                state=state_to_save,
             )
-            
+
             self.checkpoints.wait()
-            
-            print(
-                f"[trainer] final checkpoint saved "
-                f"step={current_step:,}",
-                flush=True,
-            )
-            
-            # ------------------------------------------------
-            # Summary
-            # ------------------------------------------------
-            
+
             self.logger.log_summary(
-                step=current_step,
-                tokens_processed=tokens_seen,
+                step=final_step,
+                tokens_processed=int(state_to_save.tokens_processed),
             )
 
         finally:
-
             self.logger.close()
-        
-            self.checkpoints.close()
+
+            if hasattr(self.checkpoints, "close"):
+                self.checkpoints.close()
+            else:
+                self.checkpoints.wait()
