@@ -166,7 +166,11 @@ class Trainer:
             rng_key=self.rng.key,
         )
 
-        restored = self.checkpoints.restore_latest(target_state=state)
+        restored = self.checkpoints.restore_latest(
+            target_state=state,
+            config=config,
+            num_devices=self.num_devices,
+        )
 
         if restored is not None:
             state, restored_step = restored
@@ -345,9 +349,17 @@ class Trainer:
 
                     state_to_save = _unreplicate(self.state)
 
+                    metadata = self.checkpoints.build_metadata_from_config(
+                        config=self.config,
+                        step=current_step,
+                        tokens_processed=int(state_to_save.tokens_processed),
+                        num_devices=self.num_devices,
+                    )
+
                     self.checkpoints.save(
                         step=current_step,
                         state=state_to_save,
+                        metadata=metadata,
                     )
 
                     print(
@@ -362,9 +374,17 @@ class Trainer:
             state_to_save = _unreplicate(self.state)
             final_step = int(state_to_save.step)
 
+            metadata = self.checkpoints.build_metadata_from_config(
+                config=self.config,
+                step=final_step,
+                tokens_processed=int(state_to_save.tokens_processed),
+                num_devices=self.num_devices,
+            )
+
             self.checkpoints.save(
                 step=final_step,
                 state=state_to_save,
+                metadata=metadata,
             )
 
             self.checkpoints.wait()
