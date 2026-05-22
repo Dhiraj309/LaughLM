@@ -3,15 +3,6 @@ LaughLM/model/llama/initialization.py
 
 Frontier-grade parameter initialization +
 logical partition metadata.
-
-2026 TPU/FSDP upgrades:
-────────────────────────────────────────
-1. Explicit logical partition metadata
-2. Stable FSDP parameter annotations
-3. Scan-compatible parameter axes
-4. Future tensor-parallel compatibility
-5. TPU-safe precision defaults
-6. Stable embedding sharding semantics
 """
 
 from __future__ import annotations
@@ -64,6 +55,19 @@ def get_dense_logical_axes(
     # Attention projections
     # --------------------------------------------------------
 
+    #
+    # Fused QKV projection
+    #
+    # [embed, qkv]
+    #
+
+    if name == "qkv_proj":
+        return ("embed", "qkv")
+
+    #
+    # Legacy split projections
+    #
+
     if name == "q_proj":
         return ("embed", "heads")
 
@@ -97,10 +101,14 @@ def get_dense_logical_axes(
         return ("embed", "vocab")
 
     # --------------------------------------------------------
-    # Default
+    # Generic fallback
+    #
+    # IMPORTANT:
+    # Logical axis names must be UNIQUE per tensor.
+    # Never use ("embed", "embed").
     # --------------------------------------------------------
 
-    return ("embed", "embed")
+    return ("input", "output")
 
 
 # ============================================================
@@ -190,14 +198,6 @@ def create_dense(
 ):
     """
     Frontier-grade Dense factory.
-
-    Features:
-    ─────────────────────────────────────
-    • logical parameter partitioning
-    • FSDP-safe metadata
-    • tensor-parallel-ready axes
-    • bf16 compute
-    • fp32 params
     """
 
     logical_axes = (

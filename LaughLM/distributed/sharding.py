@@ -45,6 +45,7 @@ def _get_axis_names(config):
             "embed": rules.embed,
             "heads": rules.heads,
             "kv_heads": rules.kv_heads,
+            "qkv": None,
             "mlp": rules.mlp,
             "vocab": rules.vocab,
             "sequence": rules.sequence,
@@ -54,15 +55,13 @@ def _get_axis_names(config):
     #
     # Standalone LlamaConfig path
     #
-    # Current TPU runtime:
-    # 1D batch/data parallel only
-    #
 
     return {
         "batch": "batch",
         "embed": None,
         "heads": None,
         "kv_heads": None,
+        "qkv": None,
         "mlp": None,
         "vocab": None,
         "sequence": None,
@@ -87,6 +86,7 @@ def get_logical_axis_rules(config):
         ("embed", axes["embed"]),
         ("heads", axes["heads"]),
         ("kv_heads", axes["kv_heads"]),
+        ("qkv", axes["qkv"]),
         ("mlp", axes["mlp"]),
         ("vocab", axes["vocab"]),
         ("sequence", axes["sequence"]),
