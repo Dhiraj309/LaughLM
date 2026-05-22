@@ -8,7 +8,8 @@ matmul-softmax-matmul.
 
 Current backend policy:
 - standard / xla: official XLA dot_product_attention
-- flash / cudnn: try cuDNN dot_product_attention on GPU, fallback to XLA
+- flash / cudnn: try cuDNN dot_product_attention on GPU only when
+  shape is likely supported, otherwise use XLA
 - decode: XLA dot_product_attention
 - no Splash/Pallas here yet
 """
@@ -47,16 +48,28 @@ def _log_attention_backend(name: str):
         print(f"[attention] using {name}", flush=True)
 
 
-def _attention_impl_from_config(config: LlamaConfig, mode: str) -> str | None:
+def _gpu_backend_available() -> bool:
+    return jax.default_backend() == "gpu"
+
+
+def _attention_impl_from_config(
+    config: LlamaConfig,
+    mode: str,
+    q_len: int,
+    kv_len: int,
+) -> str | None:
     """
     Returns requested JAX dot_product_attention implementation.
 
     None means JAX default/XLA path.
+
+    cuDNN SDPA is intentionally guarded because shifted LM training
+    commonly produces lengths like 1023 from seq_len=1024, and cuDNN
+    frequently rejects those sequence lengths on T4.
     """
 
     impl = getattr(config, "attention_impl", None)
 
-    # Current LlamaConfig may not carry attention_impl yet.
     if impl is None:
         return None
 
@@ -67,6 +80,18 @@ def _attention_impl_from_config(config: LlamaConfig, mode: str) -> str | None:
         return None
 
     if impl in ("flash", "cudnn"):
+        # T4 / older GPUs often reject cuDNN SDPA even with aligned shapes.
+        # Keep PMAP production stable; use XLA on GPU for now.
+        return None
+
+        if q_len != kv_len:
+            return None
+
+        # Shifted LM training gives seq_len - 1.
+        # Example: 1024 -> 1023, which cuDNN SDPA rejected on T4.
+        if q_len % 64 != 0:
+            return None
+
         return "cudnn"
 
     return None
@@ -91,14 +116,13 @@ def _dot_product_attention(
     Q heads are divisible by KV heads, so we do not repeat KV heads.
     """
 
-    # Convert existing mask layout [1, 1, Tq, Tk]
-    # to bias layout broadcastable against [B, H, Tq, Tk]
-    # used internally by SDPA implementations.
     bias = attention_mask
 
     requested_impl = _attention_impl_from_config(
-        config,
-        mode,
+        config=config,
+        mode=mode,
+        q_len=query_states.shape[1],
+        kv_len=key_states.shape[1],
     )
 
     if requested_impl == "cudnn":
