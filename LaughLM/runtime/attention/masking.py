@@ -4,7 +4,6 @@ LaughLM/runtime/attention/masking.py
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 from .types import (
@@ -15,136 +14,126 @@ from .types import (
 Array = jnp.ndarray
 
 
-def causal_mask(
+def build_causal_mask(
     q_len: int,
     kv_len: int,
-    offset: int = 0,
 ) -> Array:
-    """
-    Standard causal mask.
 
-    Shape:
-        [q_len, kv_len]
-    """
+    q_idx = jnp.arange(q_len)[:, None]
+    kv_idx = jnp.arange(kv_len)[None, :]
 
-    q_idx = jax.lax.broadcasted_iota(
-        jnp.int32,
-        (q_len, kv_len),
-        0,
-    )
+    offset = kv_len - q_len
 
-    kv_idx = jax.lax.broadcasted_iota(
-        jnp.int32,
-        (q_len, kv_len),
-        1,
-    )
-
-    return kv_idx <= (q_idx + offset)
+    return q_idx + offset >= kv_idx
 
 
-def sliding_window_mask(
+def build_full_mask(
     q_len: int,
     kv_len: int,
-    window_size: int,
-    offset: int = 0,
 ) -> Array:
-    """
-    Local sliding window causal mask.
-    """
 
-    q_idx = (
-        jax.lax.broadcasted_iota(
-            jnp.int32,
-            (q_len, kv_len),
-            0,
-        )
-        + offset
-    )
-
-    kv_idx = jax.lax.broadcasted_iota(
-        jnp.int32,
+    return jnp.ones(
         (q_len, kv_len),
-        1,
+        dtype=jnp.bool_,
     )
 
-    lower = kv_idx > (q_idx - window_size)
-    upper = kv_idx <= q_idx
 
-    return lower & upper
+def build_sliding_window_mask(
+    q_len: int,
+    kv_len: int,
+    window: int,
+) -> Array:
+
+    q_idx = jnp.arange(q_len)[:, None]
+    kv_idx = jnp.arange(kv_len)[None, :]
+
+    offset = kv_len - q_len
+
+    causal = (
+        q_idx + offset >= kv_idx
+    )
+
+    local = (
+        q_idx + offset - kv_idx
+    ) < window
+
+    return causal & local
 
 
-def chunk_mask(
+def build_chunk_mask(
     q_len: int,
     kv_len: int,
     chunk_size: int,
-    offset: int = 0,
 ) -> Array:
-    """
-    Chunked causal attention.
 
-    Tokens only attend within chunk.
-    """
+    q_idx = jnp.arange(q_len)[:, None]
+    kv_idx = jnp.arange(kv_len)[None, :]
 
-    q_idx = (
-        jax.lax.broadcasted_iota(
-            jnp.int32,
-            (q_len, kv_len),
-            0,
-        )
-        + offset
-    )
+    offset = kv_len - q_len
 
-    kv_idx = jax.lax.broadcasted_iota(
-        jnp.int32,
-        (q_len, kv_len),
-        1,
-    )
+    q_abs = q_idx + offset
+
+    causal = q_abs >= kv_idx
 
     same_chunk = (
-        q_idx // chunk_size
+        q_abs // chunk_size
         ==
         kv_idx // chunk_size
     )
 
-    causal = kv_idx <= q_idx
-
-    return same_chunk & causal
+    return causal & same_chunk
 
 
 def build_mask(
     q_len: int,
     kv_len: int,
     spec: AttentionMaskSpec,
-    offset: int = 0,
 ) -> Array:
 
-    if spec.mask_type == AttentionMaskType.FULL:
-        return jnp.ones(
-            (q_len, kv_len),
-            dtype=jnp.bool_,
-        )
-
     if spec.mask_type == AttentionMaskType.CAUSAL:
-        return causal_mask(
+
+        return build_causal_mask(
             q_len,
             kv_len,
-            offset,
         )
 
-    if spec.mask_type == AttentionMaskType.SLIDING:
-        return sliding_window_mask(
+    if spec.mask_type == AttentionMaskType.FULL:
+
+        return build_full_mask(
+            q_len,
+            kv_len,
+        )
+
+    if (
+        spec.mask_type
+        ==
+        AttentionMaskType.SLIDING_WINDOW
+    ):
+
+        if spec.sliding_window is None:
+            raise ValueError(
+                "sliding_window missing"
+            )
+
+        return build_sliding_window_mask(
             q_len,
             kv_len,
             spec.sliding_window,
-            offset,
         )
 
     if spec.mask_type == AttentionMaskType.CHUNK:
-        return chunk_mask(
+
+        if spec.chunk_size is None:
+            raise ValueError(
+                "chunk_size missing"
+            )
+
+        return build_chunk_mask(
             q_len,
             kv_len,
             spec.chunk_size,
-            offset,
         )
 
-    raise ValueError(spec.mask_type)
+    raise ValueError(
+        f"Unknown mask type: {spec.mask_type}"
+    )

@@ -4,32 +4,74 @@ LaughLM/runtime/attention/backend.py
 
 from __future__ import annotations
 
-from enum import Enum
+import jax.numpy as jnp
 
-from .flash import flash_attention
-from .reference import reference_attention
+from .types import (
+    AttentionBackend,
+    AttentionMaskSpec,
+)
 
+from .reference import (
+    reference_attention,
+)
 
-class AttentionBackend(str, Enum):
-    REFERENCE = "reference"
-    FLASH = "flash"
+from .decode import (
+    decode_attention,
+)
+
+from .online_softmax import (
+    online_attention,
+)
+
+Array = jnp.ndarray
 
 
 def apply_attention(
-    query,
-    key,
-    value,
-    mask_spec,
+    query: Array,
+    key: Array,
+    value: Array,
+    mask_spec: AttentionMaskSpec,
+    backend: AttentionBackend,
     *,
-    backend: AttentionBackend = AttentionBackend.FLASH,
     block_q: int = 128,
     block_kv: int = 128,
-):
+) -> Array:
     """
     Unified attention runtime dispatcher.
+
+    query:
+        [B, T, Hq, D]
+
+    key/value:
+        [B, S, Hkv, D]
     """
 
+    # ======================================================
+    # Decode specialization
+    # ======================================================
+
+    if query.shape[1] == 1:
+
+        if backend in (
+            AttentionBackend.DECODE,
+            AttentionBackend.FLASH,
+            AttentionBackend.ONLINE,
+        ):
+
+            return decode_attention(
+                query,
+                key,
+                value,
+                mask_spec,
+                block_kv=block_kv,
+            )
+
+    # ======================================================
+    # Reference
+    # ======================================================
+
     if backend == AttentionBackend.REFERENCE:
+
         return reference_attention(
             query,
             key,
@@ -37,8 +79,28 @@ def apply_attention(
             mask_spec,
         )
 
+    # ======================================================
+    # Online softmax
+    # ======================================================
+
+    if backend == AttentionBackend.ONLINE:
+
+        return online_attention(
+            query,
+            key,
+            value,
+            mask_spec,
+            block_q=block_q,
+            block_kv=block_kv,
+        )
+
+    # ======================================================
+    # Flash
+    # ======================================================
+
     if backend == AttentionBackend.FLASH:
-        return flash_attention(
+
+        return online_attention(
             query,
             key,
             value,

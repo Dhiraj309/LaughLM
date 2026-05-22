@@ -8,30 +8,40 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-import jax.numpy as jnp
+DEFAULT_MASK_VALUE = -1e30
 
 
-Array = jnp.ndarray
+class AttentionBackend(str, Enum):
 
+    REFERENCE = "reference"
 
-class AttentionMode(str, Enum):
-    TRAIN = "train"
-    PREFILL = "prefill"
+    FLASH = "flash"
+
+    ONLINE = "online"
+
     DECODE = "decode"
+
+    RAGGED = "ragged"
+
+    PAGED = "paged"
 
 
 class AttentionMaskType(str, Enum):
+
     CAUSAL = "causal"
-    SLIDING = "sliding"
-    CHUNK = "chunk"
+
     FULL = "full"
+
+    SLIDING_WINDOW = "sliding_window"
+
+    CHUNK = "chunk"
 
 
 @dataclass
 class AttentionMaskSpec:
+
     mask_type: AttentionMaskType
+
     sliding_window: Optional[int] = None
+
     chunk_size: Optional[int] = None
-
-
-DEFAULT_MASK_VALUE = -1e30
