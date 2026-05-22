@@ -53,14 +53,56 @@ class Trainer:
         self.num_devices = jax.local_device_count()
         self.devices = jax.local_devices()
 
-        print(f"[trainer] using {self.num_devices} local devices with PMAP", flush=True)
+        print(
+            f"[trainer] using {self.num_devices} local devices with PMAP",
+            flush=True,
+        )
 
-        if config.parallelism.data_parallel != self.num_devices:
-            print(
-                "[trainer] warning: config.parallelism.data_parallel="
-                f"{config.parallelism.data_parallel}, but local_device_count="
-                f"{self.num_devices}. PMAP will use local_device_count.",
-                flush=True,
+        # ============================================================
+        # PMAP runtime validation
+        # ============================================================
+
+        if self.num_devices <= 0:
+            raise RuntimeError(
+                "No local JAX devices found."
+            )
+
+        if config.runtime.micro_batch_per_device <= 0:
+            raise ValueError(
+                "runtime.micro_batch_per_device must be > 0"
+            )
+
+        if config.runtime.gradient_accumulation <= 0:
+            raise ValueError(
+                "runtime.gradient_accumulation must be > 0"
+            )
+
+        if config.runtime.seq_len <= 0:
+            raise ValueError(
+                "runtime.seq_len must be > 0"
+            )
+
+        if (
+            config.runtime.seq_len
+            > config.model.max_seq_len
+        ):
+            raise ValueError(
+                f"runtime.seq_len={config.runtime.seq_len} "
+                f"exceeds "
+                f"model.max_seq_len={config.model.max_seq_len}"
+            )
+
+        if (
+            config.parallelism.data_parallel
+            != self.num_devices
+        ):
+            raise ValueError(
+                "PMAP requires "
+                "parallelism.data_parallel "
+                "to exactly match "
+                "jax.local_device_count().\n"
+                f"Got config={config.parallelism.data_parallel}, "
+                f"devices={self.num_devices}"
             )
 
         self.rng = create_rng(seed=42)
