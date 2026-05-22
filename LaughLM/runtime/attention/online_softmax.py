@@ -1,13 +1,29 @@
 """
 LaughLM/runtime/attention/online_softmax.py
 
-Streaming FlashAttention-style online softmax.
+WARNING:
+    THIS IS A RESEARCH / DEBUG IMPLEMENTATION.
 
-Memory efficient:
-- no full attention matrix
-- no full mask materialization
-- block streaming KV
-- GQA-native
+    This file implements online softmax attention
+    directly in JAX primitives.
+
+    It is NOT production efficient on TPU.
+
+    Large sequence training should use:
+        jax.nn.dot_product_attention()
+
+    which dispatches to fused kernels.
+
+WHY THIS EXISTS:
+    - correctness testing
+    - experimentation
+    - algorithm research
+    - reference implementation
+
+NOT FOR:
+    - production TPU training
+    - large sequence compile
+    - frontier scaling
 """
 
 from __future__ import annotations
@@ -40,11 +56,7 @@ def online_attention(
     """
     Streaming online softmax attention.
 
-    query:
-        [B, T, Hq, D]
-
-    key/value:
-        [B, S, Hkv, D]
+    RESEARCH IMPLEMENTATION ONLY.
     """
 
     B, T, Hq, D = query.shape
@@ -58,14 +70,6 @@ def online_attention(
 
     query_dtype = query.dtype
 
-    # ======================================================
-    # Reshape query for GQA
-    #
-    # [B, T, Hq, D]
-    # ->
-    # [B, T, Hkv, G, D]
-    # ======================================================
-
     query = query.reshape(
         B,
         T,
@@ -73,14 +77,6 @@ def online_attention(
         groups,
         D,
     )
-
-    # ======================================================
-    # Output buffers
-    #
-    # Canonical online layout:
-    #
-    # [B, T, Hkv, G, ...]
-    # ======================================================
 
     output = jnp.zeros(
         (
@@ -116,10 +112,6 @@ def online_attention(
         dtype=jnp.float32,
     )
 
-    # ======================================================
-    # KV streaming loop
-    # ======================================================
-
     num_kv_blocks = math.ceil(
         S / block_kv
     )
@@ -139,10 +131,6 @@ def online_attention(
 
         kv_len = kv_end - kv_start
 
-        # ==================================================
-        # KV block slices
-        # ==================================================
-
         k_block = key[
             :,
             kv_start:kv_end,
@@ -157,19 +145,6 @@ def online_attention(
             :,
         ]
 
-        # ==================================================
-        # Block logits
-        #
-        # query:
-        #   [B, T, Hkv, G, D]
-        #
-        # key:
-        #   [B, S, Hkv, D]
-        #
-        # logits:
-        #   [B, T, Hkv, G, S]
-        # ==================================================
-
         logits = jnp.einsum(
             "bthgd,bshd->bthgs",
             query.astype(jnp.float32),
@@ -178,13 +153,6 @@ def online_attention(
         )
 
         logits = logits * scale
-
-        # ==================================================
-        # Block-local mask
-        #
-        # mask:
-        #   [T, S]
-        # ==================================================
 
         mask = make_block_mask(
             q_start=0,
@@ -205,10 +173,6 @@ def online_attention(
             None,
             :
         ]
-
-        # ==================================================
-        # Online softmax update
-        # ==================================================
 
         block_m = jnp.max(
             logits,
@@ -240,10 +204,6 @@ def online_attention(
             + block_l
         )
 
-        # ==================================================
-        # Rescale existing output
-        # ==================================================
-
         old_scale = (
             exp_old * l_i
         ) / jnp.maximum(
@@ -255,19 +215,6 @@ def online_attention(
             output
             * old_scale
         )
-
-        # ==================================================
-        # Current block contribution
-        #
-        # exp_block:
-        #   [B, T, Hkv, G, S]
-        #
-        # value:
-        #   [B, S, Hkv, D]
-        #
-        # output:
-        #   [B, T, Hkv, G, D]
-        # ==================================================
 
         block_out = jnp.einsum(
             "bthgs,bshd->bthgd",
@@ -288,14 +235,6 @@ def online_attention(
 
         m_i = new_m
         l_i = new_l
-
-    # ======================================================
-    # Restore head layout
-    #
-    # [B, T, Hkv, G, D]
-    # ->
-    # [B, T, Hq, D]
-    # ======================================================
 
     output = output.reshape(
         B,
