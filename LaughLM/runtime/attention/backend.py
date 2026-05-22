@@ -1,5 +1,22 @@
 """
 LaughLM/runtime/attention/backend.py
+
+Unified attention runtime dispatcher.
+
+Backend semantics
+─────────────────────────────────────
+
+REFERENCE:
+    naive correctness implementation
+
+ONLINE:
+    research/debug online softmax kernel
+
+FLASH:
+    production TPU SplashAttention backend
+
+DECODE:
+    specialized single-token decode path
 """
 
 from __future__ import annotations
@@ -19,8 +36,12 @@ from .decode import (
     decode_attention,
 )
 
-from .flash import (
-    flash_attention,
+from .online_softmax import (
+    online_attention,
+)
+
+from .splash import (
+    splash_attention,
 )
 
 Array = jnp.ndarray
@@ -38,11 +59,36 @@ def apply_attention(
 ) -> Array:
     """
     Unified attention runtime dispatcher.
+
+    Attention paths
+    ─────────────────────────────────
+
+    REFERENCE:
+        correctness validation
+
+    ONLINE:
+        research/debug implementation
+
+    FLASH:
+        production TPU SplashAttention
+
+    DECODE:
+        specialized autoregressive decode
     """
 
     # ======================================================
     # Decode specialization
     # ======================================================
+
+    #
+    # IMPORTANT:
+    #
+    # Single-token decode should NEVER use
+    # long-sequence training kernels.
+    #
+    # SplashAttention block tiling becomes
+    # pathological for T=1.
+    #
 
     if query.shape[1] == 1:
 
@@ -61,7 +107,7 @@ def apply_attention(
             )
 
     # ======================================================
-    # Reference
+    # Reference backend
     # ======================================================
 
     if backend == AttentionBackend.REFERENCE:
@@ -74,21 +120,31 @@ def apply_attention(
         )
 
     # ======================================================
-    # ONLINE / FLASH
+    # Research backend
     # ======================================================
 
-    if backend in (
-        AttentionBackend.ONLINE,
-        AttentionBackend.FLASH,
-    ):
+    if backend == AttentionBackend.ONLINE:
 
-        return flash_attention(
+        return online_attention(
             query,
             key,
             value,
             mask_spec,
             block_q=block_q,
             block_kv=block_kv,
+        )
+
+    # ======================================================
+    # Production fused TPU backend
+    # ======================================================
+
+    if backend == AttentionBackend.FLASH:
+
+        return splash_attention(
+            query,
+            key,
+            value,
+            mask_spec,
         )
 
     raise ValueError(

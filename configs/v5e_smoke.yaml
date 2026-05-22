@@ -13,10 +13,10 @@ model:
 
   d_model: 768
 
-  num_layers: 12
+  num_layers: 16
 
-  num_heads: 12
-  num_kv_heads: 4
+  num_heads: 6
+  num_kv_heads: 2
 
   intermediate_size: 3072
 
@@ -125,7 +125,7 @@ runtime:
   # Aggressive but safe v5e-1 utilization
   # ==========================================================
 
-  micro_batch_per_device: 4
+  micro_batch_per_device: 8
 
   gradient_accumulation: 1
 
