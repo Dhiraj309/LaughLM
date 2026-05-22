@@ -120,7 +120,7 @@ class Trainer:
             params=params,
             opt_state=opt_state,
             step=jnp.array(0, dtype=jnp.int32),
-            tokens_processed=jnp.array(0, dtype=jnp.int64),
+            tokens_processed=jnp.array(0, dtype=jnp.int32),
             rng_key=self.rng.key,
         )
 
