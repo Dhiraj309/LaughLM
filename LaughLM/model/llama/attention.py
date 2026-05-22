@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-import jax
 import jax.numpy as jnp
 
 from flax import linen as nn
@@ -20,8 +19,6 @@ from LaughLM.model.llama.config import (
 from LaughLM.model.llama.initialization import (
     create_dense,
     constrain_hidden_states,
-    constrain_attention_q,
-    constrain_attention_kv,
 )
 
 from LaughLM.model.llama.rope import (
@@ -38,57 +35,15 @@ from LaughLM.distributed.sharding import (
     constrain_kv_cache,
 )
 
+from LaughLM.runtime.attention.backend import (
+    apply_attention,
+    AttentionBackend,
+)
 
-# ============================================================
-# GQA helper
-# ============================================================
-
-def repeat_kv(
-    hidden_states: jnp.ndarray,
-    n_rep: int,
-) -> jnp.ndarray:
-    """
-    Expand KV heads for GQA.
-
-    Input:
-        [B, KVH, T, Dh]
-
-    Output:
-        [B, QH, T, Dh]
-    """
-
-    if n_rep == 1:
-        return hidden_states
-
-    b, kvh, t, dh = (
-        hidden_states.shape
-    )
-
-    hidden_states = hidden_states[
-        :,
-        :,
-        None,
-        :,
-        :,
-    ]
-
-    hidden_states = jnp.broadcast_to(
-        hidden_states,
-        (
-            b,
-            kvh,
-            n_rep,
-            t,
-            dh,
-        ),
-    )
-
-    return hidden_states.reshape(
-        b,
-        kvh * n_rep,
-        t,
-        dh,
-    )
+from LaughLM.runtime.attention.types import (
+    AttentionMaskSpec,
+    AttentionMaskType,
+)
 
 
 # ============================================================
@@ -129,10 +84,6 @@ class LlamaAttention(nn.Module):
         )
 
         head_dim = config.head_dim
-
-        num_kv_groups = (
-            num_heads // num_kv_heads
-        )
 
         # ====================================================
         # Projections
@@ -184,6 +135,14 @@ class LlamaAttention(nn.Module):
 
         # ====================================================
         # Reshape
+        #
+        # Runtime attention canonical layout:
+        #
+        # query:
+        #   [B, T, Hq, D]
+        #
+        # key/value:
+        #   [B, S, Hkv, D]
         # ====================================================
 
         query_states = query_states.reshape(
@@ -267,15 +226,6 @@ class LlamaAttention(nn.Module):
                 .cache_position
             )
 
-            # ------------------------------------------------
-            # IMPORTANT
-            #
-            # Slice BEFORE transpose.
-            #
-            # key/value layout currently:
-            #   [B, S, KVH, Dh]
-            # ------------------------------------------------
-
             key_states = key_states[
                 :,
                 :kv_length,
@@ -291,123 +241,38 @@ class LlamaAttention(nn.Module):
             ]
 
         # ====================================================
-        # Attention transpose
+        # Runtime mask spec
         # ====================================================
 
-        query_states = jnp.transpose(
+        mask_type = AttentionMaskType(
+            config.attention_mask_type
+        )
+
+        mask_spec = AttentionMaskSpec(
+            mask_type=mask_type,
+            sliding_window=config.sliding_window,
+            chunk_size=config.chunk_size,
+        )
+
+        # ====================================================
+        # Runtime attention
+        # ====================================================
+
+        attn_output = apply_attention(
             query_states,
-            (0, 2, 1, 3),
-        )
-
-        key_states = jnp.transpose(
             key_states,
-            (0, 2, 1, 3),
-        )
-
-        value_states = jnp.transpose(
             value_states,
-            (0, 2, 1, 3),
-        )
-
-        # ====================================================
-        # Logical constraints
-        # ====================================================
-
-        query_states = constrain_attention_q(
-            query_states
-        )
-
-        key_states = constrain_attention_kv(
-            key_states
-        )
-
-        value_states = constrain_attention_kv(
-            value_states
-        )
-
-        # ====================================================
-        # GQA expansion
-        # ====================================================
-
-        key_states = repeat_kv(
-            key_states,
-            num_kv_groups,
-        )
-
-        value_states = repeat_kv(
-            value_states,
-            num_kv_groups,
-        )
-
-        # ====================================================
-        # Attention logits
-        # ====================================================
-
-        attn_weights = jnp.matmul(
-            query_states,
-            jnp.swapaxes(
-                key_states,
-                -1,
-                -2,
+            mask_spec,
+            backend=AttentionBackend(
+                config.attention_backend
             ),
-            preferred_element_type=jnp.float32,
-        )
-
-        attn_weights = (
-            attn_weights
-            * (head_dim ** -0.5)
-        )
-
-        # ====================================================
-        # Mask
-        # ====================================================
-
-        if attention_mask is not None:
-
-            attn_weights = (
-                attn_weights
-                + attention_mask
-            )
-
-        # ====================================================
-        # Stable fp32 softmax
-        # ====================================================
-
-        attn_weights = (
-            attn_weights.astype(
-                jnp.float32
-            )
-        )
-
-        attn_weights = jax.nn.softmax(
-            attn_weights,
-            axis=-1,
-        )
-
-        attn_weights = (
-            attn_weights.astype(
-                query_states.dtype
-            )
-        )
-
-        # ====================================================
-        # Attention output
-        # ====================================================
-
-        attn_output = jnp.matmul(
-            attn_weights,
-            value_states,
-            preferred_element_type=jnp.float32,
+            block_q=config.attention_block_q,
+            block_kv=config.attention_block_kv,
         )
 
         # ====================================================
         # Restore hidden-state layout
         # ====================================================
-
-        attn_output = jnp.transpose(
-            attn_output,
-            (0, 2, 1, 3),
-        )
 
         attn_output = attn_output.reshape(
             B,
