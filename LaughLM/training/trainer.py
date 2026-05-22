@@ -127,6 +127,10 @@ from LaughLM.distributed.sharding import (
     create_input_sharding,
 )
 
+from LaughLM.utils.memory import (
+    print_memory_stats,
+)
+
 
 # ============================================================
 # Utils
@@ -789,6 +793,10 @@ class Trainer:
             flush=True,
         )
 
+
+        print_memory_stats(
+            prefix="[post-compile] ",
+        )
         # --------------------------------------------------
         # Logger
         # --------------------------------------------------
@@ -1075,6 +1083,9 @@ class Trainer:
                     == 0
                 ):
 
+                    print_memory_stats(
+                        prefix="[train] ",
+                    )
                     self.logger.log_step(
                         step=current_step,
                         metrics=metrics,
