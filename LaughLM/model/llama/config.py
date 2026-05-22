@@ -49,7 +49,11 @@ class LlamaConfig:
 
     attention_dropout: float = 0.0
 
-    attention_backend: str = "reference"
+    # =========================================================
+    # Runtime attention
+    # =========================================================
+
+    attention_backend: str = "flash"
 
     attention_block_q: int = 128
 
@@ -122,40 +126,54 @@ class LlamaConfig:
     def __post_init__(self):
 
         if self.num_key_value_heads is None:
+
             self.num_key_value_heads = (
                 self.num_attention_heads
             )
 
         if self.hidden_size <= 0:
+
             raise ValueError(
                 "hidden_size must be > 0"
             )
 
+        if self.intermediate_size <= 0:
+
+            raise ValueError(
+                "intermediate_size must be > 0"
+            )
+
         if self.num_attention_heads <= 0:
+
             raise ValueError(
                 "num_attention_heads must be > 0"
             )
 
         if self.num_key_value_heads <= 0:
+
             raise ValueError(
                 "num_key_value_heads must be > 0"
             )
 
         if (
             self.hidden_size
-            % self.num_attention_heads
+            %
+            self.num_attention_heads
             != 0
         ):
+
             raise ValueError(
-                "hidden_size must be divisible by "
-                "num_attention_heads"
+                "hidden_size must be divisible "
+                "by num_attention_heads"
             )
 
         if (
             self.num_attention_heads
-            % self.num_key_value_heads
+            %
+            self.num_key_value_heads
             != 0
         ):
+
             raise ValueError(
                 "num_attention_heads must be divisible "
                 "by num_key_value_heads"
@@ -165,7 +183,8 @@ class LlamaConfig:
 
             self.head_dim = (
                 self.hidden_size
-                // self.num_attention_heads
+                //
+                self.num_attention_heads
             )
 
         expected_hidden = (
@@ -177,18 +196,15 @@ class LlamaConfig:
 
             raise ValueError(
                 f"Inconsistent dimensions:\n"
-                f"  hidden_size={self.hidden_size}\n"
-                f"  num_attention_heads="
+                f"hidden_size={self.hidden_size}\n"
+                f"num_attention_heads="
                 f"{self.num_attention_heads}\n"
-                f"  head_dim={self.head_dim}"
-            )
-
-        if self.intermediate_size <= 0:
-            raise ValueError(
-                "intermediate_size must be > 0"
+                f"head_dim={self.head_dim}"
             )
 
         if self.max_position_embeddings <= 0:
+
             raise ValueError(
-                "max_position_embeddings must be > 0"
+                "max_position_embeddings "
+                "must be > 0"
             )

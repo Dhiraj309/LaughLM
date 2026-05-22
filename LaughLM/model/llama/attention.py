@@ -37,18 +37,14 @@ from LaughLM.distributed.sharding import (
 
 from LaughLM.runtime.attention.backend import (
     apply_attention,
-    AttentionBackend,
 )
 
 from LaughLM.runtime.attention.types import (
+    AttentionBackend,
     AttentionMaskSpec,
     AttentionMaskType,
 )
 
-
-# ============================================================
-# Attention
-# ============================================================
 
 class LlamaAttention(nn.Module):
 
@@ -59,7 +55,6 @@ class LlamaAttention(nn.Module):
         self,
         hidden_states: jnp.ndarray,
         positions: jnp.ndarray,
-        attention_mask: Optional[jnp.ndarray] = None,
         kv_cache: Optional[KVCache] = None,
         mode: str = "train",
     ) -> tuple[
@@ -86,7 +81,7 @@ class LlamaAttention(nn.Module):
         head_dim = config.head_dim
 
         # ====================================================
-        # Projections
+        # Projection layers
         # ====================================================
 
         q_proj = create_dense(
@@ -135,14 +130,6 @@ class LlamaAttention(nn.Module):
 
         # ====================================================
         # Reshape
-        #
-        # Runtime attention canonical layout:
-        #
-        # query:
-        #   [B, T, Hq, D]
-        #
-        # key/value:
-        #   [B, S, Hkv, D]
         # ====================================================
 
         query_states = query_states.reshape(
@@ -190,9 +177,7 @@ class LlamaAttention(nn.Module):
         )
 
         # ====================================================
-        # KV cache layout constraints
-        #
-        # [B, S, KVH, Dh]
+        # KV cache constraints
         # ====================================================
 
         key_states = constrain_kv_cache(
@@ -241,17 +226,19 @@ class LlamaAttention(nn.Module):
             ]
 
         # ====================================================
-        # Runtime mask spec
+        # Runtime attention spec
         # ====================================================
 
-        mask_type = AttentionMaskType(
-            config.attention_mask_type
-        )
-
         mask_spec = AttentionMaskSpec(
-            mask_type=mask_type,
+            mask_type=AttentionMaskType(
+                config.attention_mask_type
+            ),
             sliding_window=config.sliding_window,
             chunk_size=config.chunk_size,
+        )
+
+        backend = AttentionBackend(
+            config.attention_backend
         )
 
         # ====================================================
@@ -262,16 +249,14 @@ class LlamaAttention(nn.Module):
             query_states,
             key_states,
             value_states,
-            mask_spec,
-            backend=AttentionBackend(
-                config.attention_backend
-            ),
+            mask_spec=mask_spec,
+            backend=backend,
             block_q=config.attention_block_q,
             block_kv=config.attention_block_kv,
         )
 
         # ====================================================
-        # Restore hidden-state layout
+        # Restore hidden layout
         # ====================================================
 
         attn_output = attn_output.reshape(
