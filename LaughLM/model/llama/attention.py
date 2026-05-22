@@ -55,6 +55,7 @@ class LlamaAttention(nn.Module):
         self,
         hidden_states: jnp.ndarray,
         positions: jnp.ndarray,
+        attention_mask: Optional[jnp.ndarray] = None,
         kv_cache: Optional[KVCache] = None,
         mode: str = "train",
     ) -> tuple[
@@ -226,7 +227,19 @@ class LlamaAttention(nn.Module):
             ]
 
         # ====================================================
-        # Runtime attention spec
+        # IMPORTANT
+        #
+        # attention_mask is intentionally ignored.
+        #
+        # Runtime masking is generated dynamically
+        # via AttentionMaskSpec.
+        #
+        # This keeps:
+        # - flash attention
+        # - online softmax
+        # - decode specialization
+        #
+        # backend-native.
         # ====================================================
 
         mask_spec = AttentionMaskSpec(

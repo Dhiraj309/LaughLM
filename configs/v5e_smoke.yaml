@@ -1,26 +1,26 @@
 
 # ============================================================
-# LaughLM TPU v5e-8 FULL-CORE Smoke Test
+# LaughLM TPU v5e High-Utilization Runtime Validation
 # ============================================================
 
 model:
 
   vocab_size: 49152
 
-  #
-  # ~282M params
-  #
+  # ==========================================================
+  # REAL medium-scale runtime validation
+  # ==========================================================
 
   d_model: 768
 
   num_layers: 12
 
   num_heads: 12
-  num_kv_heads: 12
+  num_kv_heads: 4
 
   intermediate_size: 3072
 
-  max_seq_len: 1024
+  max_seq_len: 2048
 
 
 # ============================================================
@@ -32,10 +32,16 @@ architecture:
   positional: rope
 
   normalization: rms_norm
+
   norm_placement: pre
 
   attention_variant: gqa
-  attention_impl: standard
+
+  # ==========================================================
+  # CUSTOM ONLINE ATTENTION
+  # ==========================================================
+
+  attention_impl: flash
 
   ffn_type: swiglu
 
@@ -61,7 +67,9 @@ initialization:
   std: 0.02
 
   embedding_std: 0.02
+
   attention_std: 0.02
+
   mlp_std: 0.02
 
   residual_scale: 1.0
@@ -78,6 +86,7 @@ optimizer:
   learning_rate: 3.0e-4
 
   beta1: 0.9
+
   beta2: 0.95
 
   eps: 1.0e-8
@@ -106,44 +115,35 @@ scheduler:
 
 runtime:
 
-  #
-  # Sequence
-  #
+  # ==========================================================
+  # REAL sequence length
+  # ==========================================================
 
-  seq_len: 1024
+  seq_len: 2048
 
-  #
-  # IMPORTANT
-  #
-  # v5e-8:
-  # 8 TPU chips
-  #
-  # Global batch:
-  # 8 devices × 8 microbatch = 64
-  #
-  # Tokens/step:
-  # 64 × 1024 = 65,536
-  #
+  # ==========================================================
+  # Aggressive but safe v5e-1 utilization
+  # ==========================================================
 
-  micro_batch_per_device: 6
+  micro_batch_per_device: 4
 
   gradient_accumulation: 1
 
-  #
-  # Real smoke test
-  #
+  # ==========================================================
+  # Real runtime validation
+  # ==========================================================
 
-  total_tokens: 1_000_000
+  total_tokens: 1048576
 
-  eval_interval: 50
+  eval_interval: 25
 
-  log_interval: 10
+  log_interval: 5
 
   checkpoint_interval: 100
 
   checkpoint_max_to_keep: 2
 
-  checkpoint_dir: checkpoints
+  checkpoint_dir: checkpoints/v5e_smoke
 
 
 # ============================================================
@@ -158,7 +158,7 @@ data:
       weight: 1.0
       split: train
 
-  max_seq_len: 1024
+  max_seq_len: 2048
 
   packing: true
 
@@ -185,16 +185,12 @@ tokenizer:
 
 
 # ============================================================
-# Legacy Parallelism (schema compatibility)
+# Legacy Parallelism
 # ============================================================
 
 parallelism:
 
-  #
-  # ALL 8 TPU CORES
-  #
-
-  data_parallel: 2
+  data_parallel: 1
 
   model_parallel: 1
 
@@ -211,33 +207,15 @@ spmd:
 
   mesh:
 
-    #
-    # v5e-8 single-host topology
-    #
-    # Use ALL 8 chips for DATA PARALLEL
-    #
-
-    ici_data_parallelism: 2
-
-    #
-    # No FSDP yet
-    #
+    ici_data_parallelism: 1
 
     ici_fsdp_parallelism: 1
-
-    #
-    # No tensor parallel yet
-    #
 
     ici_tensor_parallelism: 1
 
     ici_sequence_parallelism: 1
 
     ici_pipeline_parallelism: 1
-
-    #
-    # Single host
-    #
 
     dcn_data_parallelism: 1
 
@@ -254,15 +232,7 @@ spmd:
 
   axis_rules:
 
-    #
-    # Batch sharded across ALL 8 cores
-    #
-
     batch: data
-
-    #
-    # Future TP/FSDP axes
-    #
 
     embed: null
 
@@ -285,25 +255,21 @@ spmd:
 
   remat:
 
-    #
-    # TPU-friendly
-    #
-
     policy: dots_saveable
-
-    #
-    # Remat whole transformer blocks
-    #
 
     granularity: block
 
-    #
-    # Lowers compile memory
-    #
+    # ========================================================
+    # KEEP scan disabled initially
+    # ========================================================
 
-    scan_layers: true
+    scan_layers: false
 
     prevent_cse: false
+
+    remat_attention: true
+
+    remat_mlp: true
 
 
   # ==========================================================
@@ -311,10 +277,6 @@ spmd:
   # ==========================================================
 
   dtype:
-
-    #
-    # TPU-native
-    #
 
     param_dtype: bfloat16
 
@@ -340,6 +302,6 @@ monitoring:
 
 hardware:
 
-  accelerator: gpu
+  accelerator: tpu
 
-  type: t4
+  type: v5e

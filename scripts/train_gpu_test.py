@@ -1,52 +1,151 @@
-"""
-scripts/train_gpu_test.py
-
-Training script for LaughLM.
-Downloads pre-tokenized shards and runs training.
-
-NOTE: Do NOT set jax_default_matmul_precision='high' for TPU.
-It forces f32 accumulation which halves MXU throughput.
-bf16 native precision is correct for TPU training.
-"""
-
 from huggingface_hub import hf_hub_download
 
 from LaughLM.config.loader import load_config
-from LaughLM.training.trainer import Trainer
-from LaughLM.data.memmap_loader import MemmapDataset
+
+from LaughLM.training.trainer import (
+    Trainer,
+)
+
+from LaughLM.data.memmap_loader import (
+    MemmapDataset,
+)
+
+from LaughLM.utils.memory import (
+    print_memory_stats,
+)
 
 import jax
 
 
 def main():
 
-    print(f"JAX devices: {jax.devices()}")
+    # ========================================================
+    # JAX runtime
+    # ========================================================
 
-    # ── Download dataset shard ────────────────────────────────
-    path = hf_hub_download(
-        repo_id="LaughTaleAI/fineweb-edu-gpt2-tokenized",
-        filename="train_00000.bin",
-        repo_type="dataset",
+    print(
+        f"JAX devices: "
+        f"{jax.devices()}",
+        flush=True,
     )
 
-    # ── Load configuration ────────────────────────────────────
-    config = load_config("configs/gpu_test.yaml")
+    print(
+        f"Device count: "
+        f"{jax.device_count()}",
+        flush=True,
+    )
 
-    # ── Dataset ───────────────────────────────────────────────
-    num_devices = jax.device_count()
+    print(
+        f"Process count: "
+        f"{jax.process_count()}",
+        flush=True,
+    )
+
+    # ========================================================
+    # Memory stats
+    # ========================================================
+
+    print_memory_stats(
+        prefix="[startup] ",
+    )
+
+    # ========================================================
+    # Dataset shards
+    # ========================================================
+
+    files = [
+        "fineweb-edu/fineweb-edu_shard_00012.bin",
+    ]
+
+    paths = [
+
+        hf_hub_download(
+            repo_id="LaughTaleAI/LaughLM-Tokenized",
+            filename=f,
+            repo_type="dataset",
+        )
+
+        for f in files
+    ]
+
+    # ========================================================
+    # Config
+    # ========================================================
+
+    config = load_config(
+        "configs/v5e_smoke.yaml"
+    )
+
+    # ========================================================
+    # Dataset
+    # ========================================================
+
+    global_batch_size = (
+        config.runtime.micro_batch_per_device
+        * jax.device_count()
+    )
 
     dataset = MemmapDataset(
-        paths=path,
-        seq_len=config.runtime.seq_len,
-        batch_size=config.runtime.micro_batch_per_device * num_devices,
-        process_index=jax.process_index(),
-        process_count=jax.process_count(),
+        paths=paths,
+
+        seq_len=(
+            config.runtime.seq_len
+        ),
+
+        global_batch_size=(
+            global_batch_size
+        ),
+
+        process_index=(
+            jax.process_index()
+        ),
+
+        process_count=(
+            jax.process_count()
+        ),
     )
 
-    # ── Train ─────────────────────────────────────────────────
-    trainer = Trainer(config)
+    # ========================================================
+    # Trainer
+    # ========================================================
+
+    print(
+        "[main] building trainer...",
+        flush=True,
+    )
+
+    trainer = Trainer(
+        config=config,
+        resume_dir=(
+            config.runtime
+            .checkpoint_dir
+        ),
+    )
+
+    print_memory_stats(
+        prefix="[post-init] ",
+    )
+
+    print(
+        "[main] trainer initialized",
+        flush=True,
+    )
+
+    # ========================================================
+    # Train
+    # ========================================================
+
     trainer.train(dataset)
+
+    # ========================================================
+    # Final memory stats
+    # ========================================================
+
+    print_memory_stats(
+        prefix="[shutdown] ",
+    )
 
 
 if __name__ == "__main__":
+
     main()

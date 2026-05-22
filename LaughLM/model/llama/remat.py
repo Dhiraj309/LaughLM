@@ -43,7 +43,7 @@ def get_remat_policy(
 
 
 # ============================================================
-# Selective remat wrapper
+# New API
 # ============================================================
 
 def maybe_remat(
@@ -53,6 +53,9 @@ def maybe_remat(
     policy: str | None,
     prevent_cse: bool = False,
 ):
+    """
+    Conditionally wrap module with remat.
+    """
 
     if not enabled:
 
@@ -72,5 +75,32 @@ def maybe_remat(
     return nn.remat(
         module_cls,
         policy=remat_policy,
+        prevent_cse=prevent_cse,
+    )
+
+
+# ============================================================
+# Backward-compatible API
+# ============================================================
+
+def remat_module(
+    module_cls,
+    *,
+    policy: str,
+    prevent_cse: bool = False,
+):
+    """
+    Backward-compatible wrapper.
+
+    Older model.py versions still call:
+        remat_module(...)
+
+    Internally forwarded into maybe_remat.
+    """
+
+    return maybe_remat(
+        module_cls,
+        enabled=True,
+        policy=policy,
         prevent_cse=prevent_cse,
     )

@@ -117,7 +117,12 @@ class LlamaDecoderLayer(nn.Module):
             )(
                 hidden_states=hidden_states,
                 positions=positions,
-                attention_mask=attention_mask,
+
+                #
+                # Runtime attention builds masks internally.
+                #
+                attention_mask=None,
+
                 kv_cache=kv_cache,
                 mode=mode,
             )
@@ -203,7 +208,12 @@ class LlamaDecoderLayer(nn.Module):
         )(
             hidden_states=normed_hidden,
             positions=positions,
-            attention_mask=attention_mask,
+
+            #
+            # Runtime attention builds masks internally.
+            #
+            attention_mask=None,
+
             kv_cache=kv_cache,
             mode=mode,
         )

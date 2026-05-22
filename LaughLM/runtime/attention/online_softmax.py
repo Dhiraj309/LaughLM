@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import math
 
-import jax
 import jax.numpy as jnp
 
 from .block_mask import (
@@ -57,8 +56,14 @@ def online_attention(
 
     scale = D ** -0.5
 
+    query_dtype = query.dtype
+
     # ======================================================
     # Reshape query for GQA
+    #
+    # [B, T, Hq, D]
+    # ->
+    # [B, T, Hkv, G, D]
     # ======================================================
 
     query = query.reshape(
@@ -71,6 +76,10 @@ def online_attention(
 
     # ======================================================
     # Output buffers
+    #
+    # Canonical online layout:
+    #
+    # [B, T, Hkv, G, ...]
     # ======================================================
 
     output = jnp.zeros(
@@ -87,9 +96,10 @@ def online_attention(
     m_i = jnp.full(
         (
             B,
+            T,
             Hkv,
             groups,
-            T,
+            1,
         ),
         -jnp.inf,
         dtype=jnp.float32,
@@ -98,9 +108,10 @@ def online_attention(
     l_i = jnp.zeros(
         (
             B,
+            T,
             Hkv,
             groups,
-            T,
+            1,
         ),
         dtype=jnp.float32,
     )
@@ -126,6 +137,12 @@ def online_attention(
             S,
         )
 
+        kv_len = kv_end - kv_start
+
+        # ==================================================
+        # KV block slices
+        # ==================================================
+
         k_block = key[
             :,
             kv_start:kv_end,
@@ -140,14 +157,21 @@ def online_attention(
             :,
         ]
 
-        kv_len = kv_end - kv_start
-
         # ==================================================
         # Block logits
+        #
+        # query:
+        #   [B, T, Hkv, G, D]
+        #
+        # key:
+        #   [B, S, Hkv, D]
+        #
+        # logits:
+        #   [B, T, Hkv, G, S]
         # ==================================================
 
         logits = jnp.einsum(
-            "bthgd,bshd->bhgts",
+            "bthgd,bshd->bthgs",
             query.astype(jnp.float32),
             k_block.astype(jnp.float32),
             preferred_element_type=jnp.float32,
@@ -157,6 +181,9 @@ def online_attention(
 
         # ==================================================
         # Block-local mask
+        #
+        # mask:
+        #   [T, S]
         # ==================================================
 
         mask = make_block_mask(
@@ -171,15 +198,22 @@ def online_attention(
             mask,
             0.0,
             DEFAULT_MASK_VALUE,
-        )[None, None, None, :, :]
+        )[
+            None,
+            :,
+            None,
+            None,
+            :
+        ]
 
         # ==================================================
-        # Online softmax
+        # Online softmax update
         # ==================================================
 
         block_m = jnp.max(
             logits,
             axis=-1,
+            keepdims=True,
         )
 
         new_m = jnp.maximum(
@@ -192,13 +226,13 @@ def online_attention(
         )
 
         exp_block = jnp.exp(
-            logits
-            - new_m[..., None]
+            logits - new_m
         )
 
         block_l = jnp.sum(
             exp_block,
             axis=-1,
+            keepdims=True,
         )
 
         new_l = (
@@ -207,25 +241,39 @@ def online_attention(
         )
 
         # ==================================================
-        # Rescale output accumulator
+        # Rescale existing output
         # ==================================================
+
+        old_scale = (
+            exp_old * l_i
+        ) / jnp.maximum(
+            new_l,
+            1e-6,
+        )
 
         output = (
             output
-            * (
-                (
-                    exp_old * l_i
-                )
-                / jnp.maximum(
-                    new_l,
-                    1e-6,
-                )
-            )[..., None]
+            * old_scale
         )
 
+        # ==================================================
+        # Current block contribution
+        #
+        # exp_block:
+        #   [B, T, Hkv, G, S]
+        #
+        # value:
+        #   [B, S, Hkv, D]
+        #
+        # output:
+        #   [B, T, Hkv, G, D]
+        # ==================================================
+
         block_out = jnp.einsum(
-            "bhgts,bshd->bthgd",
-            exp_block.astype(v_block.dtype),
+            "bthgs,bshd->bthgd",
+            exp_block.astype(
+                v_block.dtype
+            ),
             v_block,
             preferred_element_type=jnp.float32,
         )
@@ -235,7 +283,7 @@ def online_attention(
             / jnp.maximum(
                 new_l,
                 1e-6,
-            )[..., None]
+            )
         )
 
         m_i = new_m
@@ -243,6 +291,10 @@ def online_attention(
 
     # ======================================================
     # Restore head layout
+    #
+    # [B, T, Hkv, G, D]
+    # ->
+    # [B, T, Hq, D]
     # ======================================================
 
     output = output.reshape(
@@ -252,4 +304,6 @@ def online_attention(
         D,
     )
 
-    return output.astype(query.dtype)
+    return output.astype(
+        query_dtype
+    )

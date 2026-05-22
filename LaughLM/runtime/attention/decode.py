@@ -9,10 +9,6 @@ import jax.numpy as jnp
 
 from .masking import build_mask
 
-from .online_softmax import (
-    online_softmax_update,
-)
-
 from .types import (
     AttentionMaskSpec,
     DEFAULT_MASK_VALUE,
@@ -33,7 +29,6 @@ def decode_attention(
     Specialized autoregressive decode attention.
 
     Optimized for:
-
         query length = 1
 
     query:
@@ -55,6 +50,10 @@ def decode_attention(
 
     # =====================================================
     # Reshape query into GQA groups
+    #
+    # [B, 1, Hq, D]
+    # ->
+    # [B, 1, Hkv, G, D]
     # =====================================================
 
     query = query.reshape(
@@ -93,9 +92,9 @@ def decode_attention(
     running_out = jnp.zeros(
         (
             B,
+            1,
             Hkv,
             groups,
-            1,
             D,
         ),
         dtype=jnp.float32,
@@ -110,6 +109,16 @@ def decode_attention(
         kv_len=S,
         spec=mask_spec,
     )
+
+    full_mask = full_mask[
+        None,
+        None,
+        None,
+        :,
+        :,
+    ]
+
+    scale = D ** -0.5
 
     # =====================================================
     # KV block traversal
@@ -176,61 +185,106 @@ def decode_attention(
         )
 
         # -------------------------------------------------
-        # QK
-        # -------------------------------------------------
-
-        logits = jnp.einsum(
-            "bthgd,bshd->bhgts",
-            query.astype(jnp.float32),
-            k_block.astype(jnp.float32),
-        )
-
-        logits *= (
-            D ** -0.5
-        )
-
-        # -------------------------------------------------
-        # Local mask slice
+        # Mask slice
         # -------------------------------------------------
 
         mask_block = jax.lax.dynamic_slice(
             full_mask,
             (
                 0,
+                0,
+                0,
+                0,
                 kv_start,
             ),
             (
+                1,
+                1,
+                1,
                 1,
                 kv_size,
             ),
         )
 
+        # -------------------------------------------------
+        # QK
+        #
+        # logits:
+        # [B, Hkv, G, 1, K]
+        # -------------------------------------------------
+
+        logits = jnp.einsum(
+            "bthgd,bshd->bhgts",
+            query.astype(jnp.float32),
+            k_block.astype(jnp.float32),
+            preferred_element_type=jnp.float32,
+        )
+
+        logits = logits * scale
+
         logits = logits + jnp.where(
             mask_block,
             0.0,
             DEFAULT_MASK_VALUE,
-        )[None, None, None, :, :]
+        )
 
         # -------------------------------------------------
         # Online softmax update
         # -------------------------------------------------
 
-        (
-            running_max,
-            running_sum,
-            running_out,
-        ) = online_softmax_update(
-            running_max,
-            running_sum,
-            running_out,
+        block_max = jnp.max(
             logits,
-            v_block.transpose(
-                0,
-                2,
-                1,
-                3,
-            ),
+            axis=-1,
         )
+
+        new_max = jnp.maximum(
+            running_max,
+            block_max,
+        )
+
+        old_scale = jnp.exp(
+            running_max - new_max
+        )
+
+        block_scale = jnp.exp(
+            block_max - new_max
+        )
+
+        probs = jnp.exp(
+            logits
+            - new_max[..., None]
+        )
+
+        block_sum = jnp.sum(
+            probs,
+            axis=-1,
+        )
+
+        running_sum = (
+            running_sum * old_scale
+            + block_sum
+        )
+
+        block_out = jnp.einsum(
+            "bhgts,bshd->bthgd",
+            probs,
+            v_block.astype(jnp.float32),
+            preferred_element_type=jnp.float32,
+        )
+
+        running_out = (
+            running_out
+            * old_scale[
+                :,
+                :,
+                :,
+                :,
+                None,
+            ]
+            + block_out
+        )
+
+        running_max = new_max
 
         return (
             running_max,
@@ -239,8 +293,8 @@ def decode_attention(
         )
 
     (
-        _,
-        _,
+        running_max,
+        running_sum,
         running_out,
     ) = jax.lax.fori_loop(
         0,
@@ -254,16 +308,23 @@ def decode_attention(
     )
 
     # =====================================================
-    # Restore layout
+    # Final normalize
     # =====================================================
 
-    out = running_out.transpose(
-        0,
-        3,
-        1,
-        2,
-        4,
+    out = (
+        running_out
+        / running_sum[
+            :,
+            :,
+            :,
+            :,
+            None,
+        ]
     )
+
+    # =====================================================
+    # Restore layout
+    # =====================================================
 
     out = out.reshape(
         B,
