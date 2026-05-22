@@ -1,45 +1,63 @@
 """
 LaughLM/distributed/sharding.py
+
+PMAP-safe sharding compatibility helpers.
+
+This branch uses PMAP as the production training backend.
+
+Important:
+- Runtime PMAP training must not depend on NamedSharding, PartitionSpec,
+  mesh context, or with_sharding_constraint.
+- The LLaMA model still imports logical constraint helpers from this file.
+  For PMAP they intentionally behave as no-ops.
+- Mesh/GSPMD helper functions are kept for future research branches, but
+  they are not used by the PMAP trainer.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-import flax.linen as nn
 
-from flax.linen import (
-    partitioning as nn_partitioning,
-    with_logical_constraint,
-)
+# ============================================================
+# PMAP-safe logical constraints
+# ============================================================
 
-from jax.sharding import (
-    NamedSharding,
-    PartitionSpec as P,
-)
+def constrain_batch(batch):
+    return batch
 
 
-# ─────────────────────────────────────────────────────────────
-# Axis helpers
-# ─────────────────────────────────────────────────────────────
+def constrain_hidden_states(hidden_states):
+    return hidden_states
+
+
+def constrain_attention_tensor(tensor):
+    return tensor
+
+
+def constrain_kv_cache(tensor):
+    return tensor
+
+
+def constrain_logits(logits):
+    return logits
+
+
+def constrain_loss_tensor(tensor):
+    return tensor
+
+
+def shard_data(data: Any, sharding=None):
+    return data
+
+
+# ============================================================
+# Future GSPMD compatibility helpers
+# ============================================================
 
 def _get_axis_names(config):
-    """
-    Unified axis extraction.
-
-    Supports:
-    - legacy global config
-    - standalone LlamaConfig
-    """
-
-    #
-    # Legacy config path
-    #
-
     if hasattr(config, "spmd"):
-
         rules = config.spmd.axis_rules
-
         return {
             "batch": rules.batch,
             "embed": rules.embed,
@@ -51,15 +69,8 @@ def _get_axis_names(config):
             "layers": rules.layers,
         }
 
-    #
-    # Standalone LlamaConfig path
-    #
-    # Current TPU runtime:
-    # 1D batch/data parallel only
-    #
-
     return {
-        "batch": "batch",
+        "batch": "data",
         "embed": None,
         "heads": None,
         "kv_heads": None,
@@ -70,16 +81,7 @@ def _get_axis_names(config):
     }
 
 
-# ─────────────────────────────────────────────────────────────
-# Logical axis rules
-# ─────────────────────────────────────────────────────────────
-
 def get_logical_axis_rules(config):
-    """
-    Convert logical axis rules
-    into Flax axis_rules format.
-    """
-
     axes = _get_axis_names(config)
 
     return (
@@ -94,255 +96,55 @@ def get_logical_axis_rules(config):
     )
 
 
-# ─────────────────────────────────────────────────────────────
-# Logical → physical sharding conversion
-# ─────────────────────────────────────────────────────────────
+def logical_to_sharding(logical_annotations, mesh, config):
+    from flax.linen import partitioning as nn_partitioning
+    import flax.linen as nn
 
-def logical_to_sharding(
-    logical_annotations,
-    mesh,
-    config,
-):
-
-    with nn_partitioning.axis_rules(
-        get_logical_axis_rules(config)
-    ):
-
-        return nn.logical_to_mesh_sharding(
-            logical_annotations,
-            mesh,
-        )
+    with nn_partitioning.axis_rules(get_logical_axis_rules(config)):
+        return nn.logical_to_mesh_sharding(logical_annotations, mesh)
 
 
-# ─────────────────────────────────────────────────────────────
-# Explicit NamedSharding helper
-# ─────────────────────────────────────────────────────────────
+def create_named_sharding(mesh, *axes):
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
 
-def create_named_sharding(
-    mesh,
-    *axes,
-):
-
-    return NamedSharding(
-        mesh,
-        P(*axes),
-    )
+    return NamedSharding(mesh, P(*axes))
 
 
-# ─────────────────────────────────────────────────────────────
-# Replicated sharding
-# ─────────────────────────────────────────────────────────────
+def replicated_sharding(mesh):
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
 
-def replicated_sharding(
-    mesh,
-):
-
-    return NamedSharding(
-        mesh,
-        P(),
-    )
+    return NamedSharding(mesh, P())
 
 
-# ─────────────────────────────────────────────────────────────
-# Input sharding
-# ─────────────────────────────────────────────────────────────
-
-def create_input_sharding(
-    mesh,
-    config,
-):
+def create_input_sharding(mesh, config):
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
 
     axes = _get_axis_names(config)
-
-    return NamedSharding(
-        mesh,
-        P(
-            None,
-            axes["batch"],
-            axes["sequence"],
-        ),
-    )
+    return NamedSharding(mesh, P(None, axes["batch"], axes["sequence"]))
 
 
-# ─────────────────────────────────────────────────────────────
-# Token tensor sharding
-# ─────────────────────────────────────────────────────────────
-
-def create_token_sharding(
-    mesh,
-    config,
-):
+def create_token_sharding(mesh, config):
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
 
     axes = _get_axis_names(config)
-
-    return NamedSharding(
-        mesh,
-        P(
-            axes["batch"],
-            axes["sequence"],
-        ),
-    )
+    return NamedSharding(mesh, P(axes["batch"], axes["sequence"]))
 
 
-# ─────────────────────────────────────────────────────────────
-# Hidden-state sharding
-# ─────────────────────────────────────────────────────────────
-
-def create_activation_sharding(
-    mesh,
-    config,
-):
+def create_activation_sharding(mesh, config):
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
 
     axes = _get_axis_names(config)
-
-    return NamedSharding(
-        mesh,
-        P(
-            axes["batch"],
-            axes["sequence"],
-            axes["embed"],
-        ),
-    )
+    return NamedSharding(mesh, P(axes["batch"], axes["sequence"], axes["embed"]))
 
 
-# ─────────────────────────────────────────────────────────────
-# Logits sharding
-# ─────────────────────────────────────────────────────────────
-
-def create_logits_sharding(
-    mesh,
-    config,
-):
+def create_logits_sharding(mesh, config):
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
 
     axes = _get_axis_names(config)
-
-    return NamedSharding(
-        mesh,
-        P(
-            axes["batch"],
-            axes["sequence"],
-            axes["vocab"],
-        ),
-    )
-
-
-# ─────────────────────────────────────────────────────────────
-# Batch constraints
-# ─────────────────────────────────────────────────────────────
-
-def constrain_batch(batch):
-
-    return with_logical_constraint(
-        batch,
-        (
-            None,
-            "batch",
-            "sequence",
-        ),
-    )
-
-
-# ─────────────────────────────────────────────────────────────
-# Hidden-state constraints
-# ─────────────────────────────────────────────────────────────
-
-def constrain_hidden_states(
-    hidden_states,
-):
-
-    return with_logical_constraint(
-        hidden_states,
-        (
-            "batch",
-            "sequence",
-            "embed",
-        ),
-    )
-
-
-# ─────────────────────────────────────────────────────────────
-# Attention constraints
-# ─────────────────────────────────────────────────────────────
-
-def constrain_attention_tensor(
-    tensor,
-):
-
-    return with_logical_constraint(
-        tensor,
-        (
-            "batch",
-            "heads",
-            "sequence",
-            None,
-        ),
-    )
-
-
-# ─────────────────────────────────────────────────────────────
-# KV cache constraints
-# ─────────────────────────────────────────────────────────────
-
-def constrain_kv_cache(
-    tensor,
-):
-
-    return with_logical_constraint(
-        tensor,
-        (
-            "batch",
-            "sequence",
-            "kv_heads",
-            None,
-        ),
-    )
-
-
-# ─────────────────────────────────────────────────────────────
-# Logits constraints
-# ─────────────────────────────────────────────────────────────
-
-def constrain_logits(
-    logits,
-):
-
-    return with_logical_constraint(
-        logits,
-        (
-            "batch",
-            "sequence",
-            "vocab",
-        ),
-    )
-
-
-# ─────────────────────────────────────────────────────────────
-# Loss constraints
-# ─────────────────────────────────────────────────────────────
-
-def constrain_loss_tensor(
-    tensor,
-):
-
-    return with_logical_constraint(
-        tensor,
-        (
-            "batch",
-            "sequence",
-        ),
-    )
-
-
-# ─────────────────────────────────────────────────────────────
-# Explicit data placement
-# ─────────────────────────────────────────────────────────────
-
-def shard_data(
-    data: Any,
-    sharding,
-):
-
-    return nn_partitioning.with_sharding_constraint(
-        data,
-        sharding.spec,
-    )
+    return NamedSharding(mesh, P(axes["batch"], axes["sequence"], axes["vocab"]))

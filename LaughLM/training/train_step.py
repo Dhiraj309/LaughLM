@@ -1,20 +1,15 @@
 """
 LaughLM/training/train_step.py
 
-Frontier-grade mesh-native train step.
+PMAP-native train/eval step for LaughLM.
 
-2026 TPU/FSDP upgrades:
-────────────────────────────────────────────
-1. Correct PJIT-native gradient semantics
-2. Removed invalid PMAP collectives
-3. Global grad norm support
-4. TPU-safe accumulation semantics
-5. Correct replicated metric handling
-6. Stable FSDP-compatible optimizer updates
-7. Future tensor-parallel compatibility
-8. No silent multi-host desync
-9. Mesh-native GSPMD-compatible execution
-10. No unbound axis_name failures
+Design:
+- replicated params/state
+- local forward/backward per device
+- gradient accumulation via lax.scan
+- cross-device grad averaging via pmean
+- FP32 grad accumulation
+- Optax optimizer updates
 """
 
 from __future__ import annotations
@@ -25,20 +20,14 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from flax.linen import (
-    partitioning as nn_partitioning,
-)
-
 from LaughLM.training.loss import (
     shift_tokens,
     compute_loss,
 )
 
 from LaughLM.distributed.sharding import (
-    get_logical_axis_rules,
     constrain_batch,
     constrain_logits,
-    replicated_sharding,
 )
 
 
@@ -48,24 +37,16 @@ Metrics = Dict[str, jnp.ndarray]
 
 
 # ============================================================
-# Train step
+# Train step factory
 # ============================================================
 
 def create_train_step(
     *,
     model,
     optimizer,
-    config,
-    mesh,
-    state_shardings,
-    data_sharding,
     grad_accum: int,
     max_grad_norm: float = 1.0,
 ):
-
-    metrics_sharding = (
-        replicated_sharding(mesh)
-    )
 
     # --------------------------------------------------------
     # Loss fn
@@ -99,7 +80,7 @@ def create_train_step(
         return loss, metrics
 
     # --------------------------------------------------------
-    # Train step
+    # PMAP train step
     # --------------------------------------------------------
 
     def train_step(
@@ -123,12 +104,13 @@ def create_train_step(
         )
 
         # ----------------------------------------------------
-        # FP32 grad accumulation buffer
+        # FP32 grad accumulation
         # ----------------------------------------------------
 
         grads_accum = (
             jax.tree_util.tree_map(
-                lambda p: jnp.zeros_like(
+                lambda p:
+                jnp.zeros_like(
                     p,
                     dtype=jnp.float32,
                 ),
@@ -137,7 +119,7 @@ def create_train_step(
         )
 
         # ----------------------------------------------------
-        # Microbatch scan
+        # Scan microbatches
         # ----------------------------------------------------
 
         def scan_fn(
@@ -161,10 +143,6 @@ def create_train_step(
                 params,
                 micro_batch,
             )
-
-            # ------------------------------------------------
-            # FP32 accumulation
-            # ------------------------------------------------
 
             grads_accum = (
                 jax.tree_util.tree_map(
@@ -190,7 +168,7 @@ def create_train_step(
         )
 
         # ----------------------------------------------------
-        # Mean grads
+        # Mean accumulated grads
         # ----------------------------------------------------
 
         grads = jax.tree_util.tree_map(
@@ -202,26 +180,27 @@ def create_train_step(
             grads_accum,
         )
 
-        # ====================================================
-        # IMPORTANT
-        #
-        # PJIT/GSPMD automatically handles
-        # cross-device synchronization.
-        #
-        # DO NOT use:
-        #
-        #   jax.lax.pmean(...)
-        #
-        # unless inside pmap/shard_map.
-        # ====================================================
+        # ----------------------------------------------------
+        # Cross-device gradient averaging
+        # ----------------------------------------------------
+
+        grads = jax.lax.pmean(
+            grads,
+            axis_name="data",
+        )
 
         # ----------------------------------------------------
-        # Mean loss
+        # Mean loss across devices
         # ----------------------------------------------------
 
         loss = jnp.mean(
             losses,
             dtype=jnp.float32,
+        )
+
+        loss = jax.lax.pmean(
+            loss,
+            axis_name="data",
         )
 
         # ----------------------------------------------------
@@ -263,28 +242,30 @@ def create_train_step(
             )
         )
 
-        new_params = (
-            optax.apply_updates(
-                params,
-                updates,
-            )
+        new_params = optax.apply_updates(
+            params,
+            updates,
         )
 
         # ----------------------------------------------------
-        # Token accounting
-        # ----------------------------------------------------
-
+        # Tokens processed
         #
         # batch shape:
-        #
-        # [grad_accum, global_batch, seq_len]
-        #
+        # [grad_accum, micro_batch, seq_len]
+        # ----------------------------------------------------
 
-        tokens_in_step = jnp.asarray(
+        local_tokens = (
             batch.shape[0]
             * batch.shape[1]
-            * batch.shape[2],
-            dtype=jnp.int32,
+            * batch.shape[2]
+        )
+
+        global_tokens = jax.lax.psum(
+            jnp.asarray(
+                local_tokens,
+                dtype=jnp.int32,
+            ),
+            axis_name="data",
         )
 
         # ----------------------------------------------------
@@ -295,13 +276,9 @@ def create_train_step(
             state.apply_grad_step(
                 params=new_params,
                 opt_state=new_opt_state,
-                tokens_in_step=tokens_in_step,
+                tokens_in_step=global_tokens,
             )
         )
-
-        # ----------------------------------------------------
-        # Metrics
-        # ----------------------------------------------------
 
         metrics = {
             "loss": loss.astype(
@@ -318,31 +295,14 @@ def create_train_step(
         )
 
     # ========================================================
-    # Mesh-native compilation
+    # PMAP compile
     # ========================================================
 
-    with (
-        mesh,
-        nn_partitioning.axis_rules(
-            get_logical_axis_rules(config)
-        ),
-    ):
-
-        return jax.jit(
-            train_step,
-
-            in_shardings=(
-                state_shardings,
-                data_sharding,
-            ),
-
-            out_shardings=(
-                state_shardings,
-                metrics_sharding,
-            ),
-
-            donate_argnums=(0,),
-        )
+    return jax.pmap(
+        train_step,
+        axis_name="data",
+        donate_argnums=(0,),
+    )
 
 
 # ============================================================
@@ -352,24 +312,12 @@ def create_train_step(
 def create_eval_step(
     *,
     model,
-    config,
-    mesh,
-    state_shardings,
-    data_sharding,
 ):
-
-    metrics_sharding = (
-        replicated_sharding(mesh)
-    )
 
     def eval_step(
         state,
         batch,
     ):
-
-        batch = constrain_batch(
-            batch
-        )
 
         inputs, targets = shift_tokens(
             batch
@@ -391,28 +339,16 @@ def create_eval_step(
             targets,
         )
 
-        loss = loss.astype(
-            jnp.float32
+        loss = jax.lax.pmean(
+            loss.astype(jnp.float32),
+            axis_name="data",
         )
 
         return {
             "loss": loss,
         }
 
-    with (
-        mesh,
-        nn_partitioning.axis_rules(
-            get_logical_axis_rules(config)
-        ),
-    ):
-
-        return jax.jit(
-            eval_step,
-
-            in_shardings=(
-                state_shardings,
-                data_sharding,
-            ),
-
-            out_shardings=metrics_sharding,
-        )
+    return jax.pmap(
+        eval_step,
+        axis_name="data",
+    )
