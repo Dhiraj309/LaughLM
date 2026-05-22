@@ -4,9 +4,7 @@ LaughLM/runtime/attention/flash.py
 
 from __future__ import annotations
 
-from .online_softmax import (
-    online_attention,
-)
+import jax
 
 from .types import (
     AttentionMaskSpec,
@@ -25,23 +23,21 @@ def flash_attention(
     block_kv: int = 128,
 ):
     """
-    Flash attention backend wrapper.
+    Flash attention runtime wrapper.
 
     Current implementation:
-        tiled online attention.
+        JAX fused SDPA.
 
-    Future implementations:
-        - Pallas TPU kernel
-        - Triton GPU kernel
+    Future:
+        - Splash TPU kernels
         - cuDNN FlashAttention
-        - Splash attention
+        - Triton
+        - Pallas kernels
     """
 
-    return online_attention(
+    return jax.nn.dot_product_attention(
         query,
         key,
         value,
-        mask_spec,
-        block_q=block_q,
-        block_kv=block_kv,
+        is_causal=True,
     )

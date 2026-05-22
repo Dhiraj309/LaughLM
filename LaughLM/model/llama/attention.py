@@ -82,28 +82,26 @@ class LlamaAttention(nn.Module):
         head_dim = config.head_dim
 
         # ====================================================
-        # Projection layers
+        # Fused QKV projection
         # ====================================================
 
-        q_proj = create_dense(
-            features=num_heads * head_dim,
-            config=config,
-            use_bias=config.attention_bias,
-            name="q_proj",
+        q_size = (
+            num_heads * head_dim
         )
 
-        k_proj = create_dense(
-            features=num_kv_heads * head_dim,
-            config=config,
-            use_bias=config.attention_bias,
-            name="k_proj",
+        kv_size = (
+            num_kv_heads * head_dim
         )
 
-        v_proj = create_dense(
-            features=num_kv_heads * head_dim,
+        qkv_proj = create_dense(
+            features=(
+                q_size
+                + kv_size
+                + kv_size
+            ),
             config=config,
             use_bias=config.attention_bias,
-            name="v_proj",
+            name="qkv_proj",
         )
 
         o_proj = create_dense(
@@ -114,20 +112,27 @@ class LlamaAttention(nn.Module):
         )
 
         # ====================================================
-        # QKV projections
+        # QKV projection
         # ====================================================
 
-        query_states = q_proj(
+        qkv = qkv_proj(
             hidden_states
         )
 
-        key_states = k_proj(
-            hidden_states
-        )
+        query_states = qkv[
+            ...,
+            :q_size,
+        ]
 
-        value_states = v_proj(
-            hidden_states
-        )
+        key_states = qkv[
+            ...,
+            q_size:q_size + kv_size,
+        ]
+
+        value_states = qkv[
+            ...,
+            q_size + kv_size:,
+        ]
 
         # ====================================================
         # Reshape
@@ -227,19 +232,7 @@ class LlamaAttention(nn.Module):
             ]
 
         # ====================================================
-        # IMPORTANT
-        #
-        # attention_mask is intentionally ignored.
-        #
-        # Runtime masking is generated dynamically
-        # via AttentionMaskSpec.
-        #
-        # This keeps:
-        # - flash attention
-        # - online softmax
-        # - decode specialization
-        #
-        # backend-native.
+        # Runtime mask spec
         # ====================================================
 
         mask_spec = AttentionMaskSpec(

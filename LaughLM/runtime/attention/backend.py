@@ -19,8 +19,8 @@ from .decode import (
     decode_attention,
 )
 
-from .online_softmax import (
-    online_attention,
+from .flash import (
+    flash_attention,
 )
 
 Array = jnp.ndarray
@@ -38,12 +38,6 @@ def apply_attention(
 ) -> Array:
     """
     Unified attention runtime dispatcher.
-
-    query:
-        [B, T, Hq, D]
-
-    key/value:
-        [B, S, Hkv, D]
     """
 
     # ======================================================
@@ -80,27 +74,15 @@ def apply_attention(
         )
 
     # ======================================================
-    # Online softmax
+    # ONLINE / FLASH
     # ======================================================
 
-    if backend == AttentionBackend.ONLINE:
+    if backend in (
+        AttentionBackend.ONLINE,
+        AttentionBackend.FLASH,
+    ):
 
-        return online_attention(
-            query,
-            key,
-            value,
-            mask_spec,
-            block_q=block_q,
-            block_kv=block_kv,
-        )
-
-    # ======================================================
-    # Flash
-    # ======================================================
-
-    if backend == AttentionBackend.FLASH:
-
-        return online_attention(
+        return flash_attention(
             query,
             key,
             value,
