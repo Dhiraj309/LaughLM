@@ -49,6 +49,18 @@ class LlamaConfig:
 
     attention_dropout: float = 0.0
 
+    attention_backend: str = "reference"
+
+    attention_block_q: int = 128
+
+    attention_block_kv: int = 128
+
+    attention_mask_type: str = "causal"
+
+    sliding_window: Optional[int] = None
+
+    chunk_size: Optional[int] = None
+
     # =========================================================
     # MLP / normalization
     # =========================================================
