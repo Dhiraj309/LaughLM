@@ -59,7 +59,7 @@ class ArchitectureConfig(BaseModel):
     norm_placement: Literal["post", "pre", "sandwich"]
 
     attention_variant: Literal["mha", "mqa", "gqa", "mla"]
-    attention_impl: Literal["standard", "flash", "memory_efficient"]
+    attention_impl: Literal["standard", "flash", "memory_efficient", "splash"]
 
     ffn_type: Literal["gelu_mlp", "geglu", "swiglu", "moe"]
     residual: Literal["standard", "scaled", "deep_norm"]

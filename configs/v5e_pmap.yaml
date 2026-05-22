@@ -4,14 +4,14 @@ model:
   num_layers: 16
   num_heads: 12
   num_kv_heads: 12
-  max_seq_len: 1024
+  max_seq_len: 2048
 
 architecture:
   positional: rope
   normalization: rms_norm
   norm_placement: pre
   attention_variant: gqa
-  attention_impl: standard
+  attention_impl: splash
   ffn_type: swiglu
   residual: standard
   embeddings: standard
@@ -43,8 +43,8 @@ scheduler:
   min_lr_ratio: 0.05
 
 runtime:
-  seq_len: 1024
-  micro_batch_per_device: 8
+  seq_len: 2048
+  micro_batch_per_device: 16
   gradient_accumulation: 1
   total_tokens: 20_000_000
   eval_interval: 1000
@@ -58,10 +58,10 @@ data:
     - name: fineweb-edu
       weight: 1.0
       split: train
-  max_seq_len: 1024
+  max_seq_len: 2048
   packing: true
   eos_between_docs: true
-  pad_to_multiple: 128
+  pad_to_multiple: 64
 
 tokenizer:
   algorithm: bpe

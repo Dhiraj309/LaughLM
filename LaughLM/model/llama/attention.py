@@ -1,17 +1,12 @@
 """
 LaughLM/model/llama/attention.py
 
-Canonical LLaMA attention for PMAP production.
+Canonical LLaMA attention for PMAP production + TPU Splash experiment.
 
-Uses jax.nn.dot_product_attention instead of manual
-matmul-softmax-matmul.
-
-Current backend policy:
-- standard / xla: official XLA dot_product_attention
-- flash / cudnn: try cuDNN dot_product_attention on GPU only when
-  shape is likely supported, otherwise use XLA
-- decode: XLA dot_product_attention
-- no Splash/Pallas here yet
+Backend policy:
+- standard / xla / flash / cudnn / memory_efficient -> XLA SDPA
+- splash -> TPU SplashAttention under PMAP/local execution, fallback XLA SDPA
+- decode -> XLA SDPA
 """
 
 from __future__ import annotations
@@ -48,8 +43,158 @@ def _log_attention_backend(name: str):
         print(f"[attention] using {name}", flush=True)
 
 
-def _gpu_backend_available() -> bool:
-    return jax.default_backend() == "gpu"
+def _is_tpu_backend() -> bool:
+    return jax.default_backend() == "tpu"
+
+
+def _find_splash_block_size(seq_len: int) -> tuple[int, int]:
+    for block in (512, 256, 128):
+        if seq_len % block == 0:
+            return block, 0
+
+    block = 512
+    pad = ((seq_len + block - 1) // block) * block - seq_len
+    return block, pad
+
+
+def _pad_for_splash(
+    q: jnp.ndarray,
+    k: jnp.ndarray,
+    v: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, int]:
+    """
+    q/k/v layout:
+        [B, T, H, Dh]
+    """
+
+    B, T, QH, Dh = q.shape
+    KVH = k.shape[2]
+
+    _, pad = _find_splash_block_size(T)
+
+    if pad == 0:
+        return q, k, v, 0
+
+    q = jnp.concatenate(
+        [
+            q,
+            jnp.zeros(
+                (B, pad, QH, Dh),
+                dtype=q.dtype,
+            ),
+        ],
+        axis=1,
+    )
+
+    k = jnp.concatenate(
+        [
+            k,
+            jnp.zeros(
+                (B, pad, KVH, Dh),
+                dtype=k.dtype,
+            ),
+        ],
+        axis=1,
+    )
+
+    v = jnp.concatenate(
+        [
+            v,
+            jnp.zeros(
+                (B, pad, KVH, Dh),
+                dtype=v.dtype,
+            ),
+        ],
+        axis=1,
+    )
+
+    return q, k, v, pad
+
+
+def _splash_attention(
+    query_states: jnp.ndarray,
+    key_states: jnp.ndarray,
+    value_states: jnp.ndarray,
+) -> jnp.ndarray:
+    """
+    TPU SplashAttention.
+
+    Input/output layout:
+        [B, T, H, Dh]
+
+    Splash kernel layout:
+        per-example [H, T, Dh]
+    """
+
+    from jax.experimental.pallas.ops.tpu.splash_attention import (
+        splash_attention_kernel,
+        splash_attention_mask,
+    )
+
+    q, k, v, pad_amount = _pad_for_splash(
+        query_states,
+        key_states,
+        value_states,
+    )
+
+    B, T, QH, Dh = q.shape
+    KVH = k.shape[2]
+
+    if QH != KVH:
+        raise NotImplementedError(
+            "Splash path currently requires num_attention_heads == "
+            "num_key_value_heads. Use XLA SDPA for GQA/MQA."
+        )
+
+    block, _ = _find_splash_block_size(T)
+
+    _log_attention_backend(
+        f"splash attention block={block} seq={T}"
+    )
+
+    # [B, T, H, Dh] -> [B, H, T, Dh]
+    q = jnp.transpose(q, (0, 2, 1, 3))
+    k = jnp.transpose(k, (0, 2, 1, 3))
+    v = jnp.transpose(v, (0, 2, 1, 3))
+
+    causal_mask = splash_attention_mask.CausalMask(
+        shape=(T, T)
+    )
+
+    multi_head_mask = splash_attention_mask.MultiHeadMask(
+        masks=(causal_mask,) * QH
+    )
+
+    block_sizes = splash_attention_kernel.BlockSizes(
+        block_q=block,
+        block_kv=block,
+        block_kv_compute=block,
+        block_q_dkv=block,
+        block_kv_dkv=block,
+        block_kv_dkv_compute=block,
+        block_q_dq=block,
+        block_kv_dq=block,
+    )
+
+    splash_kernel = splash_attention_kernel.make_splash_mha(
+        mask=multi_head_mask,
+        block_sizes=block_sizes,
+        head_shards=1,
+        q_seq_shards=1,
+    )
+
+    def per_example(q_b, k_b, v_b):
+        return splash_kernel(q_b, k_b, v_b, None)
+
+    out = jax.vmap(per_example, in_axes=(0, 0, 0))(q, k, v)
+
+    # [B, H, T, Dh] -> [B, T, H, Dh]
+    out = jnp.transpose(out, (0, 2, 1, 3))
+
+    if pad_amount > 0:
+        out = out[:, :-pad_amount, :, :]
+
+    return out
 
 
 def _attention_impl_from_config(
@@ -57,47 +202,38 @@ def _attention_impl_from_config(
     mode: str,
     q_len: int,
     kv_len: int,
-) -> str | None:
-    """
-    Returns requested JAX dot_product_attention implementation.
-
-    None means JAX default/XLA path.
-
-    cuDNN SDPA is intentionally guarded because shifted LM training
-    commonly produces lengths like 1023 from seq_len=1024, and cuDNN
-    frequently rejects those sequence lengths on T4.
-    """
-
-    impl = getattr(config, "attention_impl", None)
-
-    if impl is None:
-        return None
+) -> str:
+    impl = getattr(config, "attention_impl", "standard")
 
     if mode == "decode":
-        return None
+        return "xla"
 
-    if impl in ("standard", "xla", "memory_efficient"):
-        return None
+    if impl == "splash":
+        if _is_tpu_backend() and q_len == kv_len and q_len > 4:
+            return "splash"
+        return "xla"
 
-    if impl in ("flash", "cudnn"):
-        # T4 / older GPUs often reject cuDNN SDPA even with aligned shapes.
-        # Keep PMAP production stable; use XLA on GPU for now.
-        return None
-
-        if q_len != kv_len:
-            return None
-
-        # Shifted LM training gives seq_len - 1.
-        # Example: 1024 -> 1023, which cuDNN SDPA rejected on T4.
-        if q_len % 64 != 0:
-            return None
-
-        return "cudnn"
-
-    return None
+    return "xla"
 
 
-def _dot_product_attention(
+def _xla_sdpa(
+    query_states: jnp.ndarray,
+    key_states: jnp.ndarray,
+    value_states: jnp.ndarray,
+    attention_mask: Optional[jnp.ndarray],
+) -> jnp.ndarray:
+    _log_attention_backend("xla dot_product_attention")
+
+    return jax.nn.dot_product_attention(
+        query_states,
+        key_states,
+        value_states,
+        bias=attention_mask,
+        is_causal=False,
+    )
+
+
+def _attention(
     query_states: jnp.ndarray,
     key_states: jnp.ndarray,
     value_states: jnp.ndarray,
@@ -105,54 +241,32 @@ def _dot_product_attention(
     config: LlamaConfig,
     mode: str,
 ) -> jnp.ndarray:
-    """
-    query/key/value layout:
-        [B, T, H, Dh]
-
-    attention_mask layout:
-        [1, 1, Tq, Tk]
-
-    jax.nn.dot_product_attention supports GQA/MQA directly when
-    Q heads are divisible by KV heads, so we do not repeat KV heads.
-    """
-
-    bias = attention_mask
-
-    requested_impl = _attention_impl_from_config(
+    backend = _attention_impl_from_config(
         config=config,
         mode=mode,
         q_len=query_states.shape[1],
         kv_len=key_states.shape[1],
     )
 
-    if requested_impl == "cudnn":
+    if backend == "splash":
         try:
-            _log_attention_backend("cudnn dot_product_attention")
-
-            return jax.nn.dot_product_attention(
+            return _splash_attention(
                 query_states,
                 key_states,
                 value_states,
-                bias=bias,
-                is_causal=False,
-                implementation="cudnn",
             )
-
         except Exception as e:
             warnings.warn(
-                "[attention] cuDNN attention failed "
-                f"({type(e).__name__}: {e}); falling back to XLA.",
+                "[attention] Splash failed "
+                f"({type(e).__name__}: {e}); falling back to XLA SDPA.",
                 RuntimeWarning,
             )
 
-    _log_attention_backend("xla dot_product_attention")
-
-    return jax.nn.dot_product_attention(
+    return _xla_sdpa(
         query_states,
         key_states,
         value_states,
-        bias=bias,
-        is_causal=False,
+        attention_mask,
     )
 
 
@@ -211,7 +325,6 @@ class LlamaAttention(nn.Module):
         key_states = k_proj(hidden_states)
         value_states = v_proj(hidden_states)
 
-        # [B, T, H, Dh]
         query_states = query_states.reshape(
             B,
             T,
@@ -268,7 +381,7 @@ class LlamaAttention(nn.Module):
         key_states = key_states.astype(config.compute_dtype)
         value_states = value_states.astype(config.compute_dtype)
 
-        attn_output = _dot_product_attention(
+        attn_output = _attention(
             query_states=query_states,
             key_states=key_states,
             value_states=value_states,
@@ -277,7 +390,6 @@ class LlamaAttention(nn.Module):
             mode=mode,
         )
 
-        # [B, T, H, Dh] -> [B, T, D]
         attn_output = attn_output.reshape(
             B,
             T,

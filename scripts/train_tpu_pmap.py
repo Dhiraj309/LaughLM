@@ -10,10 +10,7 @@ def main():
     print(f"JAX devices: {jax.devices()}")
 
     files = [
-        "fineweb-edu/fineweb-edu_shard_00008.bin",
-        "fineweb-edu/fineweb-edu_shard_00009.bin",
-        "fineweb-edu/fineweb-edu_shard_00010.bin",
-        "fineweb-edu/fineweb-edu_shard_00011.bin",
+        "fineweb-edu/fineweb-edu_shard_00001.bin",
     ]
 
     paths = [
