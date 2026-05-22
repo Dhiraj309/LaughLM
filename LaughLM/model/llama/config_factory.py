@@ -72,6 +72,7 @@ def build_llama_config(
         rope_theta=10000.0,
         attention_bias=arch.bias,
         attention_dropout=0.0,
+        attention_impl=arch.attention_impl,
         hidden_act="silu",
         rms_norm_eps=1e-6,
         mlp_bias=arch.bias,
