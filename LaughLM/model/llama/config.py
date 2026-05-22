@@ -66,6 +66,26 @@ class LlamaConfig:
     chunk_size: Optional[int] = None
 
     # =========================================================
+    # Rematerialization
+    # =========================================================
+
+    remat_attention: bool = False
+
+    remat_mlp: bool = False
+
+    remat_policy: Optional[str] = None
+
+    prevent_cse: bool = False
+
+    # =========================================================
+    # Architecture
+    # =========================================================
+
+    parallel_block: bool = False
+
+    scan_layers: bool = False
+
+    # =========================================================
     # MLP / normalization
     # =========================================================
 
@@ -74,12 +94,6 @@ class LlamaConfig:
     rms_norm_eps: float = 1e-6
 
     mlp_bias: bool = False
-
-    # =========================================================
-    # Architecture
-    # =========================================================
-
-    parallel_block: bool = False
 
     # =========================================================
     # Embeddings / logits
@@ -131,6 +145,10 @@ class LlamaConfig:
                 self.num_attention_heads
             )
 
+        # -----------------------------------------------------
+        # Core dims
+        # -----------------------------------------------------
+
         if self.hidden_size <= 0:
 
             raise ValueError(
@@ -141,6 +159,12 @@ class LlamaConfig:
 
             raise ValueError(
                 "intermediate_size must be > 0"
+            )
+
+        if self.num_hidden_layers <= 0:
+
+            raise ValueError(
+                "num_hidden_layers must be > 0"
             )
 
         if self.num_attention_heads <= 0:
@@ -154,6 +178,10 @@ class LlamaConfig:
             raise ValueError(
                 "num_key_value_heads must be > 0"
             )
+
+        # -----------------------------------------------------
+        # Head divisibility
+        # -----------------------------------------------------
 
         if (
             self.hidden_size
@@ -179,6 +207,10 @@ class LlamaConfig:
                 "by num_key_value_heads"
             )
 
+        # -----------------------------------------------------
+        # Head dim
+        # -----------------------------------------------------
+
         if self.head_dim is None:
 
             self.head_dim = (
@@ -202,9 +234,149 @@ class LlamaConfig:
                 f"head_dim={self.head_dim}"
             )
 
+        # -----------------------------------------------------
+        # Sequence limits
+        # -----------------------------------------------------
+
         if self.max_position_embeddings <= 0:
 
             raise ValueError(
                 "max_position_embeddings "
                 "must be > 0"
+            )
+
+        # -----------------------------------------------------
+        # Attention backend
+        # -----------------------------------------------------
+
+        valid_backends = {
+            "reference",
+            "online",
+            "flash",
+            "decode",
+        }
+
+        if (
+            self.attention_backend
+            not in valid_backends
+        ):
+
+            raise ValueError(
+                f"Unknown attention backend: "
+                f"{self.attention_backend}"
+            )
+
+        # -----------------------------------------------------
+        # Mask type
+        # -----------------------------------------------------
+
+        valid_masks = {
+            "causal",
+            "full",
+            "sliding_window",
+            "chunked",
+        }
+
+        if (
+            self.attention_mask_type
+            not in valid_masks
+        ):
+
+            raise ValueError(
+                f"Unknown attention mask type: "
+                f"{self.attention_mask_type}"
+            )
+
+        # -----------------------------------------------------
+        # Sliding window validation
+        # -----------------------------------------------------
+
+        if (
+            self.attention_mask_type
+            == "sliding_window"
+        ):
+
+            if self.sliding_window is None:
+
+                raise ValueError(
+                    "sliding_window mask requires "
+                    "sliding_window to be set"
+                )
+
+            if self.sliding_window <= 0:
+
+                raise ValueError(
+                    "sliding_window must be > 0"
+                )
+
+        # -----------------------------------------------------
+        # Chunked validation
+        # -----------------------------------------------------
+
+        if (
+            self.attention_mask_type
+            == "chunked"
+        ):
+
+            if self.chunk_size is None:
+
+                raise ValueError(
+                    "chunked mask requires "
+                    "chunk_size to be set"
+                )
+
+            if self.chunk_size <= 0:
+
+                raise ValueError(
+                    "chunk_size must be > 0"
+                )
+
+        # -----------------------------------------------------
+        # Block sizes
+        # -----------------------------------------------------
+
+        if self.attention_block_q <= 0:
+
+            raise ValueError(
+                "attention_block_q must be > 0"
+            )
+
+        if self.attention_block_kv <= 0:
+
+            raise ValueError(
+                "attention_block_kv must be > 0"
+            )
+
+        # -----------------------------------------------------
+        # Remat validation
+        # -----------------------------------------------------
+
+        if (
+            self.remat_attention
+            or self.remat_mlp
+        ):
+
+            if self.remat_policy is None:
+
+                raise ValueError(
+                    "remat enabled but "
+                    "remat_policy is None"
+                )
+
+        valid_remat_policies = {
+            None,
+            "nothing_saveable",
+            "dots_saveable",
+            "dots_with_no_batch_dims_saveable",
+            "everything_saveable",
+        }
+
+        if (
+            self.remat_policy
+            not in valid_remat_policies
+        ):
+
+            raise ValueError(
+                f"Unknown remat policy: "
+                f"{self.remat_policy}"
             )

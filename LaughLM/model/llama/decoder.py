@@ -36,6 +36,10 @@ from LaughLM.model.llama.initialization import (
     constrain_hidden_states,
 )
 
+from LaughLM.model.llama.remat import (
+    maybe_remat,
+)
+
 
 class LlamaDecoderLayer(nn.Module):
 
@@ -58,6 +62,24 @@ class LlamaDecoderLayer(nn.Module):
 
         hidden_states = constrain_hidden_states(
             hidden_states
+        )
+
+        # ====================================================
+        # Selective remat modules
+        # ====================================================
+
+        AttentionModule = maybe_remat(
+            LlamaAttention,
+            enabled=config.remat_attention,
+            policy=config.remat_policy,
+            prevent_cse=config.prevent_cse,
+        )
+
+        MLPModule = maybe_remat(
+            LlamaMLP,
+            enabled=config.remat_mlp,
+            policy=config.remat_policy,
+            prevent_cse=config.prevent_cse,
         )
 
         # ====================================================
@@ -89,7 +111,7 @@ class LlamaDecoderLayer(nn.Module):
             (
                 hidden_states,
                 updated_cache,
-            ) = LlamaAttention(
+            ) = AttentionModule(
                 config=config,
                 name="self_attn",
             )(
@@ -128,7 +150,7 @@ class LlamaDecoderLayer(nn.Module):
                 hidden_states
             )
 
-            hidden_states = LlamaMLP(
+            hidden_states = MLPModule(
                 config=config,
                 name="mlp",
             )(
@@ -175,7 +197,7 @@ class LlamaDecoderLayer(nn.Module):
         (
             attn_output,
             updated_cache,
-        ) = LlamaAttention(
+        ) = AttentionModule(
             config=config,
             name="self_attn",
         )(
@@ -194,7 +216,7 @@ class LlamaDecoderLayer(nn.Module):
         # MLP branch
         # ----------------------------------------------------
 
-        mlp_output = LlamaMLP(
+        mlp_output = MLPModule(
             config=config,
             name="mlp",
         )(

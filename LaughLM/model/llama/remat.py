@@ -1,22 +1,7 @@
 """
 LaughLM/model/llama/remat.py
 
-Activation checkpointing utilities for LaughLM.
-
-Design goals
--------------
-- MaxText-style rematerialization
-- policy-driven checkpointing
-- deterministic wrapping
-- scan-compatible structure
-- TPU memory reduction
-
-References
-----------
-- MaxText
-- T5X
-- Pax
-- JAX checkpoint_policies
+Selective activation checkpointing utilities.
 """
 
 import jax
@@ -24,16 +9,13 @@ import jax
 from flax import linen as nn
 
 
-# ----------------------------------------------------------
+# ============================================================
 # Policy dispatch
-# ----------------------------------------------------------
+# ============================================================
 
 def get_remat_policy(
     policy_name: str,
 ):
-    """
-    Map config string -> JAX remat policy.
-    """
 
     policies = jax.checkpoint_policies
 
@@ -60,21 +42,28 @@ def get_remat_policy(
     )
 
 
-# ----------------------------------------------------------
-# Remat wrapper
-# ----------------------------------------------------------
+# ============================================================
+# Selective remat wrapper
+# ============================================================
 
-def remat_module(
+def maybe_remat(
     module_cls,
     *,
-    policy: str,
+    enabled: bool,
+    policy: str | None,
     prevent_cse: bool = False,
 ):
-    """
-    Wrap module in nn.remat.
 
-    Equivalent to MaxText/T5X rematerialization.
-    """
+    if not enabled:
+
+        return module_cls
+
+    if policy is None:
+
+        raise ValueError(
+            "remat enabled but "
+            "remat_policy is None"
+        )
 
     remat_policy = get_remat_policy(
         policy
