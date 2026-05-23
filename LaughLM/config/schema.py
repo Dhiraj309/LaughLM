@@ -110,6 +110,15 @@ class OptimizerConfig(BaseModel):
     weight_decay: float
     gradient_clip: float
 
+    mu_dtype: Literal["float32", "bfloat16"] = Field(
+        default="float32",
+        description=(
+            "Adam first-moment dtype. "
+            "Use bfloat16 to reduce optimizer-state memory; "
+            "float32 is safest for convergence."
+        ),
+    )
+
 
 # ════════════════════════════════════════════════════════════════
 # Scheduler Config

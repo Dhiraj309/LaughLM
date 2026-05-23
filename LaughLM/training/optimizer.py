@@ -38,6 +38,22 @@ import jax.numpy as jnp
 from LaughLM.config.schema import LaughLMConfig
 
 
+_DTYPE_MAP = {
+    "float32": jnp.float32,
+    "bfloat16": jnp.bfloat16,
+}
+
+
+def _resolve_optimizer_dtype(name: str):
+    try:
+        return _DTYPE_MAP[name]
+    except KeyError as e:
+        raise ValueError(
+            f"Unsupported optimizer dtype: {name!r}. "
+            f"Expected one of {sorted(_DTYPE_MAP)}."
+        ) from e
+
+
 # ────────────────────────────────────────────────────────────────
 # Weight decay mask
 # ────────────────────────────────────────────────────────────────
@@ -80,7 +96,9 @@ def build_adamw(config, schedule):
             # Prevents bf16→fp32 dtype mutation
             # after first optimizer step.
             #
-            mu_dtype=jnp.float32,
+            mu_dtype=_resolve_optimizer_dtype(
+                getattr(config.optimizer, "mu_dtype", "float32")
+            ),
         ),
 
         optax.add_decayed_weights(
