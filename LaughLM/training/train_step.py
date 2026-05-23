@@ -6,7 +6,8 @@ PMAP-native train/eval step for LaughLM.
 Design:
 - replicated params/state
 - local forward/backward per device
-- gradient accumulation via lax.scan
+- direct fast path when grad_accum == 1
+- gradient accumulation via lax.scan when grad_accum > 1
 - cross-device grad averaging via pmean
 - FP32 grad accumulation
 - Optax optimizer updates
@@ -48,6 +49,11 @@ def create_train_step(
     max_grad_norm: float = 1.0,
 ):
 
+    if grad_accum <= 0:
+        raise ValueError(
+            f"grad_accum must be > 0, got {grad_accum}"
+        )
+
     # --------------------------------------------------------
     # Loss fn
     # --------------------------------------------------------
@@ -56,7 +62,6 @@ def create_train_step(
         params,
         micro_batch,
     ):
-
         inputs, targets = shift_tokens(
             micro_batch
         )
@@ -80,106 +85,16 @@ def create_train_step(
         return loss, metrics
 
     # --------------------------------------------------------
-    # PMAP train step
+    # Shared optimizer update
     # --------------------------------------------------------
 
-    def train_step(
+    def apply_update(
         state,
+        params,
+        grads,
+        loss,
         batch,
     ):
-
-        batch = constrain_batch(
-            batch
-        )
-
-        params = state.params
-
-        # ----------------------------------------------------
-        # Stateless RNG
-        # ----------------------------------------------------
-
-        step_rng = jax.random.fold_in(
-            state.rng_key,
-            state.step,
-        )
-
-        # ----------------------------------------------------
-        # FP32 grad accumulation
-        # ----------------------------------------------------
-
-        grads_accum = (
-            jax.tree_util.tree_map(
-                lambda p:
-                jnp.zeros_like(
-                    p,
-                    dtype=jnp.float32,
-                ),
-                params,
-            )
-        )
-
-        # ----------------------------------------------------
-        # Scan microbatches
-        # ----------------------------------------------------
-
-        def scan_fn(
-            carry,
-            micro_batch,
-        ):
-
-            grads_accum, rng = carry
-
-            rng, _ = jax.random.split(
-                rng
-            )
-
-            (
-                (loss, _metrics),
-                grads,
-            ) = jax.value_and_grad(
-                loss_fn,
-                has_aux=True,
-            )(
-                params,
-                micro_batch,
-            )
-
-            grads_accum = (
-                jax.tree_util.tree_map(
-                    lambda acc, g:
-                    acc + g.astype(jnp.float32),
-                    grads_accum,
-                    grads,
-                )
-            )
-
-            return (
-                (grads_accum, rng),
-                loss,
-            )
-
-        (
-            (grads_accum, _),
-            losses,
-        ) = jax.lax.scan(
-            scan_fn,
-            (grads_accum, step_rng),
-            batch,
-        )
-
-        # ----------------------------------------------------
-        # Mean accumulated grads
-        # ----------------------------------------------------
-
-        grads = jax.tree_util.tree_map(
-            lambda g:
-            g / jnp.asarray(
-                grad_accum,
-                dtype=jnp.float32,
-            ),
-            grads_accum,
-        )
-
         # ----------------------------------------------------
         # Cross-device gradient averaging
         # ----------------------------------------------------
@@ -190,21 +105,16 @@ def create_train_step(
         )
 
         # ----------------------------------------------------
-        # Mean loss across devices
+        # Cross-device loss averaging
         # ----------------------------------------------------
 
-        loss = jnp.mean(
-            losses,
-            dtype=jnp.float32,
-        )
-
         loss = jax.lax.pmean(
-            loss,
+            loss.astype(jnp.float32),
             axis_name="data",
         )
 
         # ----------------------------------------------------
-        # Global grad norm
+        # Global grad norm after pmean
         # ----------------------------------------------------
 
         grad_norm = optax.global_norm(
@@ -225,8 +135,7 @@ def create_train_step(
         )
 
         grads = jax.tree_util.tree_map(
-            lambda g:
-            g * clip_scale,
+            lambda g: g * clip_scale,
             grads,
         )
 
@@ -234,12 +143,10 @@ def create_train_step(
         # Optimizer update
         # ----------------------------------------------------
 
-        updates, new_opt_state = (
-            optimizer.update(
-                grads,
-                state.opt_state,
-                params,
-            )
+        updates, new_opt_state = optimizer.update(
+            grads,
+            state.opt_state,
+            params,
         )
 
         new_params = optax.apply_updates(
@@ -250,8 +157,13 @@ def create_train_step(
         # ----------------------------------------------------
         # Tokens processed
         #
-        # batch shape:
-        # [grad_accum, micro_batch, seq_len]
+        # PMAP local batch shape:
+        #   grad_accum == 1: [1, micro_batch, seq_len]
+        #   grad_accum > 1:  [grad_accum, micro_batch, seq_len]
+        #
+        # Keep int64 to avoid overflow on 30B-token runs.
+        # Host-side accounting in trainer.py remains the source of
+        # truth for logging/checkpoint metadata.
         # ----------------------------------------------------
 
         local_tokens = (
@@ -263,35 +175,133 @@ def create_train_step(
         global_tokens = jax.lax.psum(
             jnp.asarray(
                 local_tokens,
-                dtype=jnp.int32,
+                dtype=jnp.int64,
             ),
             axis_name="data",
         )
 
-        # ----------------------------------------------------
-        # State update
-        # ----------------------------------------------------
-
-        new_state = (
-            state.apply_grad_step(
-                params=new_params,
-                opt_state=new_opt_state,
-                tokens_in_step=global_tokens,
-            )
+        new_state = state.apply_grad_step(
+            params=new_params,
+            opt_state=new_opt_state,
+            tokens_in_step=global_tokens,
         )
 
         metrics = {
-            "loss": loss.astype(
-                jnp.float32
-            ),
-            "grad_norm": grad_norm.astype(
-                jnp.float32
-            ),
+            "loss": loss.astype(jnp.float32),
+            "grad_norm": grad_norm.astype(jnp.float32),
         }
 
-        return (
-            new_state,
-            metrics,
+        return new_state, metrics
+
+    # --------------------------------------------------------
+    # PMAP train step
+    # --------------------------------------------------------
+
+    def train_step(
+        state,
+        batch,
+    ):
+        batch = constrain_batch(
+            batch
+        )
+
+        params = state.params
+
+        # ----------------------------------------------------
+        # Fast path: no gradient accumulation
+        #
+        # Trainer still passes:
+        #   [grad_accum, micro_batch, seq_len]
+        # so for grad_accum == 1 we use batch[0].
+        # ----------------------------------------------------
+
+        if grad_accum == 1:
+            micro_batch = batch[0]
+
+            (
+                (loss, _metrics),
+                grads,
+            ) = jax.value_and_grad(
+                loss_fn,
+                has_aux=True,
+            )(
+                params,
+                micro_batch,
+            )
+
+            grads = jax.tree_util.tree_map(
+                lambda g: g.astype(jnp.float32),
+                grads,
+            )
+
+            return apply_update(
+                state,
+                params,
+                grads,
+                loss,
+                batch,
+            )
+
+        # ----------------------------------------------------
+        # Accumulation path: grad_accum > 1
+        # ----------------------------------------------------
+
+        grads_accum = jax.tree_util.tree_map(
+            lambda p: jnp.zeros_like(
+                p,
+                dtype=jnp.float32,
+            ),
+            params,
+        )
+
+        def scan_fn(
+            grads_accum,
+            micro_batch,
+        ):
+            (
+                (loss, _metrics),
+                grads,
+            ) = jax.value_and_grad(
+                loss_fn,
+                has_aux=True,
+            )(
+                params,
+                micro_batch,
+            )
+
+            grads_accum = jax.tree_util.tree_map(
+                lambda acc, g: acc + g.astype(jnp.float32),
+                grads_accum,
+                grads,
+            )
+
+            return grads_accum, loss
+
+        grads_accum, losses = jax.lax.scan(
+            scan_fn,
+            grads_accum,
+            batch,
+        )
+
+        grads = jax.tree_util.tree_map(
+            lambda g: g / jnp.asarray(
+                grad_accum,
+                dtype=jnp.float32,
+            ),
+            grads_accum,
+        )
+
+        loss = jnp.mean(
+            losses,
+            dtype=jnp.float32,
+        )
+
+        return apply_update(
+            state,
+            params,
+            grads,
+            loss,
+            batch,
         )
 
     # ========================================================
@@ -318,6 +328,9 @@ def create_eval_step(
         state,
         batch,
     ):
+        batch = constrain_batch(
+            batch
+        )
 
         inputs, targets = shift_tokens(
             batch
