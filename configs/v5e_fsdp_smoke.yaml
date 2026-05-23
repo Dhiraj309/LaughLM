@@ -46,7 +46,7 @@ scheduler:
 runtime:
   backend: gspmd
   seq_len: 1024
-  micro_batch_per_device: 12
+  micro_batch_per_device: 4
   gradient_accumulation: 1
   total_tokens: 10_000_000
   eval_interval: 100
@@ -73,15 +73,15 @@ tokenizer:
   output_format: huggingface_fast
 
 parallelism:
-  data_parallel: 1
-  model_parallel: 8
+  data_parallel: 2
+  model_parallel: 4
   compute_dtype: bfloat16
   param_dtype: float32
 
 spmd:
   mesh:
-    ici_data_parallelism: 1
-    ici_fsdp_parallelism: 8
+    ici_data_parallelism: 2
+    ici_fsdp_parallelism: 4
     ici_tensor_parallelism: 1
     ici_sequence_parallelism: 1
     ici_pipeline_parallelism: 1
