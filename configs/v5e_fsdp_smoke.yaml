@@ -11,7 +11,7 @@ architecture:
   normalization: rms_norm
   norm_placement: pre
   attention_variant: gqa
-  attention_impl: standard
+  attention_impl: splash
   ffn_type: swiglu
   residual: standard
   embeddings: standard
@@ -91,7 +91,7 @@ spmd:
     dcn_pipeline_parallelism: 1
 
   axis_rules:
-    batch: null
+    batch: data
     embed: fsdp
     heads: null
     kv_heads: null

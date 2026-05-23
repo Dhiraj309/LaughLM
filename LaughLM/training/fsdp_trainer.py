@@ -24,6 +24,7 @@ from LaughLM.config.schema import LaughLMConfig
 from LaughLM.distributed.mesh import create_mesh
 from LaughLM.distributed.sharding import (
     enable_gspmd_constraints,
+    set_current_mesh,
     get_logical_axis_rules,
     logical_to_sharding,
     create_input_sharding,
@@ -63,6 +64,7 @@ class FSDPTrainer:
 
         self.config = config
         self.mesh = create_mesh(config)
+        set_current_mesh(self.mesh)
         self.mesh_axis_sizes = config.spmd.mesh.axis_sizes()
 
         self.data_replicas = self.mesh_axis_sizes.get("data", 1)

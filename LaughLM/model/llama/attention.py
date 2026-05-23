@@ -1,11 +1,15 @@
 """
 LaughLM/model/llama/attention.py
 
-Canonical LLaMA attention for PMAP production + TPU Splash experiment.
+Canonical LLaMA attention for:
+- PMAP production
+- TPU Splash under PMAP
+- TPU Splash under GSPMD via shard_map
 
 Backend policy:
 - standard / xla / flash / cudnn / memory_efficient -> XLA SDPA
-- splash -> TPU SplashAttention under PMAP/local execution, fallback XLA SDPA
+- splash + PMAP  -> TPU SplashAttention directly
+- splash + GSPMD -> TPU SplashAttention wrapped with shard_map
 - decode -> XLA SDPA
 """
 
@@ -16,6 +20,12 @@ import warnings
 
 import jax
 import jax.numpy as jnp
+
+try:
+    from jax.sharding import PartitionSpec as P
+except Exception:
+    P = None
+
 from flax import linen as nn
 
 from LaughLM.model.llama.config import LlamaConfig
@@ -31,7 +41,11 @@ from LaughLM.model.llama.kv_cache import (
     KVCache,
     update_kv_cache,
 )
-from LaughLM.distributed.sharding import constrain_kv_cache
+from LaughLM.distributed.sharding import (
+    constrain_kv_cache,
+    gspmd_constraints_enabled,
+    get_current_mesh,
+)
 
 
 _LOGGED_BACKENDS = set()
@@ -186,7 +200,10 @@ def _splash_attention(
     def per_example(q_b, k_b, v_b):
         return splash_kernel(q_b, k_b, v_b, None)
 
-    out = jax.vmap(per_example, in_axes=(0, 0, 0))(q, k, v)
+    out = jax.vmap(
+        per_example,
+        in_axes=(0, 0, 0),
+    )(q, k, v)
 
     # [B, H, T, Dh] -> [B, T, H, Dh]
     out = jnp.transpose(out, (0, 2, 1, 3))
@@ -195,6 +212,91 @@ def _splash_attention(
         out = out[:, :-pad_amount, :, :]
 
     return out
+
+
+def _splash_attention_shard_map(
+    query_states: jnp.ndarray,
+    key_states: jnp.ndarray,
+    value_states: jnp.ndarray,
+) -> jnp.ndarray:
+    """
+    GSPMD-compatible TPU SplashAttention.
+
+    Pallas/Mosaic kernels cannot be automatically partitioned by GSPMD.
+    Therefore we wrap Splash with shard_map.
+
+    Expected global layout:
+        q/k/v: [batch, sequence, heads, head_dim]
+
+    Current safe sharding:
+        batch -> data
+        sequence/head/head_dim replicated inside each local shard
+        FSDP axis is not used by the local Splash kernel
+    """
+
+    mesh = get_current_mesh()
+
+    if mesh is None:
+        raise RuntimeError(
+            "GSPMD Splash requires current mesh to be registered. "
+            "Call set_current_mesh(mesh) in FSDPTrainer after mesh creation."
+        )
+
+    if "data" not in mesh.axis_names:
+        raise RuntimeError(
+            "GSPMD Splash shard_map currently requires a 'data' mesh axis. "
+            "Use hybrid mesh such as data=2, fsdp=4. "
+            "For pure fsdp=8, use attention_impl='standard'."
+        )
+
+    if P is None:
+        raise RuntimeError(
+            "jax.sharding.PartitionSpec is unavailable."
+        )
+
+    spec = P("data", None, None, None)
+
+    def local_splash(q, k, v):
+        return _splash_attention(q, k, v)
+
+    try:
+        mapped = jax.shard_map(
+            local_splash,
+            mesh=mesh,
+            in_specs=(spec, spec, spec),
+            out_specs=spec,
+            check_vma=False,
+        )
+    except AttributeError:
+        from jax.experimental.shard_map import shard_map
+
+        mapped = shard_map(
+            local_splash,
+            mesh=mesh,
+            in_specs=(spec, spec, spec),
+            out_specs=spec,
+            check_rep=False,
+        )
+    except TypeError:
+        from jax.experimental.shard_map import shard_map
+
+        mapped = shard_map(
+            local_splash,
+            mesh=mesh,
+            in_specs=(spec, spec, spec),
+            out_specs=spec,
+            check_rep=False,
+        )
+
+    _log_attention_backend(
+        "gspmd shard_map splash attention"
+    )
+
+    return mapped(
+        query_states,
+        key_states,
+        value_states,
+    )
 
 
 def _attention_impl_from_config(
@@ -250,11 +352,19 @@ def _attention(
 
     if backend == "splash":
         try:
+            if gspmd_constraints_enabled():
+                return _splash_attention_shard_map(
+                    query_states,
+                    key_states,
+                    value_states,
+                )
+
             return _splash_attention(
                 query_states,
                 key_states,
                 value_states,
             )
+
         except Exception as e:
             warnings.warn(
                 "[attention] Splash failed "
