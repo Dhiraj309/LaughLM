@@ -12,6 +12,7 @@ import jax.numpy as jnp
 
 from LaughLM.config.schema import LaughLMConfig
 from LaughLM.model.llama.config import LlamaConfig
+from LaughLM.model.parameter_utils import compute_llama_intermediate_size
 
 
 DTYPE_MAP = {
@@ -31,31 +32,6 @@ def _dtype(name: str):
         ) from e
 
 
-def _llama_intermediate_size(
-    d_model: int,
-    multiple_of: int = 256,
-) -> int:
-    """
-    LLaMA SwiGLU intermediate size.
-
-    Formula:
-        intermediate_size = int(8 * d_model / 3)
-        rounded up to multiple_of
-
-    Keep this logic shared with parameter_utils.py later so MFU and
-    parameter estimates match the actual model.
-    """
-
-    intermediate_size = int((8 * d_model) / 3)
-
-    intermediate_size = (
-        (intermediate_size + multiple_of - 1)
-        // multiple_of
-    ) * multiple_of
-
-    return intermediate_size
-
-
 def build_llama_config(
     config: LaughLMConfig,
 ) -> LlamaConfig:
@@ -69,9 +45,16 @@ def build_llama_config(
 
     # =========================================================
     # SwiGLU intermediate dim
+    #
+    # IMPORTANT:
+    # This must stay shared with parameter_utils.py so:
+    # - actual model shape
+    # - parameter report
+    # - MFU estimates
+    # all agree exactly.
     # =========================================================
 
-    intermediate_size = _llama_intermediate_size(
+    intermediate_size = compute_llama_intermediate_size(
         model.d_model,
         multiple_of=256,
     )
