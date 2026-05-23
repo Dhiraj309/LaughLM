@@ -31,6 +31,31 @@ def _dtype(name: str):
         ) from e
 
 
+def _llama_intermediate_size(
+    d_model: int,
+    multiple_of: int = 256,
+) -> int:
+    """
+    LLaMA SwiGLU intermediate size.
+
+    Formula:
+        intermediate_size = int(8 * d_model / 3)
+        rounded up to multiple_of
+
+    Keep this logic shared with parameter_utils.py later so MFU and
+    parameter estimates match the actual model.
+    """
+
+    intermediate_size = int((8 * d_model) / 3)
+
+    intermediate_size = (
+        (intermediate_size + multiple_of - 1)
+        // multiple_of
+    ) * multiple_of
+
+    return intermediate_size
+
+
 def build_llama_config(
     config: LaughLMConfig,
 ) -> LlamaConfig:
@@ -46,13 +71,17 @@ def build_llama_config(
     # SwiGLU intermediate dim
     # =========================================================
 
-    intermediate_size = int((8 * model.d_model) / 3)
-
-    # TPU/GPU-friendly alignment.
-    intermediate_size = ((intermediate_size + 255) // 256) * 256
+    intermediate_size = _llama_intermediate_size(
+        model.d_model,
+        multiple_of=256,
+    )
 
     # =========================================================
     # DTypes
+    #
+    # PMAP stability note:
+    # Keep using legacy parallelism dtype fields for this phase.
+    # spmd.dtype migration should be a separate config cleanup PR.
     # =========================================================
 
     param_dtype = _dtype(config.parallelism.param_dtype)
@@ -73,6 +102,11 @@ def build_llama_config(
         attention_bias=arch.bias,
         attention_dropout=0.0,
         attention_impl=arch.attention_impl,
+        attention_fallback=getattr(
+            arch,
+            "attention_fallback",
+            "warn",
+        ),
         hidden_act="silu",
         rms_norm_eps=1e-6,
         mlp_bias=arch.bias,

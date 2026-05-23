@@ -11,12 +11,18 @@ Backend policy:
 - splash + PMAP  -> TPU SplashAttention directly
 - splash + GSPMD -> TPU SplashAttention wrapped with shard_map
 - decode -> XLA SDPA
+
+PMAP benchmarking additions:
+- attention_fallback: "warn" | "error"
+- LAUGHLM_ATTENTION_FALLBACK env override for temporary benchmark use
+- XLA fallback remains causal when explicit dense mask is skipped
 """
 
 from __future__ import annotations
 
-from typing import Optional
+import os
 import warnings
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -49,6 +55,7 @@ from LaughLM.distributed.sharding import (
 
 
 _LOGGED_BACKENDS = set()
+_VALID_FALLBACK_POLICIES = {"warn", "error"}
 
 
 def _log_attention_backend(name: str):
@@ -59,6 +66,57 @@ def _log_attention_backend(name: str):
 
 def _is_tpu_backend() -> bool:
     return jax.default_backend() == "tpu"
+
+
+def _attention_fallback_policy(config: LlamaConfig) -> str:
+    """
+    Fallback policy resolution order:
+    1. config.attention_fallback, if wired through config_factory
+    2. LAUGHLM_ATTENTION_FALLBACK env var
+    3. "warn"
+    """
+    policy = getattr(config, "attention_fallback", None)
+
+    if policy is None:
+        policy = os.environ.get(
+            "LAUGHLM_ATTENTION_FALLBACK",
+            "warn",
+        )
+
+    policy = str(policy).lower()
+
+    if policy not in _VALID_FALLBACK_POLICIES:
+        warnings.warn(
+            "[attention] Invalid attention_fallback="
+            f"{policy!r}; using 'warn'. "
+            f"Valid values: {sorted(_VALID_FALLBACK_POLICIES)}",
+            RuntimeWarning,
+        )
+        return "warn"
+
+    return policy
+
+
+def _handle_splash_fallback(
+    *,
+    config: LlamaConfig,
+    reason: str,
+    exc: Exception | None = None,
+):
+    policy = _attention_fallback_policy(config)
+
+    message = (
+        "[attention] Splash fallback requested but "
+        f"attention_fallback='{policy}'. Reason: {reason}"
+    )
+
+    if policy == "error":
+        raise RuntimeError(message) from exc
+
+    warnings.warn(
+        message + "; falling back to XLA SDPA.",
+        RuntimeWarning,
+    )
 
 
 def _find_splash_block_size(seq_len: int) -> tuple[int, int]:
@@ -80,7 +138,6 @@ def _pad_for_splash(
     q/k/v layout:
         [B, T, H, Dh]
     """
-
     B, T, QH, Dh = q.shape
     KVH = k.shape[2]
 
@@ -139,7 +196,6 @@ def _splash_attention(
     Splash kernel layout:
         per-example [H, T, Dh]
     """
-
     from jax.experimental.pallas.ops.tpu.splash_attention import (
         splash_attention_kernel,
         splash_attention_mask,
@@ -156,8 +212,9 @@ def _splash_attention(
 
     if QH != KVH:
         raise NotImplementedError(
-            "Splash path currently requires num_attention_heads == "
-            "num_key_value_heads. Use XLA SDPA for GQA/MQA."
+            "Splash path currently requires "
+            "num_attention_heads == num_key_value_heads. "
+            "Use XLA SDPA for true GQA/MQA."
         )
 
     block, _ = _find_splash_block_size(T)
@@ -233,7 +290,6 @@ def _splash_attention_shard_map(
         sequence/head/head_dim replicated inside each local shard
         FSDP axis is not used by the local Splash kernel
     """
-
     mesh = get_current_mesh()
 
     if mesh is None:
@@ -313,6 +369,18 @@ def _attention_impl_from_config(
     if impl == "splash":
         if _is_tpu_backend() and q_len == kv_len and q_len > 4:
             return "splash"
+
+        reason = (
+            "attention_impl='splash' requested, but runtime is not "
+            f"eligible for Splash. backend={jax.default_backend()!r}, "
+            f"q_len={q_len}, kv_len={kv_len}, mode={mode!r}"
+        )
+
+        _handle_splash_fallback(
+            config=config,
+            reason=reason,
+        )
+
         return "xla"
 
     return "xla"
@@ -323,15 +391,36 @@ def _xla_sdpa(
     key_states: jnp.ndarray,
     value_states: jnp.ndarray,
     attention_mask: Optional[jnp.ndarray],
+    mode: str,
 ) -> jnp.ndarray:
-    _log_attention_backend("xla dot_product_attention")
+    """
+    XLA SDPA fallback.
+
+    Important:
+    When model.py skips dense causal masks for Splash train/prefill,
+    XLA fallback must still remain causal. Therefore, if no bias mask
+    is supplied in train/prefill and q_len == kv_len, use is_causal=True.
+    """
+    q_len = query_states.shape[1]
+    kv_len = key_states.shape[1]
+
+    use_causal_flag = (
+        attention_mask is None
+        and mode in ("train", "prefill")
+        and q_len == kv_len
+    )
+
+    if use_causal_flag:
+        _log_attention_backend("xla dot_product_attention causal")
+    else:
+        _log_attention_backend("xla dot_product_attention")
 
     return jax.nn.dot_product_attention(
         query_states,
         key_states,
         value_states,
         bias=attention_mask,
-        is_causal=False,
+        is_causal=use_causal_flag,
     )
 
 
@@ -366,17 +455,18 @@ def _attention(
             )
 
         except Exception as e:
-            warnings.warn(
-                "[attention] Splash failed "
-                f"({type(e).__name__}: {e}); falling back to XLA SDPA.",
-                RuntimeWarning,
+            _handle_splash_fallback(
+                config=config,
+                reason=f"{type(e).__name__}: {e}",
+                exc=e,
             )
 
     return _xla_sdpa(
-        query_states,
-        key_states,
-        value_states,
-        attention_mask,
+        query_states=query_states,
+        key_states=key_states,
+        value_states=value_states,
+        attention_mask=attention_mask,
+        mode=mode,
     )
 
 

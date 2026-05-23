@@ -10,8 +10,16 @@ architecture:
   positional: rope
   normalization: rms_norm
   norm_placement: pre
+
+  # num_kv_heads == num_heads, so this is MHA-like for the PMAP/Splash phase.
+  # Keep true GQA disabled until Splash-GQA is implemented.
   attention_variant: gqa
   attention_impl: splash
+
+  # Benchmark mode should hard-fail if Splash silently falls back.
+  # Requires schema/config_factory wiring into LlamaConfig.attention_fallback.
+  attention_fallback: error
+
   ffn_type: swiglu
   residual: standard
   embeddings: standard

@@ -59,7 +59,24 @@ class ArchitectureConfig(BaseModel):
     norm_placement: Literal["post", "pre", "sandwich"]
 
     attention_variant: Literal["mha", "mqa", "gqa", "mla"]
-    attention_impl: Literal["standard", "flash", "memory_efficient", "splash"]
+
+    attention_impl: Literal[
+        "standard",
+        "xla",
+        "flash",
+        "cudnn",
+        "memory_efficient",
+        "splash",
+    ]
+
+    attention_fallback: Literal["warn", "error"] = Field(
+        default="warn",
+        description=(
+            "Behavior when attention_impl='splash' cannot use SplashAttention. "
+            "'warn' falls back to XLA SDPA. "
+            "'error' raises immediately, useful for benchmarks."
+        ),
+    )
 
     ffn_type: Literal["gelu_mlp", "geglu", "swiglu", "moe"]
     residual: Literal["standard", "scaled", "deep_norm"]
