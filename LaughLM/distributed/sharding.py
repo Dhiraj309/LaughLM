@@ -1,17 +1,13 @@
 """
 LaughLM/distributed/sharding.py
 
-PMAP-safe sharding compatibility helpers.
+Backend-aware logical sharding helpers.
 
-This branch uses PMAP as the production training backend.
+PMAP:
+  constraints are no-ops.
 
-Important:
-- Runtime PMAP training must not depend on NamedSharding, PartitionSpec,
-  mesh context, or with_sharding_constraint.
-- The LLaMA model still imports logical constraint helpers from this file.
-  For PMAP they intentionally behave as no-ops.
-- Mesh/GSPMD helper functions are kept for future research branches, but
-  they are not used by the PMAP trainer.
+GSPMD/FSDP:
+  constraints use Flax logical axes and are resolved by axis_rules.
 """
 
 from __future__ import annotations
@@ -19,65 +15,116 @@ from __future__ import annotations
 from typing import Any
 
 
+_GSPMD_CONSTRAINTS_ENABLED = False
+
+
+def enable_gspmd_constraints(enabled: bool = True):
+    global _GSPMD_CONSTRAINTS_ENABLED
+    _GSPMD_CONSTRAINTS_ENABLED = bool(enabled)
+
+
+def gspmd_constraints_enabled() -> bool:
+    return _GSPMD_CONSTRAINTS_ENABLED
+
+
+def _logical_constraint(x, axes):
+    if not _GSPMD_CONSTRAINTS_ENABLED:
+        return x
+
+    import flax.linen as nn
+
+    return nn.with_logical_constraint(x, axes)
+
+
 # ============================================================
-# PMAP-safe logical constraints
+# Logical activation constraints
 # ============================================================
 
 def constrain_batch(batch):
+    # Token batch: [batch, sequence] or [grad_accum, batch, sequence]
+    if getattr(batch, "ndim", None) == 3:
+        return _logical_constraint(batch, (None, "batch", "sequence"))
+
+    if getattr(batch, "ndim", None) == 2:
+        return _logical_constraint(batch, ("batch", "sequence"))
+
     return batch
 
 
 def constrain_hidden_states(hidden_states):
-    return hidden_states
+    return _logical_constraint(
+        hidden_states,
+        ("batch", "sequence", "embed"),
+    )
 
 
 def constrain_attention_tensor(tensor):
-    return tensor
+    return _logical_constraint(
+        tensor,
+        ("batch", "sequence", "heads", None),
+    )
+
+
+def constrain_attention_q(tensor):
+    return _logical_constraint(
+        tensor,
+        ("batch", "sequence", "heads", None),
+    )
+
+
+def constrain_attention_kv(tensor):
+    return _logical_constraint(
+        tensor,
+        ("batch", "sequence", "kv_heads", None),
+    )
 
 
 def constrain_kv_cache(tensor):
-    return tensor
+    return _logical_constraint(
+        tensor,
+        ("batch", "sequence", "kv_heads", None),
+    )
 
 
 def constrain_logits(logits):
-    return logits
+    return _logical_constraint(
+        logits,
+        ("batch", "sequence", "vocab"),
+    )
 
 
 def constrain_loss_tensor(tensor):
-    return tensor
+    return _logical_constraint(
+        tensor,
+        ("batch", "sequence"),
+    )
 
 
 def shard_data(data: Any, sharding=None):
-    return data
+    if sharding is None:
+        return data
+
+    import jax
+
+    return jax.device_put(data, sharding)
 
 
 # ============================================================
-# Future GSPMD compatibility helpers
+# Logical axis helpers
 # ============================================================
 
 def _get_axis_names(config):
-    if hasattr(config, "spmd"):
-        rules = config.spmd.axis_rules
-        return {
-            "batch": rules.batch,
-            "embed": rules.embed,
-            "heads": rules.heads,
-            "kv_heads": rules.kv_heads,
-            "mlp": rules.mlp,
-            "vocab": rules.vocab,
-            "sequence": rules.sequence,
-            "layers": rules.layers,
-        }
+    rules = config.spmd.axis_rules
 
     return {
-        "batch": "data",
-        "embed": None,
-        "heads": None,
-        "kv_heads": None,
-        "mlp": None,
-        "vocab": None,
-        "sequence": None,
-        "layers": None,
+        "batch": rules.batch,
+        "embed": rules.embed,
+        "heads": rules.heads,
+        "kv_heads": rules.kv_heads,
+        "mlp": rules.mlp,
+        "vocab": rules.vocab,
+        "sequence": rules.sequence,
+        "layers": rules.layers,
     }
 
 
@@ -123,7 +170,15 @@ def create_input_sharding(mesh, config):
     from jax.sharding import PartitionSpec as P
 
     axes = _get_axis_names(config)
-    return NamedSharding(mesh, P(None, axes["batch"], axes["sequence"]))
+
+    return NamedSharding(
+        mesh,
+        P(
+            None,
+            axes["batch"],
+            axes["sequence"],
+        ),
+    )
 
 
 def create_token_sharding(mesh, config):
@@ -131,7 +186,14 @@ def create_token_sharding(mesh, config):
     from jax.sharding import PartitionSpec as P
 
     axes = _get_axis_names(config)
-    return NamedSharding(mesh, P(axes["batch"], axes["sequence"]))
+
+    return NamedSharding(
+        mesh,
+        P(
+            axes["batch"],
+            axes["sequence"],
+        ),
+    )
 
 
 def create_activation_sharding(mesh, config):
@@ -139,7 +201,15 @@ def create_activation_sharding(mesh, config):
     from jax.sharding import PartitionSpec as P
 
     axes = _get_axis_names(config)
-    return NamedSharding(mesh, P(axes["batch"], axes["sequence"], axes["embed"]))
+
+    return NamedSharding(
+        mesh,
+        P(
+            axes["batch"],
+            axes["sequence"],
+            axes["embed"],
+        ),
+    )
 
 
 def create_logits_sharding(mesh, config):
@@ -147,4 +217,12 @@ def create_logits_sharding(mesh, config):
     from jax.sharding import PartitionSpec as P
 
     axes = _get_axis_names(config)
-    return NamedSharding(mesh, P(axes["batch"], axes["sequence"], axes["vocab"]))
+
+    return NamedSharding(
+        mesh,
+        P(
+            axes["batch"],
+            axes["sequence"],
+            axes["vocab"],
+        ),
+    )

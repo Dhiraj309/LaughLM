@@ -137,6 +137,15 @@ class SchedulerConfig(BaseModel):
 class RuntimeConfig(BaseModel):
     """Runtime training parameters."""
 
+    backend: Literal["pmap", "gspmd"] = Field(
+        default="pmap",
+        description=(
+            "Training backend. "
+            "'pmap' = replicated data-parallel stable path. "
+            "'gspmd' = mesh-native FSDP/ZeRO-3 path."
+        ),
+    )
+
     seq_len: int
     micro_batch_per_device: int
     gradient_accumulation: int
@@ -144,19 +153,9 @@ class RuntimeConfig(BaseModel):
     eval_interval: int
     log_interval: int
 
-    checkpoint_interval: int = Field(
-        default=1000,
-        description="Save checkpoint every N optimizer steps",
-    )
-    checkpoint_max_to_keep: int = Field(
-        default=3,
-        description="Maximum number of recent checkpoints to retain",
-    )
-    checkpoint_dir: str = Field(
-        default="checkpoints",
-        description="Directory where checkpoints are stored",
-    )
-
+    checkpoint_interval: int = Field(default=1000)
+    checkpoint_max_to_keep: int = Field(default=3)
+    checkpoint_dir: str = Field(default="checkpoints")
 
 # ════════════════════════════════════════════════════════════════
 # Dataset Sources
