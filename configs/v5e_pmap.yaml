@@ -43,6 +43,7 @@ scheduler:
   min_lr_ratio: 0.05
 
 runtime:
+  backend: pmap
   seq_len: 2048
   micro_batch_per_device: 16
   gradient_accumulation: 1
@@ -61,7 +62,7 @@ data:
   max_seq_len: 2048
   packing: true
   eos_between_docs: true
-  pad_to_multiple: 64
+  pad_to_multiple: 128
 
 tokenizer:
   algorithm: bpe
