@@ -16,6 +16,7 @@ from typing import Any
 
 
 _GSPMD_CONSTRAINTS_ENABLED = False
+_CURRENT_MESH = None
 
 
 def enable_gspmd_constraints(enabled: bool = True):
@@ -25,6 +26,15 @@ def enable_gspmd_constraints(enabled: bool = True):
 
 def gspmd_constraints_enabled() -> bool:
     return _GSPMD_CONSTRAINTS_ENABLED
+
+
+def set_current_mesh(mesh):
+    global _CURRENT_MESH
+    _CURRENT_MESH = mesh
+
+
+def get_current_mesh():
+    return _CURRENT_MESH
 
 
 def _logical_constraint(x, axes):
