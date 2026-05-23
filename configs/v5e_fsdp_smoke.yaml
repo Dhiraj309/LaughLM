@@ -11,7 +11,7 @@ architecture:
   normalization: rms_norm
   norm_placement: pre
   attention_variant: gqa
-  attention_impl: splash
+  attention_impl: standard
   ffn_type: swiglu
   residual: standard
   embeddings: standard
@@ -35,19 +35,20 @@ optimizer:
   eps: 1e-8
   weight_decay: 0.1
   gradient_clip: 1.0
+  mu_dtype: bfloat16
 
 scheduler:
   type: wsd
-  warmup_fraction: 0.02
-  stable_fraction: 0.20
-  min_lr_ratio: 0.05
+  warmup_fraction: 0.01
+  stable_fraction: 0.80
+  min_lr_ratio: 0.10
 
 runtime:
   backend: gspmd
   seq_len: 1024
-  micro_batch_per_device: 8
+  micro_batch_per_device: 12
   gradient_accumulation: 1
-  total_tokens: 1_000_000
+  total_tokens: 10_000_000
   eval_interval: 100
   log_interval: 10
   checkpoint_interval: 100
