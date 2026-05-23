@@ -1,5 +1,3 @@
-# LaughLM/model/llama/model.py
-
 """
 Canonical Llama decoder-only language model.
 
@@ -22,17 +20,21 @@ Frontier-grade SPMD additions:
 3. Correct variable_broadcast semantics
 4. Remat+scan compatibility
 5. Future FSDP compatibility
+
+PMAP throughput cleanup:
+────────────────────────────────────────────────────
+1. Avoid dense [1, 1, T, T] causal mask construction when
+   TPU SplashAttention is requested for train/prefill.
+2. Decode masks remain explicit.
+3. Non-Splash attention keeps explicit causal masks.
 """
 
 from typing import Optional
 
 import jax.numpy as jnp
-
 from flax import linen as nn
 
-from LaughLM.model.llama.config import (
-    LlamaConfig,
-)
+from LaughLM.model.llama.config import LlamaConfig
 
 from LaughLM.model.llama.initialization import (
     create_dense,
@@ -40,25 +42,12 @@ from LaughLM.model.llama.initialization import (
     constrain_hidden_states,
 )
 
-from LaughLM.distributed.sharding import (
-    constrain_logits,
-)
+from LaughLM.distributed.sharding import constrain_logits
 
-from LaughLM.model.llama.decoder import (
-    LlamaDecoderLayer,
-)
-
-from LaughLM.model.llama.remat import (
-    remat_module,
-)
-
-from LaughLM.model.llama.rmsnorm import (
-    RMSNorm,
-)
-
-from LaughLM.model.llama.kv_cache import (
-    KVCache,
-)
+from LaughLM.model.llama.decoder import LlamaDecoderLayer
+from LaughLM.model.llama.remat import remat_module
+from LaughLM.model.llama.rmsnorm import RMSNorm
+from LaughLM.model.llama.kv_cache import KVCache
 
 from LaughLM.model.llama.masks import (
     build_causal_mask,
@@ -67,11 +56,18 @@ from LaughLM.model.llama.masks import (
 
 
 # ============================================================
+# Helpers
+# ============================================================
+
+def _uses_splash_attention(config: LlamaConfig) -> bool:
+    return getattr(config, "attention_impl", "standard") == "splash"
+
+
+# ============================================================
 # Scanned decoder block
 # ============================================================
 
 class ScannedDecoderLayer(nn.Module):
-
     config: LlamaConfig
 
     @nn.compact
@@ -83,7 +79,6 @@ class ScannedDecoderLayer(nn.Module):
         kv_cache,
         mode,
     ):
-
         layer = LlamaDecoderLayer(
             config=self.config,
             name="block",
@@ -103,16 +98,10 @@ class ScannedDecoderLayer(nn.Module):
 # ============================================================
 
 class LlamaModel(nn.Module):
-
     config: LlamaConfig
 
     def setup(self):
-
         config = self.config
-
-        # --------------------------------------------------
-        # Token embeddings
-        # --------------------------------------------------
 
         self.embed_tokens = create_embedding(
             num_embeddings=config.vocab_size,
@@ -121,61 +110,31 @@ class LlamaModel(nn.Module):
             name="embed_tokens",
         )
 
-        # --------------------------------------------------
-        # Optional rematerialization
-        # --------------------------------------------------
-
         LayerCls = ScannedDecoderLayer
 
-        if getattr(
-            config,
-            "remat_policy",
-            None,
-        ) is not None:
-
+        if getattr(config, "remat_policy", None) is not None:
             LayerCls = remat_module(
                 ScannedDecoderLayer,
                 policy=config.remat_policy,
-                prevent_cse=getattr(
-                    config,
-                    "prevent_cse",
-                    False,
-                ),
+                prevent_cse=getattr(config, "prevent_cse", False),
             )
 
-        # --------------------------------------------------
-        # Decoder stack
-        # --------------------------------------------------
-
-        if getattr(
-            config,
-            "scan_layers",
-            False,
-        ):
-
+        if getattr(config, "scan_layers", False):
             ScanLayer = nn.scan(
-
                 LayerCls,
-
                 variable_axes={
                     "params": 0,
                 },
-
                 variable_broadcast={
                     "cache",
                 },
-
                 split_rngs={
                     "params": True,
                     "dropout": True,
                 },
-
                 in_axes=nn.broadcast,
-
                 out_axes=nn.broadcast,
-
                 length=config.num_hidden_layers,
-
                 metadata_params={
                     "partition_name": "layers",
                 },
@@ -187,20 +146,13 @@ class LlamaModel(nn.Module):
             )
 
         else:
-
             self.layers = [
                 LlamaDecoderLayer(
                     config=config,
                     name=f"layers_{i}",
                 )
-                for i in range(
-                    config.num_hidden_layers
-                )
+                for i in range(config.num_hidden_layers)
             ]
-
-        # --------------------------------------------------
-        # Final RMSNorm
-        # --------------------------------------------------
 
         self.norm = RMSNorm(
             hidden_size=config.hidden_size,
@@ -215,60 +167,26 @@ class LlamaModel(nn.Module):
         kv_caches: Optional[list[KVCache]] = None,
         use_cache: bool = False,
         mode: str = "train",
-    ) -> tuple[
-        jnp.ndarray,
-        Optional[list[KVCache]],
-    ]:
+    ) -> tuple[jnp.ndarray, Optional[list[KVCache]]]:
 
-        # --------------------------------------------------
-        # Scan limitation
-        # --------------------------------------------------
-
-        if (
-            getattr(
-                self.config,
-                "scan_layers",
-                False,
-            )
-            and use_cache
-        ):
+        if getattr(self.config, "scan_layers", False) and use_cache:
             raise ValueError(
-                "scan_layers with KV cache "
-                "is not yet supported"
+                "scan_layers with KV cache is not yet supported"
             )
 
         B, T = input_ids.shape
 
-        # --------------------------------------------------
-        # Token embeddings
-        # --------------------------------------------------
-
-        hidden_states = self.embed_tokens(
-            input_ids
-        )
-
-        hidden_states = constrain_hidden_states(
-            hidden_states
-        )
+        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = constrain_hidden_states(hidden_states)
 
         # --------------------------------------------------
         # Position IDs
         # --------------------------------------------------
 
         if position_ids is None:
-
-            if (
-                mode == "decode"
-                and kv_caches is not None
-            ):
-
-                start_pos = (
-                    kv_caches[0]
-                    .cache_position
-                )
-
+            if mode == "decode" and kv_caches is not None:
+                start_pos = kv_caches[0].cache_position
             else:
-
                 start_pos = 0
 
             position_ids = jnp.broadcast_to(
@@ -282,59 +200,48 @@ class LlamaModel(nn.Module):
 
         # --------------------------------------------------
         # Attention mask
+        #
+        # SplashAttention builds its own causal mask internally.
+        # Avoid materializing dense [1, 1, T, T] masks for PMAP
+        # train/prefill when attention_impl == "splash".
+        #
+        # If Splash falls back to XLA, attention.py uses
+        # jax.nn.dot_product_attention(..., is_causal=True)
+        # when attention_mask is None in train/prefill.
         # --------------------------------------------------
 
-        if mode in (
-            "train",
-            "prefill",
-        ):
-
-            attention_mask = (
-                build_causal_mask(
+        if mode in ("train", "prefill"):
+            if _uses_splash_attention(self.config):
+                attention_mask = None
+            else:
+                attention_mask = build_causal_mask(
                     query_length=T,
                     key_length=T,
                     dtype=hidden_states.dtype,
                 )
-            )
 
         elif mode == "decode":
-
             if kv_caches is None:
-
                 raise ValueError(
                     "decode mode requires kv_caches"
                 )
 
-            key_length = (
-                kv_caches[0]
-                .cache_position
-                + T
-            )
+            key_length = kv_caches[0].cache_position + T
 
-            attention_mask = (
-                build_decode_mask(
-                    query_length=T,
-                    key_length=key_length,
-                    dtype=hidden_states.dtype,
-                )
+            attention_mask = build_decode_mask(
+                query_length=T,
+                key_length=key_length,
+                dtype=hidden_states.dtype,
             )
 
         else:
-
-            raise ValueError(
-                f"Unknown mode: {mode}"
-            )
+            raise ValueError(f"Unknown mode: {mode}")
 
         # --------------------------------------------------
         # Decoder stack
         # --------------------------------------------------
 
-        if getattr(
-            self.config,
-            "scan_layers",
-            False,
-        ):
-
+        if getattr(self.config, "scan_layers", False):
             hidden_states, _ = self.layers(
                 hidden_states=hidden_states,
                 positions=position_ids,
@@ -343,70 +250,38 @@ class LlamaModel(nn.Module):
                 mode=mode,
             )
 
-            hidden_states = constrain_hidden_states(
-                hidden_states
-            )
-
+            hidden_states = constrain_hidden_states(hidden_states)
             updated_caches = None
 
         else:
-
             updated_caches = []
 
-            for layer_idx, layer in enumerate(
-                self.layers
-            ):
-
+            for layer_idx, layer in enumerate(self.layers):
                 layer_cache = None
 
                 if kv_caches is not None:
+                    layer_cache = kv_caches[layer_idx]
 
-                    layer_cache = kv_caches[
-                        layer_idx
-                    ]
-
-                hidden_states, updated_cache = (
-                    layer(
-                        hidden_states=hidden_states,
-                        positions=position_ids,
-                        attention_mask=attention_mask,
-                        kv_cache=layer_cache,
-                        mode=mode,
-                    )
+                hidden_states, updated_cache = layer(
+                    hidden_states=hidden_states,
+                    positions=position_ids,
+                    attention_mask=attention_mask,
+                    kv_cache=layer_cache,
+                    mode=mode,
                 )
 
-                hidden_states = (
-                    constrain_hidden_states(
-                        hidden_states
-                    )
-                )
+                hidden_states = constrain_hidden_states(hidden_states)
 
                 if use_cache:
+                    updated_caches.append(updated_cache)
 
-                    updated_caches.append(
-                        updated_cache
-                    )
-
-        # --------------------------------------------------
-        # Final normalization
-        # --------------------------------------------------
-
-        hidden_states = self.norm(
-            hidden_states
-        )
-
-        hidden_states = constrain_hidden_states(
-            hidden_states
-        )
+        hidden_states = self.norm(hidden_states)
+        hidden_states = constrain_hidden_states(hidden_states)
 
         if not use_cache:
-
             updated_caches = None
 
-        return (
-            hidden_states,
-            updated_caches,
-        )
+        return hidden_states, updated_caches
 
 
 # ============================================================
@@ -414,11 +289,9 @@ class LlamaModel(nn.Module):
 # ============================================================
 
 class LlamaForCausalLM(nn.Module):
-
     config: LlamaConfig
 
     def setup(self):
-
         config = self.config
 
         self.model = LlamaModel(
@@ -440,32 +313,18 @@ class LlamaForCausalLM(nn.Module):
         kv_caches: Optional[list[KVCache]] = None,
         use_cache: bool = False,
         mode: str = "train",
-    ) -> tuple[
-        jnp.ndarray,
-        Optional[list[KVCache]],
-    ]:
+    ) -> tuple[jnp.ndarray, Optional[list[KVCache]]]:
 
-        hidden_states, updated_caches = (
-            self.model(
-                input_ids=input_ids,
-                position_ids=position_ids,
-                kv_caches=kv_caches,
-                use_cache=use_cache,
-                mode=mode,
-            )
+        hidden_states, updated_caches = self.model(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            kv_caches=kv_caches,
+            use_cache=use_cache,
+            mode=mode,
         )
 
-        # --------------------------------------------------
-        # LM head
-        # --------------------------------------------------
-
         if self.config.tie_word_embeddings:
-
-            embedding = (
-                self.model
-                .embed_tokens
-                .embedding
-            )
+            embedding = self.model.embed_tokens.embedding
 
             logits = jnp.einsum(
                 "btd,vd->btv",
@@ -475,28 +334,10 @@ class LlamaForCausalLM(nn.Module):
             )
 
         else:
+            logits = self.lm_head(hidden_states)
 
-            logits = self.lm_head(
-                hidden_states
-            )
+        logits = logits.astype(jnp.float32)
+        logits = constrain_logits(logits)
+        logits = logits.astype(self.config.output_dtype)
 
-        # --------------------------------------------------
-        # Stable fp32 logits
-        # --------------------------------------------------
-
-        logits = logits.astype(
-            jnp.float32
-        )
-
-        logits = constrain_logits(
-            logits
-        )
-
-        logits = logits.astype(
-            self.config.output_dtype
-        )
-
-        return (
-            logits,
-            updated_caches,
-        )
+        return logits, updated_caches

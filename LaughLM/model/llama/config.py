@@ -51,9 +51,14 @@ class LlamaConfig:
 
     # PMAP production attention backend:
     # - "standard" / "xla": JAX XLA dot_product_attention
-    # - "flash" / "cudnn": try cuDNN attention on GPU, fallback to XLA
-    # - TPU Splash/Pallas is intentionally not wired here yet
+    # - "flash" / "cudnn" / "memory_efficient": currently routed to XLA SDPA
+    # - "splash": TPU SplashAttention when eligible
     attention_impl: str = "standard"
+
+    # Splash fallback policy:
+    # - "warn": warn and fall back to XLA SDPA
+    # - "error": raise immediately, useful for benchmark configs
+    attention_fallback: str = "warn"
 
     # =========================================================
     # MLP / normalization
@@ -169,4 +174,15 @@ class LlamaConfig:
             raise ValueError(
                 f"Unknown attention_impl: {self.attention_impl!r}. "
                 f"Valid values: {sorted(valid_attention_impls)}"
+            )
+
+        valid_attention_fallbacks = {
+            "warn",
+            "error",
+        }
+
+        if self.attention_fallback not in valid_attention_fallbacks:
+            raise ValueError(
+                f"Unknown attention_fallback: {self.attention_fallback!r}. "
+                f"Valid values: {sorted(valid_attention_fallbacks)}"
             )
