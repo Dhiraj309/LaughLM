@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 from flax import struct
 
 
@@ -18,7 +19,7 @@ class TrainState:
     opt_state: Any
 
     step: Any = 0
-    tokens_processed: Any = 0
+    tokens_processed=jnp.array(0, dtype=jnp.int64),
 
     rng_key: Any = None
     extra_state: Any = None

@@ -60,18 +60,36 @@ def _resolve_optimizer_dtype(name: str):
 
 def get_weight_decay_mask(params: Any) -> Any:
     """
-    Return a mask tree: True = apply decay, False = exclude.
+    Return mask tree: True = apply weight decay, False = exclude.
 
-    Excluded: scale (norm γ), bias, pos_embedding.
-    Every frontier model excludes norm parameters from weight decay.
-    
-    This function is passed as the `mask` argument to
-    optax.add_decayed_weights. It receives the params pytree and
-    returns a pytree of booleans with the same structure.
+    Excludes:
+    - bias
+    - scale
+    - pos_embedding
+    - embedding
+    - RMSNorm weight
+
+    Keeps Dense/MLP/attention kernels decayed.
     """
     flat = traverse_util.flatten_dict(params)
-    no_decay = {"scale", "bias", "pos_embedding"}
-    mask_flat = {k: (k[-1] not in no_decay) for k in flat}
+
+    def should_decay(path):
+        leaf = path[-1]
+        joined = "/".join(str(p).lower() for p in path)
+
+        if leaf in {"bias", "scale", "pos_embedding", "embedding"}:
+            return False
+
+        if leaf == "weight" and (
+            "rmsnorm" in joined
+            or "norm" in joined
+            or "layernorm" in joined
+        ):
+            return False
+
+        return True
+
+    mask_flat = {k: should_decay(k) for k in flat}
     return traverse_util.unflatten_dict(mask_flat)
 
 

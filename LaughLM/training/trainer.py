@@ -58,48 +58,27 @@ class Trainer:
             flush=True,
         )
 
-        # ============================================================
-        # PMAP runtime validation
-        # ============================================================
-
         if self.num_devices <= 0:
-            raise RuntimeError(
-                "No local JAX devices found."
-            )
+            raise RuntimeError("No local JAX devices found.")
 
         if config.runtime.micro_batch_per_device <= 0:
-            raise ValueError(
-                "runtime.micro_batch_per_device must be > 0"
-            )
+            raise ValueError("runtime.micro_batch_per_device must be > 0")
 
         if config.runtime.gradient_accumulation <= 0:
-            raise ValueError(
-                "runtime.gradient_accumulation must be > 0"
-            )
+            raise ValueError("runtime.gradient_accumulation must be > 0")
 
         if config.runtime.seq_len <= 0:
-            raise ValueError(
-                "runtime.seq_len must be > 0"
-            )
+            raise ValueError("runtime.seq_len must be > 0")
 
-        if (
-            config.runtime.seq_len
-            > config.model.max_seq_len
-        ):
+        if config.runtime.seq_len > config.model.max_seq_len:
             raise ValueError(
-                f"runtime.seq_len={config.runtime.seq_len} "
-                f"exceeds "
+                f"runtime.seq_len={config.runtime.seq_len} exceeds "
                 f"model.max_seq_len={config.model.max_seq_len}"
             )
 
-        if (
-            config.parallelism.data_parallel
-            != self.num_devices
-        ):
+        if config.parallelism.data_parallel != self.num_devices:
             raise ValueError(
-                "PMAP requires "
-                "parallelism.data_parallel "
-                "to exactly match "
+                "PMAP requires parallelism.data_parallel to exactly match "
                 "jax.local_device_count().\n"
                 f"Got config={config.parallelism.data_parallel}, "
                 f"devices={self.num_devices}"
@@ -162,7 +141,7 @@ class Trainer:
             params=params,
             opt_state=opt_state,
             step=jnp.array(0, dtype=jnp.int32),
-            tokens_processed=jnp.array(0, dtype=jnp.int32),
+            tokens_processed=jnp.array(0, dtype=jnp.int64),
             rng_key=self.rng.key,
         )
 
@@ -174,12 +153,22 @@ class Trainer:
 
         if restored is not None:
             state, restored_step = restored
+
+            self.start_step = int(state.step)
+
+            # Prefer checkpoint-restored token counter if available.
+            # It is int64 now, but host-side accounting is authoritative
+            # during PMAP training.
+            self.start_tokens_seen = int(state.tokens_processed)
+
             print(
-                f"[trainer] resumed from step={int(state.step):,} "
-                f"tokens={int(state.tokens_processed):,}",
+                f"[trainer] resumed from step={self.start_step:,} "
+                f"tokens={self.start_tokens_seen:,}",
                 flush=True,
             )
         else:
+            self.start_step = 0
+            self.start_tokens_seen = 0
             print("[trainer] fresh run", flush=True)
 
         self.state = jax.device_put_replicated(state, self.devices)
@@ -202,7 +191,11 @@ class Trainer:
             num_devices=self.num_devices,
         )
 
-        global_batch_size = config.runtime.micro_batch_per_device * self.num_devices
+        global_batch_size = (
+            config.runtime.micro_batch_per_device
+            * self.num_devices
+        )
+
         tokens_per_step = (
             config.runtime.seq_len
             * global_batch_size
@@ -238,6 +231,9 @@ class Trainer:
             * self.grad_accum
         )
 
+        current_step = int(self.start_step)
+        host_tokens_seen = int(self.start_tokens_seen)
+
         print(
             f"\nTraining for {total_steps:,} optimizer steps with PMAP\n",
             flush=True,
@@ -252,10 +248,7 @@ class Trainer:
 
         try:
             while True:
-                state_host = _unreplicate(self.state)
-                step = int(state_host.step)
-
-                if step >= total_steps:
+                if current_step >= total_steps:
                     break
 
                 step_start = time.perf_counter()
@@ -305,6 +298,7 @@ class Trainer:
                     metrics,
                 )
 
+                # Only sync scalar step, not full TrainState.
                 self.state.step.block_until_ready()
 
                 step_time = time.perf_counter() - step_start
@@ -314,9 +308,8 @@ class Trainer:
                     metrics,
                 )
 
-                state_host = _unreplicate(self.state)
-                current_step = int(state_host.step)
-                tokens_seen = int(state_host.tokens_processed)
+                current_step += 1
+                host_tokens_seen += tokens_per_step
 
                 lr = _scalar(self.schedule(current_step))
 
@@ -325,7 +318,7 @@ class Trainer:
                     metrics=metrics_host,
                     lr=lr,
                     grad_norm=metrics_host.get("grad_norm"),
-                    tokens_seen=tokens_seen,
+                    tokens_seen=host_tokens_seen,
                     tokens_in_step=tokens_per_step,
                     step_time=step_time,
                 )
@@ -336,7 +329,7 @@ class Trainer:
                         metrics=metrics_host,
                         lr=lr,
                         grad_norm=metrics_host.get("grad_norm"),
-                        tokens_seen=tokens_seen,
+                        tokens_seen=host_tokens_seen,
                         tokens_in_step=tokens_per_step,
                         step_time=step_time,
                     )
@@ -352,7 +345,7 @@ class Trainer:
                     metadata = self.checkpoints.build_metadata_from_config(
                         config=self.config,
                         step=current_step,
-                        tokens_processed=int(state_to_save.tokens_processed),
+                        tokens_processed=host_tokens_seen,
                         num_devices=self.num_devices,
                     )
 
@@ -363,7 +356,8 @@ class Trainer:
                     )
 
                     print(
-                        f"[trainer] checkpoint saved step={current_step:,}",
+                        f"[trainer] checkpoint saved step={current_step:,} "
+                        f"tokens={host_tokens_seen:,}",
                         flush=True,
                     )
 
@@ -372,12 +366,14 @@ class Trainer:
             self.logger.flush()
 
             state_to_save = _unreplicate(self.state)
-            final_step = int(state_to_save.step)
+
+            final_step = current_step
+            final_tokens_seen = host_tokens_seen
 
             metadata = self.checkpoints.build_metadata_from_config(
                 config=self.config,
                 step=final_step,
-                tokens_processed=int(state_to_save.tokens_processed),
+                tokens_processed=final_tokens_seen,
                 num_devices=self.num_devices,
             )
 
@@ -391,7 +387,7 @@ class Trainer:
 
             self.logger.log_summary(
                 step=final_step,
-                tokens_processed=int(state_to_save.tokens_processed),
+                tokens_processed=final_tokens_seen,
             )
 
         finally:
