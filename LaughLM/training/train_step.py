@@ -103,6 +103,25 @@ def _loss_kwargs(
     }
 
 
+def _unbox_param_leaf(x):
+    """
+    Flax logical partition wrappers may appear in params depending on
+    initialization/restoration path. The training loss needs raw arrays.
+    """
+    if hasattr(x, "unbox"):
+        try:
+            return x.unbox(
+                apply_constraint=False,
+            )
+        except TypeError:
+            return x.unbox()
+
+    if isinstance(x, dict) and "value" in x:
+        return x["value"]
+
+    return x
+
+
 def _get_lm_head_kernel(
     params,
     *,
@@ -118,9 +137,13 @@ def _get_lm_head_kernel(
       params["lm_head"]["kernel"]                   # [hidden, vocab]
     """
     if tie_word_embeddings:
-        return params["model"]["embed_tokens"]["embedding"]
+        return _unbox_param_leaf(
+            params["model"]["embed_tokens"]["embedding"]
+        )
 
-    return params["lm_head"]["kernel"]
+    return _unbox_param_leaf(
+        params["lm_head"]["kernel"]
+    )
 
 
 def _get_lm_head_bias(
@@ -136,9 +159,16 @@ def _get_lm_head_bias(
         {},
     )
 
-    return lm_head.get(
+    bias = lm_head.get(
         "bias",
         None,
+    )
+
+    if bias is None:
+        return None
+
+    return _unbox_param_leaf(
+        bias
     )
 
 
@@ -380,10 +410,6 @@ def create_train_step(
             grads,
             loss,
         )
-
-        # ====================================================
-        # Compatibility only
-        # ====================================================
 
         local_tokens = (
             batch.shape[0]

@@ -4,22 +4,16 @@ model:
   num_layers: 16
   num_heads: 12
   num_kv_heads: 12
-  max_seq_len: 2048
+  max_seq_len: 4096
 
 architecture:
   positional: rope
   normalization: rms_norm
   norm_placement: pre
-
-  # num_kv_heads == num_heads, so this is MHA-like for the PMAP/Splash phase.
-  # Keep true GQA disabled until Splash-GQA is implemented.
   attention_variant: gqa
   attention_impl: splash
-
-  # Benchmark mode should hard-fail if Splash silently falls back.
-  # Requires schema/config_factory wiring into LlamaConfig.attention_fallback.
   attention_fallback: error
-
+  fused_qkv: true
   ffn_type: swiglu
   residual: standard
   embeddings: standard
@@ -43,6 +37,7 @@ optimizer:
   eps: 1e-8
   weight_decay: 0.1
   gradient_clip: 1.0
+  mu_dtype: bfloat16
 
 scheduler:
   type: wsd
@@ -50,17 +45,24 @@ scheduler:
   stable_fraction: 0.20
   min_lr_ratio: 0.05
 
+loss:
+  chunked_logits: true
+  logits_chunk_size: 4096
+  remat_logits_chunks: true
+  z_loss: 1.0e-4
+  ignore_index: -100
+
 runtime:
   backend: pmap
-  seq_len: 2048
-  micro_batch_per_device: 16
+  seq_len: 4096
+  micro_batch_per_device: 32
   gradient_accumulation: 1
-  total_tokens: 20_000_000
-  eval_interval: 1000
+  total_tokens: 250_000_000
+  eval_interval: 500
   log_interval: 10
   checkpoint_interval: 500
   checkpoint_max_to_keep: 2
-  checkpoint_dir: checkpoints/v5e_pmap
+  checkpoint_dir: checkpoints/v5e_pmap_chunked_ce_s2048_mb16
 
 data:
   sources:

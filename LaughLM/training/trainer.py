@@ -249,10 +249,14 @@ class Trainer:
 
             self.start_step = int(state.step)
 
-            metadata = self.checkpoints.load_metadata(restored_step)
+            metadata = self.checkpoints.load_metadata(
+                restored_step
+            )
 
             if metadata is not None and "tokens_processed" in metadata:
-                self.start_tokens_seen = int(metadata["tokens_processed"])
+                self.start_tokens_seen = int(
+                    metadata["tokens_processed"]
+                )
             else:
                 self.start_tokens_seen = (
                     int(self.start_step)
@@ -264,10 +268,15 @@ class Trainer:
                 f"tokens={self.start_tokens_seen:,}",
                 flush=True,
             )
+
         else:
             self.start_step = 0
             self.start_tokens_seen = 0
-            print("[trainer] fresh run", flush=True)
+
+            print(
+                "[trainer] fresh run",
+                flush=True,
+            )
 
         # ====================================================
         # Replicate state
@@ -299,7 +308,9 @@ class Trainer:
         # Logger
         # ====================================================
 
-        param_info = estimate_parameters(config)
+        param_info = estimate_parameters(
+            config
+        )
 
         self.logger = TrainingLogger(
             config,
@@ -325,7 +336,9 @@ class Trainer:
             f"  per_device_batch={config.runtime.micro_batch_per_device}\n"
             f"  seq_len={config.runtime.seq_len}\n"
             f"  grad_accum={self.grad_accum}\n"
-            f"  tokens_per_step={tokens_per_step:,}",
+            f"  tokens_per_step={tokens_per_step:,}\n"
+            f"  chunked_logits={config.loss.chunked_logits}\n"
+            f"  logits_chunk_size={config.loss.logits_chunk_size}",
             flush=True,
         )
 
@@ -333,7 +346,10 @@ class Trainer:
     # Train loop
     # ========================================================
 
-    def train(self, dataloader: Iterator):
+    def train(
+        self,
+        dataloader: Iterator,
+    ):
         cfg = self.config
 
         total_steps = compute_total_steps(
@@ -352,7 +368,10 @@ class Trainer:
             * self.grad_accum
         )
 
-        current_step = int(self.start_step)
+        current_step = int(
+            self.start_step
+        )
+
         host_tokens_seen = int(
             self.start_tokens_seen
         )
@@ -367,7 +386,9 @@ class Trainer:
             size=8,
         )
 
-        data_iter = iter(prefetched_loader)
+        data_iter = iter(
+            prefetched_loader
+        )
 
         try:
             while True:
@@ -385,13 +406,22 @@ class Trainer:
 
                 for _ in range(self.grad_accum):
 
-                    batch = next(data_iter)
+                    batch = next(
+                        data_iter
+                    )
 
-                    if not isinstance(batch, np.ndarray):
-                        batch = np.asarray(batch)
+                    if not isinstance(
+                        batch,
+                        np.ndarray,
+                    ):
+                        batch = np.asarray(
+                            batch
+                        )
 
                     if batch.dtype != np.int32:
-                        batch = batch.astype(np.int32)
+                        batch = batch.astype(
+                            np.int32
+                        )
 
                     expected_shape = (
                         global_batch_size,
@@ -404,7 +434,9 @@ class Trainer:
                             f"expected {expected_shape}"
                         )
 
-                    micro_batches.append(batch)
+                    micro_batches.append(
+                        batch
+                    )
 
                 batch = np.stack(
                     micro_batches,
