@@ -13,7 +13,7 @@ Design:
 - Optax optimizer updates
 
 PMAP chunked-loss fix:
-- Training/eval now request final hidden states from LlamaForCausalLM.
+- Training/eval request final hidden states from LlamaForCausalLM.
 - Loss applies LM head inside loss.py.
 - With loss.chunked_logits=True, full [B, T, vocab] logits are never
   materialized in the hot path.
