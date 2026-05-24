@@ -59,6 +59,8 @@ class LlamaConfig:
     # - "warn": warn and fall back to XLA SDPA
     # - "error": raise immediately, useful for benchmark configs
     attention_fallback: str = "warn"
+    
+    fused_qkv: bool = False
 
     # =========================================================
     # MLP / normalization

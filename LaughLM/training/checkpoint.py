@@ -2,6 +2,25 @@
 LaughLM/training/checkpoint.py
 
 PMAP-safe Orbax checkpoint manager with resume metadata validation.
+
+Resume policy
+-------------
+Strictly incompatible:
+- Parameter-shape-defining model fields
+- Param-tree/semantics fields such as fused_qkv, parallel_block, weight_tying
+
+Allowed with warning:
+- runtime.seq_len
+- runtime.micro_batch_per_device
+- runtime.gradient_accumulation
+- data_parallel / num_devices
+- max_seq_len for RoPE/ALiBi/non-learned positional embeddings
+
+This allows practical continuation such as:
+    seq_len 2048, batch 16
+    -> seq_len 8192, batch 4
+
+as long as the parameter tree is compatible.
 """
 
 from __future__ import annotations
@@ -9,7 +28,6 @@ from __future__ import annotations
 import json
 import traceback
 from pathlib import Path
-from typing import Any
 
 import jax
 import orbax.checkpoint as ocp
@@ -119,11 +137,14 @@ class CheckpointManager:
         tokens_processed: int,
         num_devices: int,
     ) -> dict:
+        arch = config.architecture
+
         return {
             "format": "laughlm_pmap_checkpoint_v1",
             "step": int(step),
             "tokens_processed": int(tokens_processed),
             "num_devices": int(num_devices),
+
             "model": {
                 "vocab_size": int(config.model.vocab_size),
                 "d_model": int(config.model.d_model),
@@ -136,6 +157,7 @@ class CheckpointManager:
                 ),
                 "max_seq_len": int(config.model.max_seq_len),
             },
+
             "runtime": {
                 "seq_len": int(config.runtime.seq_len),
                 "micro_batch_per_device": int(
@@ -145,17 +167,22 @@ class CheckpointManager:
                     config.runtime.gradient_accumulation
                 ),
             },
+
             "parallelism": {
                 "data_parallel": int(config.parallelism.data_parallel),
                 "model_parallel": int(config.parallelism.model_parallel),
                 "compute_dtype": str(config.parallelism.compute_dtype),
                 "param_dtype": str(config.parallelism.param_dtype),
             },
+
             "architecture": {
-                "attention_impl": str(config.architecture.attention_impl),
-                "attention_variant": str(config.architecture.attention_variant),
-                "parallel_block": bool(config.architecture.parallel_block),
-                "weight_tying": bool(config.architecture.weight_tying),
+                "positional": str(arch.positional),
+                "normalization": str(arch.normalization),
+                "attention_impl": str(arch.attention_impl),
+                "attention_variant": str(arch.attention_variant),
+                "parallel_block": bool(arch.parallel_block),
+                "fused_qkv": bool(getattr(arch, "fused_qkv", False)),
+                "weight_tying": bool(arch.weight_tying),
             },
         }
 
@@ -174,74 +201,125 @@ class CheckpointManager:
             )
             return
 
-        checks = {
+        meta_model = metadata.get("model", {})
+        meta_arch = metadata.get("architecture", {})
+        meta_runtime = metadata.get("runtime", {})
+        meta_parallel = metadata.get("parallelism", {})
+
+        current_kv_heads = config.model.num_kv_heads
+
+        strict_checks = {
+            # Parameter-shape-defining fields.
             "model.vocab_size": (
-                metadata["model"]["vocab_size"],
+                meta_model.get("vocab_size"),
                 config.model.vocab_size,
             ),
             "model.d_model": (
-                metadata["model"]["d_model"],
+                meta_model.get("d_model"),
                 config.model.d_model,
             ),
             "model.num_layers": (
-                metadata["model"]["num_layers"],
+                meta_model.get("num_layers"),
                 config.model.num_layers,
             ),
             "model.num_heads": (
-                metadata["model"]["num_heads"],
+                meta_model.get("num_heads"),
                 config.model.num_heads,
             ),
             "model.num_kv_heads": (
-                metadata["model"]["num_kv_heads"],
-                config.model.num_kv_heads,
+                meta_model.get("num_kv_heads"),
+                current_kv_heads,
             ),
-            "model.max_seq_len": (
-                metadata["model"]["max_seq_len"],
-                config.model.max_seq_len,
+
+            # Param-tree / forward-semantics fields.
+            "architecture.attention_variant": (
+                meta_arch.get("attention_variant"),
+                config.architecture.attention_variant,
             ),
-            "runtime.seq_len": (
-                metadata["runtime"]["seq_len"],
-                config.runtime.seq_len,
+            "architecture.parallel_block": (
+                meta_arch.get("parallel_block"),
+                config.architecture.parallel_block,
             ),
-            "runtime.micro_batch_per_device": (
-                metadata["runtime"]["micro_batch_per_device"],
-                config.runtime.micro_batch_per_device,
+            "architecture.fused_qkv": (
+                meta_arch.get("fused_qkv", False),
+                getattr(config.architecture, "fused_qkv", False),
             ),
-            "runtime.gradient_accumulation": (
-                metadata["runtime"]["gradient_accumulation"],
-                config.runtime.gradient_accumulation,
-            ),
-            "parallelism.data_parallel": (
-                metadata["parallelism"]["data_parallel"],
-                config.parallelism.data_parallel,
-            ),
-            "parallelism.compute_dtype": (
-                metadata["parallelism"]["compute_dtype"],
-                config.parallelism.compute_dtype,
-            ),
-            "parallelism.param_dtype": (
-                metadata["parallelism"]["param_dtype"],
-                config.parallelism.param_dtype,
-            ),
-            "num_devices": (
-                metadata["num_devices"],
-                num_devices,
+            "architecture.weight_tying": (
+                meta_arch.get("weight_tying"),
+                config.architecture.weight_tying,
             ),
         }
 
         mismatches = []
 
-        for name, (old, new) in checks.items():
+        for name, (old, new) in strict_checks.items():
             if old != new:
                 mismatches.append(
                     f"  {name}: checkpoint={old!r}, current={new!r}"
                 )
 
+        old_positional = meta_arch.get("positional")
+        new_positional = config.architecture.positional
+
+        if old_positional == "learned" or new_positional == "learned":
+            old_max_seq = meta_model.get("max_seq_len")
+            new_max_seq = config.model.max_seq_len
+
+            if old_max_seq != new_max_seq:
+                mismatches.append(
+                    "  model.max_seq_len: "
+                    f"checkpoint={old_max_seq!r}, current={new_max_seq!r} "
+                    "(strict because learned positional embeddings are parameter-shaped)"
+                )
+
         if mismatches:
             raise ValueError(
-                "Checkpoint is not compatible with current config.\n"
-                "Use a fresh checkpoint_dir or restore with matching config.\n"
+                "Checkpoint is not compatible with current model/parameter config.\n"
+                "Use a fresh checkpoint_dir or restore with matching model config.\n"
                 + "\n".join(mismatches)
+            )
+
+        # Runtime-shape fields are intentionally flexible.
+        flexible_checks = {
+            "runtime.seq_len": (
+                meta_runtime.get("seq_len"),
+                config.runtime.seq_len,
+            ),
+            "runtime.micro_batch_per_device": (
+                meta_runtime.get("micro_batch_per_device"),
+                config.runtime.micro_batch_per_device,
+            ),
+            "runtime.gradient_accumulation": (
+                meta_runtime.get("gradient_accumulation"),
+                config.runtime.gradient_accumulation,
+            ),
+            "model.max_seq_len": (
+                meta_model.get("max_seq_len"),
+                config.model.max_seq_len,
+            ),
+            "parallelism.data_parallel": (
+                meta_parallel.get("data_parallel"),
+                config.parallelism.data_parallel,
+            ),
+            "num_devices": (
+                metadata.get("num_devices"),
+                num_devices,
+            ),
+        }
+
+        changed = []
+
+        for name, (old, new) in flexible_checks.items():
+            if old != new:
+                changed.append(
+                    f"  {name}: checkpoint={old!r}, current={new!r}"
+                )
+
+        if changed:
+            print(
+                "[checkpoint] resume with changed runtime shape:\n"
+                + "\n".join(changed),
+                flush=True,
             )
 
     def restore_latest(
