@@ -493,26 +493,48 @@ class LlamaAttention(nn.Module):
         num_kv_heads = config.num_key_value_heads
         head_dim = config.head_dim
 
-        q_proj = create_dense(
-            features=num_heads * head_dim,
-            config=config,
-            use_bias=config.attention_bias,
-            name="q_proj",
-        )
+        q_dim = num_heads * head_dim
+        kv_dim = num_kv_heads * head_dim
 
-        k_proj = create_dense(
-            features=num_kv_heads * head_dim,
-            config=config,
-            use_bias=config.attention_bias,
-            name="k_proj",
-        )
+        if getattr(config, "fused_qkv", False):
+            qkv_proj = create_dense(
+                features=q_dim + 2 * kv_dim,
+                config=config,
+                use_bias=config.attention_bias,
+                name="qkv_proj",
+            )
 
-        v_proj = create_dense(
-            features=num_kv_heads * head_dim,
-            config=config,
-            use_bias=config.attention_bias,
-            name="v_proj",
-        )
+            qkv_states = qkv_proj(hidden_states)
+
+            query_states = qkv_states[..., :q_dim]
+            key_states = qkv_states[..., q_dim : q_dim + kv_dim]
+            value_states = qkv_states[..., q_dim + kv_dim :]
+
+        else:
+            q_proj = create_dense(
+                features=q_dim,
+                config=config,
+                use_bias=config.attention_bias,
+                name="q_proj",
+            )
+
+            k_proj = create_dense(
+                features=kv_dim,
+                config=config,
+                use_bias=config.attention_bias,
+                name="k_proj",
+            )
+
+            v_proj = create_dense(
+                features=kv_dim,
+                config=config,
+                use_bias=config.attention_bias,
+                name="v_proj",
+            )
+
+            query_states = q_proj(hidden_states)
+            key_states = k_proj(hidden_states)
+            value_states = v_proj(hidden_states)
 
         o_proj = create_dense(
             features=config.hidden_size,
@@ -520,10 +542,6 @@ class LlamaAttention(nn.Module):
             use_bias=config.attention_bias,
             name="o_proj",
         )
-
-        query_states = q_proj(hidden_states)
-        key_states = k_proj(hidden_states)
-        value_states = v_proj(hidden_states)
 
         query_states = query_states.reshape(
             B,

@@ -292,26 +292,63 @@ def _convert_attention(
     layer,
     prefix,
 ):
-
     attn = layer["self_attn"]
 
-    _export_dense(
-        tensors,
-        attn["q_proj"],
-        f"{prefix}.self_attn.q_proj",
-    )
+    if _has_key(attn, "qkv_proj"):
+        qkv = attn["qkv_proj"]
 
-    _export_dense(
-        tensors,
-        attn["k_proj"],
-        f"{prefix}.self_attn.k_proj",
-    )
+        kernel = _to_numpy(qkv["kernel"])
 
-    _export_dense(
-        tensors,
-        attn["v_proj"],
-        f"{prefix}.self_attn.v_proj",
-    )
+        hidden_size = config_hidden_size = None
+
+        # Infer from fused kernel shape:
+        # Flax kernel: [hidden_size, q_dim + k_dim + v_dim]
+        hidden_size = kernel.shape[0]
+
+        # HF dims from layer shapes:
+        # q_dim = hidden_size for standard LLaMA attention.
+        q_dim = hidden_size
+
+        total_qkv_dim = kernel.shape[1]
+        kv_dim = (total_qkv_dim - q_dim) // 2
+
+        q_kernel = kernel[:, :q_dim]
+        k_kernel = kernel[:, q_dim : q_dim + kv_dim]
+        v_kernel = kernel[:, q_dim + kv_dim :]
+
+        tensors[f"{prefix}.self_attn.q_proj.weight"] = q_kernel.T
+        tensors[f"{prefix}.self_attn.k_proj.weight"] = k_kernel.T
+        tensors[f"{prefix}.self_attn.v_proj.weight"] = v_kernel.T
+
+        if _has_key(qkv, "bias"):
+            bias = _to_numpy(qkv["bias"])
+
+            q_bias = bias[:q_dim]
+            k_bias = bias[q_dim : q_dim + kv_dim]
+            v_bias = bias[q_dim + kv_dim :]
+
+            tensors[f"{prefix}.self_attn.q_proj.bias"] = q_bias
+            tensors[f"{prefix}.self_attn.k_proj.bias"] = k_bias
+            tensors[f"{prefix}.self_attn.v_proj.bias"] = v_bias
+
+    else:
+        _export_dense(
+            tensors,
+            attn["q_proj"],
+            f"{prefix}.self_attn.q_proj",
+        )
+
+        _export_dense(
+            tensors,
+            attn["k_proj"],
+            f"{prefix}.self_attn.k_proj",
+        )
+
+        _export_dense(
+            tensors,
+            attn["v_proj"],
+            f"{prefix}.self_attn.v_proj",
+        )
 
     _export_dense(
         tensors,

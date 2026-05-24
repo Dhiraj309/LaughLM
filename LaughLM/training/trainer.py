@@ -222,10 +222,8 @@ class Trainer:
         state = TrainState(
             params=params,
             opt_state=opt_state,
-            step=jnp.array(
-                0,
-                dtype=jnp.int32,
-            ),
+            step=jnp.array(0, dtype=jnp.int32),
+            tokens_processed=jnp.array(0, dtype=jnp.int32),
             rng_key=self.rng.key,
         )
 
@@ -247,25 +245,25 @@ class Trainer:
 
             self.start_step = int(state.step)
 
-            self.start_tokens_seen = (
-                int(self.start_step)
-                * int(tokens_per_step_for_resume)
-            )
+            metadata = self.checkpoints.load_metadata(restored_step)
+
+            if metadata is not None and "tokens_processed" in metadata:
+                self.start_tokens_seen = int(metadata["tokens_processed"])
+            else:
+                self.start_tokens_seen = (
+                    int(self.start_step)
+                    * int(tokens_per_step_for_resume)
+                )
 
             print(
                 f"[trainer] resumed from step={self.start_step:,} "
                 f"tokens={self.start_tokens_seen:,}",
                 flush=True,
             )
-
         else:
             self.start_step = 0
             self.start_tokens_seen = 0
-
-            print(
-                "[trainer] fresh run",
-                flush=True,
-            )
+            print("[trainer] fresh run", flush=True)
 
         # ====================================================
         # Replicate state

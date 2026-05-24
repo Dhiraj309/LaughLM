@@ -68,6 +68,14 @@ class ArchitectureConfig(BaseModel):
         "memory_efficient",
         "splash",
     ]
+    
+    fused_qkv: bool = Field(
+        default=False,
+        description=(
+            "Use a single fused qkv_proj in LLaMA attention. "
+            "HF export splits qkv_proj back into q_proj/k_proj/v_proj."
+        ),
+    )
 
     attention_fallback: Literal["warn", "error"] = Field(
         default="warn",
