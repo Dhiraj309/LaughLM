@@ -195,6 +195,10 @@ class Trainer:
             input_ids=dummy,
             use_cache=False,
             mode="train",
+            # Current production config uses tied embeddings. In that case,
+            # no separate lm_head params are needed, so avoid one-time
+            # full [B, T, vocab] logits materialization during init.
+            return_hidden=bool(config.architecture.weight_tying),
         )
 
         params = variables["params"]
@@ -283,10 +287,12 @@ class Trainer:
             optimizer=self.optimizer,
             grad_accum=self.grad_accum,
             max_grad_norm=config.optimizer.gradient_clip,
+            loss_config=config.loss,
         )
 
         self.eval_step = create_eval_step(
-            model=self.model
+            model=self.model,
+            loss_config=config.loss,
         )
 
         # ====================================================
