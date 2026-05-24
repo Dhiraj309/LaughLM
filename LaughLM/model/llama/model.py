@@ -1,38 +1,15 @@
 """
 Canonical Llama decoder-only language model.
 
-Frontier-grade SPMD additions:
-────────────────────────────────────────────────────
-1. Logical partitioning for embeddings/logits
-2. Hidden-state logical constraints
-3. Tensor-parallel-safe tied embeddings
-4. Remat-ready decoder stack
-5. Scan-compatible layer structure
-6. Vocab-axis sharding semantics
-7. BF16 compute + FP32 logits stability
-8. Future-ready GSPMD compatibility
-9. nn.scan transformer stack (MaxText/T5X-style)
-
-2026 TPU/FSDP fixes:
-────────────────────────────────────────────────────
-1. Stable scan parameter axes
-2. TPU-safe scan metadata
-3. Correct variable_broadcast semantics
-4. Remat+scan compatibility
-5. Future FSDP compatibility
-
-PMAP throughput cleanup:
-────────────────────────────────────────────────────
-1. Avoid dense [1, 1, T, T] causal mask construction when
-   TPU SplashAttention is requested for train/prefill.
-2. Decode masks remain explicit.
-3. Non-Splash attention keeps explicit causal masks.
-
 PMAP chunked-loss fix:
 ────────────────────────────────────────────────────
-LlamaForCausalLM can now return final hidden states before the LM head
+LlamaForCausalLM can return final hidden states before the LM head
 via return_hidden=True. This lets training compute exact chunked CE
 without materializing full [B, T, vocab] logits.
+
+Default behavior remains unchanged:
+return_hidden=False returns full logits for HF export, generation,
+and logits parity validation.
 """
 
 from typing import Optional
@@ -65,8 +42,17 @@ from LaughLM.model.llama.masks import (
 # Helpers
 # ============================================================
 
-def _uses_splash_attention(config: LlamaConfig) -> bool:
-    return getattr(config, "attention_impl", "standard") == "splash"
+def _uses_splash_attention(
+    config: LlamaConfig,
+) -> bool:
+    return (
+        getattr(
+            config,
+            "attention_impl",
+            "standard",
+        )
+        == "splash"
+    )
 
 
 # ============================================================
@@ -122,7 +108,11 @@ class LlamaModel(nn.Module):
             LayerCls = remat_module(
                 ScannedDecoderLayer,
                 policy=config.remat_policy,
-                prevent_cse=getattr(config, "prevent_cse", False),
+                prevent_cse=getattr(
+                    config,
+                    "prevent_cse",
+                    False,
+                ),
             )
 
         if getattr(config, "scan_layers", False):
@@ -157,7 +147,9 @@ class LlamaModel(nn.Module):
                     config=config,
                     name=f"layers_{i}",
                 )
-                for i in range(config.num_hidden_layers)
+                for i in range(
+                    config.num_hidden_layers
+                )
             ]
 
         self.norm = RMSNorm(
@@ -175,15 +167,27 @@ class LlamaModel(nn.Module):
         mode: str = "train",
     ) -> tuple[jnp.ndarray, Optional[list[KVCache]]]:
 
-        if getattr(self.config, "scan_layers", False) and use_cache:
+        if (
+            getattr(
+                self.config,
+                "scan_layers",
+                False,
+            )
+            and use_cache
+        ):
             raise ValueError(
                 "scan_layers with KV cache is not yet supported"
             )
 
         B, T = input_ids.shape
 
-        hidden_states = self.embed_tokens(input_ids)
-        hidden_states = constrain_hidden_states(hidden_states)
+        hidden_states = self.embed_tokens(
+            input_ids
+        )
+
+        hidden_states = constrain_hidden_states(
+            hidden_states
+        )
 
         # --------------------------------------------------
         # Position IDs
@@ -206,18 +210,12 @@ class LlamaModel(nn.Module):
 
         # --------------------------------------------------
         # Attention mask
-        #
-        # SplashAttention builds its own causal mask internally.
-        # Avoid materializing dense [1, 1, T, T] masks for PMAP
-        # train/prefill when attention_impl == "splash".
-        #
-        # If Splash falls back to XLA, attention.py uses
-        # jax.nn.dot_product_attention(..., is_causal=True)
-        # when attention_mask is None in train/prefill.
         # --------------------------------------------------
 
         if mode in ("train", "prefill"):
-            if _uses_splash_attention(self.config):
+            if _uses_splash_attention(
+                self.config
+            ):
                 attention_mask = None
             else:
                 attention_mask = build_causal_mask(
@@ -232,7 +230,10 @@ class LlamaModel(nn.Module):
                     "decode mode requires kv_caches"
                 )
 
-            key_length = kv_caches[0].cache_position + T
+            key_length = (
+                kv_caches[0].cache_position
+                + T
+            )
 
             attention_mask = build_decode_mask(
                 query_length=T,
@@ -241,13 +242,19 @@ class LlamaModel(nn.Module):
             )
 
         else:
-            raise ValueError(f"Unknown mode: {mode}")
+            raise ValueError(
+                f"Unknown mode: {mode}"
+            )
 
         # --------------------------------------------------
         # Decoder stack
         # --------------------------------------------------
 
-        if getattr(self.config, "scan_layers", False):
+        if getattr(
+            self.config,
+            "scan_layers",
+            False,
+        ):
             hidden_states, _ = self.layers(
                 hidden_states=hidden_states,
                 positions=position_ids,
@@ -256,17 +263,24 @@ class LlamaModel(nn.Module):
                 mode=mode,
             )
 
-            hidden_states = constrain_hidden_states(hidden_states)
+            hidden_states = constrain_hidden_states(
+                hidden_states
+            )
+
             updated_caches = None
 
         else:
             updated_caches = []
 
-            for layer_idx, layer in enumerate(self.layers):
+            for layer_idx, layer in enumerate(
+                self.layers
+            ):
                 layer_cache = None
 
                 if kv_caches is not None:
-                    layer_cache = kv_caches[layer_idx]
+                    layer_cache = kv_caches[
+                        layer_idx
+                    ]
 
                 hidden_states, updated_cache = layer(
                     hidden_states=hidden_states,
@@ -276,13 +290,22 @@ class LlamaModel(nn.Module):
                     mode=mode,
                 )
 
-                hidden_states = constrain_hidden_states(hidden_states)
+                hidden_states = constrain_hidden_states(
+                    hidden_states
+                )
 
                 if use_cache:
-                    updated_caches.append(updated_cache)
+                    updated_caches.append(
+                        updated_cache
+                    )
 
-        hidden_states = self.norm(hidden_states)
-        hidden_states = constrain_hidden_states(hidden_states)
+        hidden_states = self.norm(
+            hidden_states
+        )
+
+        hidden_states = constrain_hidden_states(
+            hidden_states
+        )
 
         if not use_cache:
             updated_caches = None
@@ -334,8 +357,7 @@ class LlamaForCausalLM(nn.Module):
         # Training loss fast path
         #
         # Return final normalized hidden states before the LM head.
-        # This avoids full [B, T, vocab] materialization. The default
-        # stays logits for HF export, generation, and parity validation.
+        # This avoids full [B, T, vocab] materialization.
         # --------------------------------------------------
 
         if return_hidden:
@@ -356,10 +378,20 @@ class LlamaForCausalLM(nn.Module):
             )
 
         else:
-            logits = self.lm_head(hidden_states)
+            logits = self.lm_head(
+                hidden_states
+            )
 
-        logits = logits.astype(jnp.float32)
-        logits = constrain_logits(logits)
-        logits = logits.astype(self.config.output_dtype)
+        logits = logits.astype(
+            jnp.float32
+        )
+
+        logits = constrain_logits(
+            logits
+        )
+
+        logits = logits.astype(
+            self.config.output_dtype
+        )
 
         return logits, updated_caches

@@ -204,14 +204,16 @@ def compute_loss(
     """
     Dense sparse-label CE from already materialized logits.
 
-    This is correct but memory-heavy because logits are [B, T, vocab].
-    Keep for compatibility/tests. PMAP training should use
-    compute_lm_loss_from_hidden(..., chunked_logits=True).
+    Correct but memory-heavy because logits are [B, T, vocab].
+    PMAP training should use compute_lm_loss_from_hidden(...).
     """
     logits = logits.astype(jnp.float32)
     logits = constrain_logits(logits)
 
-    log_z = jax.scipy.special.logsumexp(logits, axis=-1)
+    log_z = jax.scipy.special.logsumexp(
+        logits,
+        axis=-1,
+    )
 
     target_logits = jnp.take_along_axis(
         logits,
@@ -219,24 +221,57 @@ def compute_loss(
         axis=-1,
     )[..., 0]
 
-    per_token_xent = log_z - target_logits
+    per_token_xent = (
+        log_z
+        - target_logits
+    )
 
-    z_loss_value = z_loss * jax.lax.square(log_z)
+    z_loss_value = (
+        z_loss
+        * jax.lax.square(log_z)
+    )
 
-    per_token_loss = per_token_xent + z_loss_value
-    per_token_loss = constrain_loss_tensor(per_token_loss)
-    z_loss_value = constrain_loss_tensor(z_loss_value)
+    per_token_loss = (
+        per_token_xent
+        + z_loss_value
+    )
+
+    per_token_loss = constrain_loss_tensor(
+        per_token_loss
+    )
+
+    z_loss_value = constrain_loss_tensor(
+        z_loss_value
+    )
 
     if mask is not None:
-        mask = constrain_loss_tensor(mask.astype(jnp.float32))
+        mask = constrain_loss_tensor(
+            mask.astype(jnp.float32)
+        )
+
         per_token_loss *= mask
         z_loss_value *= mask
-        denom = jnp.maximum(jnp.sum(mask), 1.0)
-    else:
-        denom = jnp.asarray(per_token_loss.size, dtype=jnp.float32)
 
-    total_loss = jnp.sum(per_token_loss, dtype=jnp.float32) / denom
-    mean_z_loss = jnp.sum(z_loss_value, dtype=jnp.float32) / denom
+        denom = jnp.maximum(
+            jnp.sum(mask),
+            1.0,
+        )
+
+    else:
+        denom = jnp.asarray(
+            per_token_loss.size,
+            dtype=jnp.float32,
+        )
+
+    total_loss = (
+        jnp.sum(per_token_loss, dtype=jnp.float32)
+        / denom
+    )
+
+    mean_z_loss = (
+        jnp.sum(z_loss_value, dtype=jnp.float32)
+        / denom
+    )
 
     return total_loss, {
         "loss": total_loss,
@@ -412,7 +447,10 @@ def dense_lm_loss_from_hidden(
     )
 
     if lm_head_bias is not None:
-        logits = logits + lm_head_bias.astype(jnp.float32)
+        logits = (
+            logits
+            + lm_head_bias.astype(jnp.float32)
+        )
 
     logits = logits.astype(jnp.float32)
     logits = constrain_logits(logits)
@@ -435,10 +473,20 @@ def dense_lm_loss_from_hidden(
         axis=-1,
     )[..., 0]
 
-    per_token_xent = log_z - target_logits
-    z_loss_value = z_loss * jax.lax.square(log_z)
+    per_token_xent = (
+        log_z
+        - target_logits
+    )
 
-    per_token_loss = per_token_xent + z_loss_value
+    z_loss_value = (
+        z_loss
+        * jax.lax.square(log_z)
+    )
+
+    per_token_loss = (
+        per_token_xent
+        + z_loss_value
+    )
 
     per_token_loss = jnp.where(
         valid,
@@ -516,10 +564,6 @@ def chunked_lm_loss_from_hidden(
       CE = logsumexp(hidden @ W.T) - target_logit
 
     The logsumexp denominator is still over the full vocabulary.
-    We just scan vocab chunks so the largest logits temporary is:
-      [B*T, chunk_size]
-    instead of:
-      [B*T, vocab_size]
     """
     if chunk_size <= 0:
         raise ValueError(
@@ -643,7 +687,10 @@ def chunked_lm_loss_from_hidden(
     ):
         running_max, running_sum, target_logits = carry
 
-        start = chunk_idx * chunk_size
+        start = (
+            chunk_idx
+            * chunk_size
+        )
 
         w_chunk = lax.dynamic_slice_in_dim(
             w_vocab_major,
@@ -883,9 +930,6 @@ def compute_lm_loss_from_hidden(
 ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
     """
     Main LM loss entrypoint for training.
-
-    When chunked_logits=True, avoids full [B, T, vocab] logits.
-    When chunked_logits=False, uses dense reference path.
     """
     if chunked_logits:
         return chunked_lm_loss_from_hidden(

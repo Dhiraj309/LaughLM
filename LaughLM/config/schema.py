@@ -3,19 +3,15 @@ LaughLM/config/schema.py
 
 Full experiment configuration for LaughLM pretraining.
 
-Frontier-grade additions (perf/frontier-optim):
+Frontier-grade additions:
 ──────────────────────────────────────────────────
 • SPMDConfig  — device mesh, logical axis rules, sharding strategy
 • RematConfig — activation checkpointing policy + scan-over-layers
 • DTypeConfig — explicit param / compute / output dtype separation
-  (replaces the old ParallelismConfig.compute_dtype / param_dtype)
-
-Design references:
-  MaxText  (AI-Hypercomputer/maxtext) → configs/base.yml
-  Levanter (stanford-crfm/levanter)   → src/levanter/trainer.py
+• LossConfig  — chunked logits / sparse CE configuration
 """
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 
 
@@ -52,13 +48,31 @@ class ArchitectureConfig(BaseModel):
     """
 
     positional: Literal[
-        "learned", "sinusoidal", "alibi",
-        "rope", "rope_scaled",
+        "learned",
+        "sinusoidal",
+        "alibi",
+        "rope",
+        "rope_scaled",
     ]
-    normalization: Literal["layer_norm", "rms_norm", "deep_norm"]
-    norm_placement: Literal["post", "pre", "sandwich"]
 
-    attention_variant: Literal["mha", "mqa", "gqa", "mla"]
+    normalization: Literal[
+        "layer_norm",
+        "rms_norm",
+        "deep_norm",
+    ]
+
+    norm_placement: Literal[
+        "post",
+        "pre",
+        "sandwich",
+    ]
+
+    attention_variant: Literal[
+        "mha",
+        "mqa",
+        "gqa",
+        "mla",
+    ]
 
     attention_impl: Literal[
         "standard",
@@ -68,7 +82,7 @@ class ArchitectureConfig(BaseModel):
         "memory_efficient",
         "splash",
     ]
-    
+
     fused_qkv: bool = Field(
         default=False,
         description=(
@@ -86,21 +100,33 @@ class ArchitectureConfig(BaseModel):
         ),
     )
 
-    ffn_type: Literal["gelu_mlp", "geglu", "swiglu", "moe"]
-    residual: Literal["standard", "scaled", "deep_norm"]
-    embeddings: Literal["standard", "scaled", "tied"]
+    ffn_type: Literal[
+        "gelu_mlp",
+        "geglu",
+        "swiglu",
+        "moe",
+    ]
+
+    residual: Literal[
+        "standard",
+        "scaled",
+        "deep_norm",
+    ]
+
+    embeddings: Literal[
+        "standard",
+        "scaled",
+        "tied",
+    ]
 
     bias: bool
     weight_tying: bool
 
-    # ── Frontier additions ──────────────────────────────────────
     parallel_block: bool = Field(
         default=False,
         description=(
             "GPT-J / PaLM style parallel attention+MLP. "
-            "out = x + Attn(Norm(x)) + MLP(Norm(x)) instead of serial. "
-            "Saves one all-reduce in tensor-parallel and enables better "
-            "pipelining on TPU/GPU. Used by PaLM, GPT-J, MPT."
+            "out = x + Attn(Norm(x)) + MLP(Norm(x)) instead of serial."
         ),
     )
 
@@ -159,11 +185,12 @@ class SchedulerConfig(BaseModel):
 
     stable_fraction: float = Field(
         default=0.88,
-        description="Fraction of total steps in stable phase (WSD only)",
+        description="Fraction of total steps in stable phase, WSD only.",
     )
+
     decay_steps: Optional[int] = None
-    
-    
+
+
 # ════════════════════════════════════════════════════════════════
 # Loss Config
 # ════════════════════════════════════════════════════════════════
@@ -240,6 +267,7 @@ class RuntimeConfig(BaseModel):
     checkpoint_max_to_keep: int = Field(default=3)
     checkpoint_dir: str = Field(default="checkpoints")
 
+
 # ════════════════════════════════════════════════════════════════
 # Dataset Sources
 # ════════════════════════════════════════════════════════════════
@@ -268,7 +296,6 @@ class DataConfig(BaseModel):
 # ════════════════════════════════════════════════════════════════
 
 class TokenizerConfig(BaseModel):
-
     algorithm: Literal["bpe", "unigram"]
     vocab_size: int
     pre_tokenizer: Literal["byte_level"]
@@ -281,7 +308,6 @@ class TokenizerConfig(BaseModel):
 # ════════════════════════════════════════════════════════════════
 
 class HardwareConfig(BaseModel):
-
     accelerator: Literal["tpu", "gpu"]
     type: str
 
@@ -291,74 +317,35 @@ class HardwareConfig(BaseModel):
 # ════════════════════════════════════════════════════════════════
 
 class MonitoringConfig(BaseModel):
-
     tensorboard: bool
     rich_terminal: bool
 
 
 # ════════════════════════════════════════════════════════════════
-#  FRONTIER: SPMD Sharding Config (MaxText-style)
+# FRONTIER: SPMD Sharding Config
 # ════════════════════════════════════════════════════════════════
 
 class MeshConfig(BaseModel):
     """
     SPMD device mesh shape.
 
-    Two-level mesh following MaxText convention:
-      ICI = fast on-chip / NVLink / TPU-ICI interconnect (within a host group)
-      DCN = data-center network (between host groups / pod slices)
-
-    For single-host GPU runs: all dcn_* stay at 1.
-    The total device count must equal jax.device_count() at runtime.
-
-    mesh_shape[axis] = ici_<axis> × dcn_<axis>
-    Logical axis names: ["data", "fsdp", "tensor", "sequence", "pipeline"]
-
-    Reference: AI-Hypercomputer/maxtext → configs/base.yml
+    Two-level mesh:
+      ICI = fast on-chip / NVLink / TPU-ICI interconnect
+      DCN = data-center network
     """
 
-    # ICI (intra-host fast interconnect)
-    ici_data_parallelism: int = Field(
-        default=1, ge=1,
-        description="Pure data-parallel replicas on fast interconnect.",
-    )
-    ici_fsdp_parallelism: int = Field(
-        default=1, ge=1,
-        description="FSDP shards on fast interconnect (params + grads sharded).",
-    )
-    ici_tensor_parallelism: int = Field(
-        default=1, ge=1,
-        description="Tensor (model) parallel degree on fast interconnect.",
-    )
-    ici_sequence_parallelism: int = Field(
-        default=1, ge=1,
-        description="Sequence/context parallel on fast interconnect.",
-    )
-    ici_pipeline_parallelism: int = Field(
-        default=1, ge=1,
-        description="Pipeline stages on fast interconnect.",
-    )
+    ici_data_parallelism: int = Field(default=1, ge=1)
+    ici_fsdp_parallelism: int = Field(default=1, ge=1)
+    ici_tensor_parallelism: int = Field(default=1, ge=1)
+    ici_sequence_parallelism: int = Field(default=1, ge=1)
+    ici_pipeline_parallelism: int = Field(default=1, ge=1)
 
-    # DCN (between-host / multi-node / multi-slice)
-    dcn_data_parallelism: int = Field(
-        default=1, ge=1,
-        description="Data-parallel replicas across hosts.",
-    )
-    dcn_fsdp_parallelism: int = Field(
-        default=1, ge=1,
-        description="FSDP shards across hosts (multi-node ZeRO-3).",
-    )
-    dcn_tensor_parallelism: int = Field(
-        default=1, ge=1,
-        description="Tensor parallel across hosts (rare — bandwidth-sensitive).",
-    )
-    dcn_pipeline_parallelism: int = Field(
-        default=1, ge=1,
-        description="Pipeline stages across hosts (inter-node).",
-    )
+    dcn_data_parallelism: int = Field(default=1, ge=1)
+    dcn_fsdp_parallelism: int = Field(default=1, ge=1)
+    dcn_tensor_parallelism: int = Field(default=1, ge=1)
+    dcn_pipeline_parallelism: int = Field(default=1, ge=1)
 
     def total_devices(self) -> int:
-        """Total device count implied by this mesh config."""
         return (
             (self.ici_data_parallelism * self.dcn_data_parallelism)
             * (self.ici_fsdp_parallelism * self.dcn_fsdp_parallelism)
@@ -368,60 +355,41 @@ class MeshConfig(BaseModel):
         )
 
     def axis_sizes(self) -> dict:
-        """Collapsed logical axis sizes: {axis_name: ici * dcn}."""
         return {
-            "data":     self.ici_data_parallelism     * self.dcn_data_parallelism,
-            "fsdp":     self.ici_fsdp_parallelism     * self.dcn_fsdp_parallelism,
-            "tensor":   self.ici_tensor_parallelism   * self.dcn_tensor_parallelism,
+            "data": self.ici_data_parallelism * self.dcn_data_parallelism,
+            "fsdp": self.ici_fsdp_parallelism * self.dcn_fsdp_parallelism,
+            "tensor": self.ici_tensor_parallelism * self.dcn_tensor_parallelism,
             "sequence": self.ici_sequence_parallelism,
             "pipeline": self.ici_pipeline_parallelism * self.dcn_pipeline_parallelism,
         }
 
     def active_axes(self) -> dict:
-        """Only axes with size > 1 (used for mesh construction)."""
-        return {k: v for k, v in self.axis_sizes().items() if v > 1}
+        return {
+            k: v
+            for k, v in self.axis_sizes().items()
+            if v > 1
+        }
 
 
 class LogicalAxisRules(BaseModel):
     """
     Maps named logical tensor axes to physical mesh axis names.
-    None = replicated on that axis. Follows MaxText / Levanter convention.
-
-    Consumed downstream by:
-        jax.sharding.NamedSharding(mesh, PartitionSpec(...))
-
-    The mapping tells the sharding system:
-      "when you see a tensor dimension called 'embed', shard it
-       across the 'fsdp' mesh axis"
-
-    Reference: stanford-crfm/levanter → src/levanter/trainer.py
+    None = replicated on that axis.
     """
 
-    batch:    Optional[str] = Field(default="data",   description="Batch dim → mesh axis")
-    embed:    Optional[str] = Field(default="fsdp",   description="Hidden/embed dim → mesh axis")
-    heads:    Optional[str] = Field(default="tensor", description="Attention Q-heads → mesh axis")
-    kv_heads: Optional[str] = Field(default="tensor", description="KV heads → mesh axis")
-    mlp:      Optional[str] = Field(default="tensor", description="MLP intermediate → mesh axis")
-    vocab:    Optional[str] = Field(default="fsdp",   description="Vocab dim → mesh axis")
-    sequence: Optional[str] = Field(default=None,     description="Sequence len → mesh axis (set to 'sequence' for SP)")
-    layers:   Optional[str] = Field(default=None,     description="Layer dim (scan) → mesh axis")
+    batch: Optional[str] = Field(default="data")
+    embed: Optional[str] = Field(default="fsdp")
+    heads: Optional[str] = Field(default="tensor")
+    kv_heads: Optional[str] = Field(default="tensor")
+    mlp: Optional[str] = Field(default="tensor")
+    vocab: Optional[str] = Field(default="fsdp")
+    sequence: Optional[str] = Field(default=None)
+    layers: Optional[str] = Field(default=None)
 
 
 class RematConfig(BaseModel):
     """
-    Activation checkpointing (rematerialization) config.
-
-    Controls how much activation memory to trade for recomputation time.
-    Applied per transformer block by default.
-
-    Policy options (maps to jax.checkpoint_policies.*):
-    ─────────────────────────────────────────────────────────────────
-    nothing_saveable               → recompute everything (minimum memory)
-    dots_saveable                  → save matmul outputs only (best balance ✓)
-    dots_with_no_batch_dims_saveable → save non-batched matmuls
-    everything_saveable            → save all (no remat, max memory)
-
-    Reference: AI-Hypercomputer/maxtext → layers.py (remat_policy dispatch)
+    Activation checkpointing configuration.
     """
 
     policy: Literal[
@@ -429,91 +397,38 @@ class RematConfig(BaseModel):
         "dots_saveable",
         "dots_with_no_batch_dims_saveable",
         "everything_saveable",
-    ] = Field(
-        default="dots_saveable",
-        description=(
-            "Checkpoint policy for jax.checkpoint / nn.remat. "
-            "'dots_saveable' saves matmul results, recomputes norms, "
-            "activations, softmax — best memory/compute tradeoff."
-        ),
-    )
+    ] = Field(default="dots_saveable")
 
-    granularity: Literal["block", "layer", "full_model"] = Field(
-        default="block",
-        description=(
-            "'block' = per transformer block (standard). "
-            "'layer' = per sub-layer (attention/MLP separately). "
-            "'full_model' = wrap entire forward."
-        ),
-    )
+    granularity: Literal[
+        "block",
+        "layer",
+        "full_model",
+    ] = Field(default="block")
 
-    scan_layers: bool = Field(
-        default=True,
-        description=(
-            "Stack transformer blocks with nn.scan. "
-            "O(1) XLA compile time regardless of depth. "
-            "Pairs with remat for frontier-grade memory efficiency."
-        ),
-    )
+    scan_layers: bool = Field(default=True)
 
-    prevent_cse: bool = Field(
-        default=False,
-        description=(
-            "Pass prevent_cse=True to nn.remat if XLA CSE "
-            "defeats checkpointing across loop iterations. Usually False."
-        ),
-    )
+    prevent_cse: bool = Field(default=False)
 
 
 class DTypeConfig(BaseModel):
     """
     Explicit dtype policy for parameters, computation, and output.
-
-    Replaces the old ParallelismConfig.compute_dtype / param_dtype
-    with a more complete specification following MaxText convention.
-
-    Standard frontier recipe:
-      param_dtype   = float32  (master weights — full precision)
-      compute_dtype = bfloat16 (activations + matmuls — 2× throughput)
-      output_dtype  = float32  (loss accumulation — numerical stability)
-
-    Reference: AI-Hypercomputer/maxtext → configs/base.yml (dtype, weight_dtype)
     """
 
-    param_dtype: Literal["float32", "bfloat16"] = Field(
-        default="float32",
-        description=(
-            "Storage dtype for parameters and optimizer state. "
-            "float32 for training stability. bfloat16 for pure-bf16 training."
-        ),
-    )
+    param_dtype: Literal["float32", "bfloat16"] = Field(default="float32")
 
-    compute_dtype: Literal["bfloat16", "float16", "float32"] = Field(
-        default="bfloat16",
-        description=(
-            "Compute dtype for forward/backward pass — activations and matmuls. "
-            "bfloat16 gives ~2× throughput on A100/H100/TPU vs float32."
-        ),
-    )
+    compute_dtype: Literal[
+        "bfloat16",
+        "float16",
+        "float32",
+    ] = Field(default="bfloat16")
 
-    output_dtype: Literal["float32", "bfloat16"] = Field(
-        default="float32",
-        description=(
-            "Dtype for layer outputs and loss accumulation. "
-            "Always float32 to prevent loss scaling issues."
-        ),
-    )
+    output_dtype: Literal["float32", "bfloat16"] = Field(default="float32")
 
 
 class SPMDConfig(BaseModel):
     """
     Top-level SPMD configuration block.
-
-    Groups all sharding, rematerialization, and dtype policy into one
-    coherent block. Every downstream file (model, training, data) reads
-    from here instead of scattered fields.
-
-    Reference: MaxText base.yml + Levanter trainer.py
     """
 
     mesh: MeshConfig = Field(default_factory=MeshConfig)
@@ -523,16 +438,12 @@ class SPMDConfig(BaseModel):
 
 
 # ════════════════════════════════════════════════════════════════
-#  LEGACY: Parallelism Config (backward-compatible wrapper)
+# LEGACY: Parallelism Config
 # ════════════════════════════════════════════════════════════════
 
 class ParallelismConfig(BaseModel):
     """
     Legacy parallelism config — kept for backward compatibility.
-
-    New code should read from LaughLMConfig.spmd instead.
-    The old data_parallel / model_parallel / compute_dtype / param_dtype
-    fields are preserved so existing YAML configs don't break.
     """
 
     data_parallel: int
@@ -543,27 +454,12 @@ class ParallelismConfig(BaseModel):
 
 
 # ════════════════════════════════════════════════════════════════
-#  Root Config Object
+# Root Config Object
 # ════════════════════════════════════════════════════════════════
 
 class LaughLMConfig(BaseModel):
     """
     Full experiment configuration for LaughLM.
-
-    ┌──────────────────────────────────────────────────────────┐
-    │  New in perf/frontier-optim:                             │
-    │                                                          │
-    │  spmd: SPMDConfig       ← sharding + remat + dtype       │
-    │    ├── mesh              (MaxText-style device mesh)      │
-    │    ├── axis_rules        (logical → physical axis map)    │
-    │    ├── remat             (activation checkpointing)       │
-    │    └── dtype             (param / compute / output)       │
-    │                                                          │
-    │  architecture.parallel_block  ← GPT-J parallel attn+MLP │
-    │                                                          │
-    │  The old 'parallelism' block is kept for compat but      │
-    │  new code should read from 'spmd'.                       │
-    └──────────────────────────────────────────────────────────┘
     """
 
     model: ModelBaseConfig
@@ -572,6 +468,12 @@ class LaughLMConfig(BaseModel):
 
     optimizer: OptimizerConfig
     scheduler: SchedulerConfig
+
+    # IMPORTANT:
+    # This field is required because trainer.py passes config.loss
+    # into create_train_step/create_eval_step.
+    loss: LossConfig = Field(default_factory=LossConfig)
+
     runtime: RuntimeConfig
 
     data: DataConfig
@@ -582,12 +484,10 @@ class LaughLMConfig(BaseModel):
 
     monitoring: MonitoringConfig
 
-    # ── Frontier SPMD config (new) ──────────────────────────
     spmd: SPMDConfig = Field(
         default_factory=SPMDConfig,
         description=(
             "SPMD sharding, rematerialization, and dtype config. "
-            "New code should read dtypes and sharding from here. "
-            "Defaults are safe for single-device training."
+            "Defaults are safe for single-device and PMAP training."
         ),
     )

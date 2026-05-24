@@ -24,13 +24,15 @@ def main():
 
     config = load_config("configs/v5e_pmap.yaml")
 
+    global_batch_size = (
+        config.runtime.micro_batch_per_device
+        * jax.local_device_count()
+    )
+
     dataset = MemmapDataset(
         paths=paths,
         seq_len=config.runtime.seq_len,
-        global_batch_size=(
-            config.runtime.micro_batch_per_device
-            * jax.device_count()
-        ),
+        global_batch_size=global_batch_size,
         process_index=jax.process_index(),
         process_count=jax.process_count(),
     )
