@@ -11,6 +11,12 @@ Design:
 - cross-device grad averaging via pmean
 - FP32 grad accumulation
 - Optax optimizer updates
+
+PMAP chunked-loss fix:
+- Training/eval now request final hidden states from LlamaForCausalLM.
+- Loss applies LM head inside loss.py.
+- With loss.chunked_logits=True, full [B, T, vocab] logits are never
+  materialized in the hot path.
 """
 
 from __future__ import annotations
@@ -23,12 +29,11 @@ import optax
 
 from LaughLM.training.loss import (
     shift_tokens,
-    compute_loss,
+    compute_lm_loss_from_hidden,
 )
 
 from LaughLM.distributed.sharding import (
     constrain_batch,
-    constrain_logits,
 )
 
 
@@ -37,17 +42,134 @@ Batch = jnp.ndarray
 Metrics = Dict[str, jnp.ndarray]
 
 
+# ============================================================
+# Loss config helpers
+# ============================================================
+
+def _loss_attr(
+    loss_config,
+    name: str,
+    default,
+):
+    if loss_config is None:
+        return default
+
+    return getattr(
+        loss_config,
+        name,
+        default,
+    )
+
+
+def _loss_kwargs(
+    loss_config,
+):
+    return {
+        "chunked_logits": bool(
+            _loss_attr(
+                loss_config,
+                "chunked_logits",
+                False,
+            )
+        ),
+        "logits_chunk_size": int(
+            _loss_attr(
+                loss_config,
+                "logits_chunk_size",
+                4096,
+            )
+        ),
+        "remat_logits_chunks": bool(
+            _loss_attr(
+                loss_config,
+                "remat_logits_chunks",
+                True,
+            )
+        ),
+        "z_loss": float(
+            _loss_attr(
+                loss_config,
+                "z_loss",
+                1e-4,
+            )
+        ),
+        "ignore_index": int(
+            _loss_attr(
+                loss_config,
+                "ignore_index",
+                -100,
+            )
+        ),
+    }
+
+
+def _get_lm_head_kernel(
+    params,
+    *,
+    tie_word_embeddings: bool,
+):
+    """
+    Return the LM projection weight.
+
+    Current production tied path:
+      params["model"]["embed_tokens"]["embedding"]  # [vocab, hidden]
+
+    Untied path:
+      params["lm_head"]["kernel"]                   # [hidden, vocab]
+    """
+    if tie_word_embeddings:
+        return params["model"]["embed_tokens"]["embedding"]
+
+    return params["lm_head"]["kernel"]
+
+
+def _get_lm_head_bias(
+    params,
+    *,
+    tie_word_embeddings: bool,
+):
+    if tie_word_embeddings:
+        return None
+
+    lm_head = params.get(
+        "lm_head",
+        {},
+    )
+
+    return lm_head.get(
+        "bias",
+        None,
+    )
+
+
+# ============================================================
+# Train step
+# ============================================================
+
 def create_train_step(
     *,
     model,
     optimizer,
     grad_accum: int,
     max_grad_norm: float = 1.0,
+    loss_config=None,
 ):
     if grad_accum <= 0:
         raise ValueError(
             "grad_accum must be > 0"
         )
+
+    loss_options = _loss_kwargs(
+        loss_config
+    )
+
+    tie_word_embeddings = bool(
+        getattr(
+            model.config,
+            "tie_word_embeddings",
+            False,
+        )
+    )
 
     # ========================================================
     # Loss fn
@@ -61,20 +183,30 @@ def create_train_step(
             micro_batch
         )
 
-        logits, _ = model.apply(
+        hidden_states, _ = model.apply(
             {"params": params},
             input_ids=inputs,
             use_cache=False,
             mode="train",
+            return_hidden=True,
         )
 
-        logits = constrain_logits(
-            logits
+        lm_head_kernel = _get_lm_head_kernel(
+            params,
+            tie_word_embeddings=tie_word_embeddings,
         )
 
-        loss, metrics = compute_loss(
-            logits,
-            targets,
+        lm_head_bias = _get_lm_head_bias(
+            params,
+            tie_word_embeddings=tie_word_embeddings,
+        )
+
+        loss, metrics = compute_lm_loss_from_hidden(
+            hidden_states=hidden_states,
+            targets=targets,
+            lm_head_kernel=lm_head_kernel,
+            lm_head_bias=lm_head_bias,
+            **loss_options,
         )
 
         return loss, metrics
@@ -301,29 +433,56 @@ def create_train_step(
 def create_eval_step(
     *,
     model,
+    loss_config=None,
 ):
+    loss_options = _loss_kwargs(
+        loss_config
+    )
+
+    tie_word_embeddings = bool(
+        getattr(
+            model.config,
+            "tie_word_embeddings",
+            False,
+        )
+    )
+
     def eval_step(
         state,
         batch,
     ):
+        batch = constrain_batch(
+            batch
+        )
+
         inputs, targets = shift_tokens(
             batch
         )
 
-        logits, _ = model.apply(
+        hidden_states, _ = model.apply(
             {"params": state.params},
             input_ids=inputs,
             use_cache=False,
             mode="train",
+            return_hidden=True,
         )
 
-        logits = constrain_logits(
-            logits
+        lm_head_kernel = _get_lm_head_kernel(
+            state.params,
+            tie_word_embeddings=tie_word_embeddings,
         )
 
-        loss, _ = compute_loss(
-            logits,
-            targets,
+        lm_head_bias = _get_lm_head_bias(
+            state.params,
+            tie_word_embeddings=tie_word_embeddings,
+        )
+
+        loss, metrics = compute_lm_loss_from_hidden(
+            hidden_states=hidden_states,
+            targets=targets,
+            lm_head_kernel=lm_head_kernel,
+            lm_head_bias=lm_head_bias,
+            **loss_options,
         )
 
         loss = jax.lax.pmean(
@@ -331,8 +490,14 @@ def create_eval_step(
             axis_name="data",
         )
 
+        z_loss = jax.lax.pmean(
+            metrics["z_loss"].astype(jnp.float32),
+            axis_name="data",
+        )
+
         return {
             "loss": loss,
+            "z_loss": z_loss,
         }
 
     return jax.pmap(

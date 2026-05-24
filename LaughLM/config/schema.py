@@ -162,6 +162,55 @@ class SchedulerConfig(BaseModel):
         description="Fraction of total steps in stable phase (WSD only)",
     )
     decay_steps: Optional[int] = None
+    
+    
+# ════════════════════════════════════════════════════════════════
+# Loss Config
+# ════════════════════════════════════════════════════════════════
+
+class LossConfig(BaseModel):
+    """
+    Language-modeling loss configuration.
+
+    chunked_logits=True computes exact sparse-label CE from hidden states
+    by scanning vocab chunks. This avoids materializing [B, T, vocab].
+    """
+
+    chunked_logits: bool = Field(
+        default=False,
+        description=(
+            "Use exact chunked LM-head cross entropy. "
+            "Avoids materializing full [batch, sequence, vocab] logits."
+        ),
+    )
+
+    logits_chunk_size: int = Field(
+        default=4096,
+        ge=1,
+        description=(
+            "Vocabulary chunk size for chunked logits CE. "
+            "For vocab=49152, good values are 2048, 4096, 8192."
+        ),
+    )
+
+    remat_logits_chunks: bool = Field(
+        default=True,
+        description=(
+            "Use jax.checkpoint on the vocab chunk body to reduce "
+            "backward residual memory at the cost of recompute."
+        ),
+    )
+
+    z_loss: float = Field(
+        default=1e-4,
+        ge=0.0,
+        description="PaLM-style z-loss coefficient.",
+    )
+
+    ignore_index: int = Field(
+        default=-100,
+        description="Target id ignored by the loss.",
+    )
 
 
 # ════════════════════════════════════════════════════════════════

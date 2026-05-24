@@ -27,6 +27,12 @@ PMAP throughput cleanup:
    TPU SplashAttention is requested for train/prefill.
 2. Decode masks remain explicit.
 3. Non-Splash attention keeps explicit causal masks.
+
+PMAP chunked-loss fix:
+────────────────────────────────────────────────────
+LlamaForCausalLM can now return final hidden states before the LM head
+via return_hidden=True. This lets training compute exact chunked CE
+without materializing full [B, T, vocab] logits.
 """
 
 from typing import Optional
@@ -313,6 +319,7 @@ class LlamaForCausalLM(nn.Module):
         kv_caches: Optional[list[KVCache]] = None,
         use_cache: bool = False,
         mode: str = "train",
+        return_hidden: bool = False,
     ) -> tuple[jnp.ndarray, Optional[list[KVCache]]]:
 
         hidden_states, updated_caches = self.model(
@@ -322,6 +329,21 @@ class LlamaForCausalLM(nn.Module):
             use_cache=use_cache,
             mode=mode,
         )
+
+        # --------------------------------------------------
+        # Training loss fast path
+        #
+        # Return final normalized hidden states before the LM head.
+        # This avoids full [B, T, vocab] materialization. The default
+        # stays logits for HF export, generation, and parity validation.
+        # --------------------------------------------------
+
+        if return_hidden:
+            return hidden_states, updated_caches
+
+        # --------------------------------------------------
+        # Standard full-logits path
+        # --------------------------------------------------
 
         if self.config.tie_word_embeddings:
             embedding = self.model.embed_tokens.embedding
