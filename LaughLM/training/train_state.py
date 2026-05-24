@@ -2,6 +2,8 @@
 LaughLM/training/train_state.py
 
 Simple PMAP TrainState for replicated data-parallel training.
+
+Token accounting is intentionally host-side in trainer.py.
 """
 
 from __future__ import annotations
@@ -9,7 +11,6 @@ from __future__ import annotations
 from typing import Any
 
 import jax
-import jax.numpy as jnp
 from flax import struct
 
 
@@ -19,7 +20,6 @@ class TrainState:
     opt_state: Any
 
     step: Any = 0
-    tokens_processed=jnp.array(0, dtype=jnp.int64),
 
     rng_key: Any = None
     extra_state: Any = None
@@ -29,7 +29,6 @@ class TrainState:
             raise ValueError("TrainState.rng_key is None")
 
         new_key, subkey = jax.random.split(self.rng_key)
-
         return self.replace(rng_key=new_key), subkey
 
     def apply_grad_step(
@@ -37,14 +36,13 @@ class TrainState:
         *,
         params,
         opt_state,
-        tokens_in_step: int,
+        tokens_in_step: Any | None = None,
         extra_state: Any | None = None,
     ):
         return self.replace(
             params=params,
             opt_state=opt_state,
             step=self.step + 1,
-            tokens_processed=self.tokens_processed + tokens_in_step,
             extra_state=self.extra_state if extra_state is None else extra_state,
         )
 
@@ -60,7 +58,6 @@ def create_train_state(
         params=params,
         opt_state=optimizer.init(params),
         step=0,
-        tokens_processed=0,
         rng_key=rng_key,
         extra_state=extra_state,
     )
