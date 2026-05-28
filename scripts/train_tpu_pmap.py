@@ -10,10 +10,25 @@ def main():
     print(f"JAX devices: {jax.devices()}")
 
     files = [
-        "fineweb-edu/fineweb-edu_shard_00000.bin",
-        "fineweb-edu/fineweb-edu_shard_00001.bin",
-        "fineweb-edu/fineweb-edu_shard_00002.bin",
-        "fineweb-edu/fineweb-edu_shard_00003.bin",
+        # "fineweb-edu/fineweb-edu_shard_00000.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00001.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00002.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00003.bin", # Done
+
+        # "fineweb-edu/fineweb-edu_shard_00004.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00005.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00006.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00007.bin", # Done
+
+        # "fineweb-edu/fineweb-edu_shard_00008.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00009.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00010.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00011.bin", # Done
+
+        "fineweb-edu/fineweb-edu_shard_00012.bin",
+        "fineweb-edu/fineweb-edu_shard_00013.bin",
+        "fineweb-edu/fineweb-edu_shard_00014.bin",
+        "fineweb-edu/fineweb-edu_shard_00015.bin",
 
     ]
 
