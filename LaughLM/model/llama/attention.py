@@ -12,10 +12,18 @@ Backend policy:
 - splash + GSPMD -> TPU SplashAttention wrapped with shard_map
 - decode -> XLA SDPA
 
-PMAP benchmarking additions:
-- attention_fallback: "warn" | "error"
-- LAUGHLM_ATTENTION_FALLBACK env override for temporary benchmark use
-- XLA fallback remains causal when explicit dense mask is skipped
+Important fix:
+- SplashAttention expects caller-side Q/K scaling semantics.
+- HF/JAX scaled dot-product attention uses scale = 1 / sqrt(head_dim).
+- Therefore canonical Splash path scales Q by 1 / sqrt(head_dim)
+  before calling the Splash kernel.
+
+Legacy compatibility:
+- Old checkpoints trained before this fix used unscaled Splash logits.
+- To reproduce old behavior temporarily, set:
+    LAUGHLM_SPLASH_LEGACY_UNSCALED=1
+  or, during old-checkpoint export:
+    LAUGHLM_EXPORT_LEGACY_UNSCALED_SPLASH=1
 """
 
 from __future__ import annotations
@@ -35,18 +43,22 @@ except Exception:
 from flax import linen as nn
 
 from LaughLM.model.llama.config import LlamaConfig
+
 from LaughLM.model.llama.initialization import (
     create_dense,
     constrain_hidden_states,
 )
+
 from LaughLM.model.llama.rope import (
     RotaryEmbedding,
     apply_rotary_pos_emb,
 )
+
 from LaughLM.model.llama.kv_cache import (
     KVCache,
     update_kv_cache,
 )
+
 from LaughLM.distributed.sharding import (
     constrain_kv_cache,
     gspmd_constraints_enabled,
@@ -68,6 +80,66 @@ def _is_tpu_backend() -> bool:
     return jax.default_backend() == "tpu"
 
 
+def _truthy_env(name: str) -> bool:
+    value = os.environ.get(name, "0")
+
+    return str(value).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
+
+def _legacy_unscaled_splash_enabled() -> bool:
+    """
+    Compatibility mode for old checkpoints trained with unscaled Splash logits.
+
+    Use only for validating/exporting old checkpoints.
+
+    Canonical future behavior should leave this disabled.
+    """
+
+    return (
+        _truthy_env("LAUGHLM_SPLASH_LEGACY_UNSCALED")
+        or _truthy_env("LAUGHLM_EXPORT_LEGACY_UNSCALED_SPLASH")
+    )
+
+
+def _scale_query_for_splash(
+    query_states: jnp.ndarray,
+) -> jnp.ndarray:
+    """
+    Canonical scaled dot-product attention semantics.
+
+    HF/JAX attention computes:
+
+        softmax((Q @ K^T) / sqrt(head_dim)) @ V
+
+    Splash kernel path receives Q/K/V directly, so scale Q here:
+
+        Q_scaled = Q / sqrt(head_dim)
+
+    Legacy mode disables this for old checkpoints trained before this fix.
+    """
+
+    if _legacy_unscaled_splash_enabled():
+        _log_attention_backend(
+            "legacy unscaled splash attention"
+        )
+        return query_states
+
+    head_dim = query_states.shape[-1]
+
+    scale = jnp.asarray(
+        head_dim ** -0.5,
+        dtype=query_states.dtype,
+    )
+
+    return query_states * scale
+
+
 def _attention_fallback_policy(config: LlamaConfig) -> str:
     """
     Fallback policy resolution order:
@@ -75,6 +147,7 @@ def _attention_fallback_policy(config: LlamaConfig) -> str:
     2. LAUGHLM_ATTENTION_FALLBACK env var
     3. "warn"
     """
+
     policy = getattr(config, "attention_fallback", None)
 
     if policy is None:
@@ -125,7 +198,13 @@ def _find_splash_block_size(seq_len: int) -> tuple[int, int]:
             return block, 0
 
     block = 512
-    pad = ((seq_len + block - 1) // block) * block - seq_len
+
+    pad = (
+        ((seq_len + block - 1) // block)
+        * block
+        - seq_len
+    )
+
     return block, pad
 
 
@@ -138,6 +217,7 @@ def _pad_for_splash(
     q/k/v layout:
         [B, T, H, Dh]
     """
+
     B, T, QH, Dh = q.shape
     KVH = k.shape[2]
 
@@ -195,10 +275,19 @@ def _splash_attention(
 
     Splash kernel layout:
         per-example [H, T, Dh]
+
+    Canonical behavior:
+        Q is scaled by 1 / sqrt(head_dim) before entering Splash,
+        so Splash matches XLA/HF scaled dot-product attention semantics.
     """
+
     from jax.experimental.pallas.ops.tpu.splash_attention import (
         splash_attention_kernel,
         splash_attention_mask,
+    )
+
+    query_states = _scale_query_for_splash(
+        query_states
     )
 
     q, k, v, pad_amount = _pad_for_splash(
@@ -255,7 +344,12 @@ def _splash_attention(
     )
 
     def per_example(q_b, k_b, v_b):
-        return splash_kernel(q_b, k_b, v_b, None)
+        return splash_kernel(
+            q_b,
+            k_b,
+            v_b,
+            None,
+        )
 
     out = jax.vmap(
         per_example,
@@ -263,7 +357,10 @@ def _splash_attention(
     )(q, k, v)
 
     # [B, H, T, Dh] -> [B, T, H, Dh]
-    out = jnp.transpose(out, (0, 2, 1, 3))
+    out = jnp.transpose(
+        out,
+        (0, 2, 1, 3),
+    )
 
     if pad_amount > 0:
         out = out[:, :-pad_amount, :, :]
@@ -290,6 +387,7 @@ def _splash_attention_shard_map(
         sequence/head/head_dim replicated inside each local shard
         FSDP axis is not used by the local Splash kernel
     """
+
     mesh = get_current_mesh()
 
     if mesh is None:
@@ -313,7 +411,11 @@ def _splash_attention_shard_map(
     spec = P("data", None, None, None)
 
     def local_splash(q, k, v):
-        return _splash_attention(q, k, v)
+        return _splash_attention(
+            q,
+            k,
+            v,
+        )
 
     try:
         mapped = jax.shard_map(
@@ -323,6 +425,7 @@ def _splash_attention_shard_map(
             out_specs=spec,
             check_vma=False,
         )
+
     except AttributeError:
         from jax.experimental.shard_map import shard_map
 
@@ -333,6 +436,7 @@ def _splash_attention_shard_map(
             out_specs=spec,
             check_rep=False,
         )
+
     except TypeError:
         from jax.experimental.shard_map import shard_map
 
@@ -361,13 +465,21 @@ def _attention_impl_from_config(
     q_len: int,
     kv_len: int,
 ) -> str:
-    impl = getattr(config, "attention_impl", "standard")
+    impl = getattr(
+        config,
+        "attention_impl",
+        "standard",
+    )
 
     if mode == "decode":
         return "xla"
 
     if impl == "splash":
-        if _is_tpu_backend() and q_len == kv_len and q_len > 4:
+        if (
+            _is_tpu_backend()
+            and q_len == kv_len
+            and q_len > 4
+        ):
             return "splash"
 
         reason = (
@@ -396,11 +508,10 @@ def _xla_sdpa(
     """
     XLA SDPA fallback.
 
-    Important:
-    When model.py skips dense causal masks for Splash train/prefill,
-    XLA fallback must still remain causal. Therefore, if no bias mask
-    is supplied in train/prefill and q_len == kv_len, use is_causal=True.
+    Explicitly uses scale = 1 / sqrt(head_dim), matching HF LLaMA
+    and canonical scaled dot-product attention.
     """
+
     q_len = query_states.shape[1]
     kv_len = key_states.shape[1]
 
@@ -411,9 +522,17 @@ def _xla_sdpa(
     )
 
     if use_causal_flag:
-        _log_attention_backend("xla dot_product_attention causal")
+        _log_attention_backend(
+            "xla dot_product_attention causal"
+        )
     else:
-        _log_attention_backend("xla dot_product_attention")
+        _log_attention_backend(
+            "xla dot_product_attention"
+        )
+
+    head_dim = query_states.shape[-1]
+
+    scale = head_dim ** -0.5
 
     return jax.nn.dot_product_attention(
         query_states,
@@ -421,6 +540,7 @@ def _xla_sdpa(
         value_states,
         bias=attention_mask,
         is_causal=use_causal_flag,
+        scale=scale,
     )
 
 
@@ -483,7 +603,9 @@ class LlamaAttention(nn.Module):
         mode: str = "train",
     ) -> tuple[jnp.ndarray, Optional[KVCache]]:
 
-        hidden_states = constrain_hidden_states(hidden_states)
+        hidden_states = constrain_hidden_states(
+            hidden_states
+        )
 
         config = self.config
 
@@ -504,11 +626,21 @@ class LlamaAttention(nn.Module):
                 name="qkv_proj",
             )
 
-            qkv_states = qkv_proj(hidden_states)
+            qkv_states = qkv_proj(
+                hidden_states
+            )
 
             query_states = qkv_states[..., :q_dim]
-            key_states = qkv_states[..., q_dim : q_dim + kv_dim]
-            value_states = qkv_states[..., q_dim + kv_dim :]
+
+            key_states = qkv_states[
+                ...,
+                q_dim : q_dim + kv_dim,
+            ]
+
+            value_states = qkv_states[
+                ...,
+                q_dim + kv_dim :,
+            ]
 
         else:
             q_proj = create_dense(
@@ -532,9 +664,17 @@ class LlamaAttention(nn.Module):
                 name="v_proj",
             )
 
-            query_states = q_proj(hidden_states)
-            key_states = k_proj(hidden_states)
-            value_states = v_proj(hidden_states)
+            query_states = q_proj(
+                hidden_states
+            )
+
+            key_states = k_proj(
+                hidden_states
+            )
+
+            value_states = v_proj(
+                hidden_states
+            )
 
         o_proj = create_dense(
             features=config.hidden_size,
@@ -564,7 +704,9 @@ class LlamaAttention(nn.Module):
             head_dim,
         )
 
-        rotary_emb = RotaryEmbedding(config)
+        rotary_emb = RotaryEmbedding(
+            config
+        )
 
         cos, sin = rotary_emb(
             query_states,
@@ -578,13 +720,22 @@ class LlamaAttention(nn.Module):
             sin,
         )
 
-        key_states = constrain_kv_cache(key_states)
-        value_states = constrain_kv_cache(value_states)
+        key_states = constrain_kv_cache(
+            key_states
+        )
+
+        value_states = constrain_kv_cache(
+            value_states
+        )
 
         updated_cache = None
 
         if kv_cache is not None:
-            updated_cache, key_states, value_states = update_kv_cache(
+            (
+                updated_cache,
+                key_states,
+                value_states,
+            ) = update_kv_cache(
                 kv_cache,
                 key_states,
                 value_states,
@@ -592,12 +743,31 @@ class LlamaAttention(nn.Module):
 
             kv_length = updated_cache.cache_position
 
-            key_states = key_states[:, :kv_length, :, :]
-            value_states = value_states[:, :kv_length, :, :]
+            key_states = key_states[
+                :,
+                :kv_length,
+                :,
+                :,
+            ]
 
-        query_states = query_states.astype(config.compute_dtype)
-        key_states = key_states.astype(config.compute_dtype)
-        value_states = value_states.astype(config.compute_dtype)
+            value_states = value_states[
+                :,
+                :kv_length,
+                :,
+                :,
+            ]
+
+        query_states = query_states.astype(
+            config.compute_dtype
+        )
+
+        key_states = key_states.astype(
+            config.compute_dtype
+        )
+
+        value_states = value_states.astype(
+            config.compute_dtype
+        )
 
         attn_output = _attention(
             query_states=query_states,
@@ -614,10 +784,16 @@ class LlamaAttention(nn.Module):
             config.hidden_size,
         )
 
-        attn_output = constrain_hidden_states(attn_output)
+        attn_output = constrain_hidden_states(
+            attn_output
+        )
 
-        attn_output = o_proj(attn_output)
+        attn_output = o_proj(
+            attn_output
+        )
 
-        attn_output = constrain_hidden_states(attn_output)
+        attn_output = constrain_hidden_states(
+            attn_output
+        )
 
         return attn_output, updated_cache
