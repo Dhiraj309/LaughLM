@@ -1,9 +1,9 @@
 model:
-  vocab_size: 49152
-  d_model: 768
-  num_layers: 16
-  num_heads: 12
-  num_kv_heads: 12
+  vocab_size: 32064
+  d_model: 640
+  num_layers: 32
+  num_heads: 10
+  num_kv_heads: 10
   max_seq_len: 2048
 
 architecture:
@@ -41,13 +41,25 @@ optimizer:
 
 scheduler:
   type: wsd
-  warmup_fraction: 0.02
-  stable_fraction: 0.20
+
+  # LR schedule horizon.
+  # Keep this fixed across staged training.
+  # Example:
+  #   stage 1 runtime.total_tokens = 1B
+  #   stage 2 runtime.total_tokens = 2B
+  #   ...
+  #   scheduler.horizon_tokens stays 20B
+  horizon_tokens: 20_000_000_000
+
+  # Long-pretraining WSD:
+  # 1% warmup, 95% stable, remaining ~4% decay.
+  warmup_fraction: 0.01
+  stable_fraction: 0.95
   min_lr_ratio: 0.05
 
 loss:
   chunked_logits: true
-  logits_chunk_size: 4096 # 2048
+  logits_chunk_size: 4096
   remat_logits_chunks: true
   z_loss: 1.0e-4
   ignore_index: -100
@@ -55,14 +67,25 @@ loss:
 runtime:
   backend: pmap
   seq_len: 2048
-  micro_batch_per_device: 1
-  gradient_accumulation: 32
-  total_tokens: 250_000_000
-  eval_interval: 500
-  log_interval: 10
-  checkpoint_interval: 500
+  micro_batch_per_device: 2
+  gradient_accumulation: 16
+
+  # Current cumulative stop target.
+  # Increase this stage-by-stage:
+  #   1_000_000_000
+  #   2_000_000_000
+  #   5_000_000_000
+  #   10_000_000_000
+  #   20_000_000_000
+  #
+  # Do NOT use this as the LR horizon anymore.
+  total_tokens: 1_000_000_000
+
+  eval_interval: 5000
+  log_interval: 50
+  checkpoint_interval: 5000
   checkpoint_max_to_keep: 2
-  checkpoint_dir: checkpoints/v5e_pmap_chunked_ce_s2048_mb16
+  checkpoint_dir: checkpoints/v5e_pmap_phi35tok_d640_l32_h10_s2048_mb2_ga16_h20b
 
 data:
   sources:
@@ -76,7 +99,7 @@ data:
 
 tokenizer:
   algorithm: bpe
-  vocab_size: 49152
+  vocab_size: 32064
   pre_tokenizer: byte_level
   number_tokenization: whole_number
   output_format: huggingface_fast
