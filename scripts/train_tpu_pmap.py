@@ -10,12 +10,16 @@ def main():
     print(f"JAX devices: {jax.devices()}")
 
     files = [
+        "fineweb-edu/fineweb-edu_shard_00000.bin",
         "fineweb-edu/fineweb-edu_shard_00001.bin",
+        "fineweb-edu/fineweb-edu_shard_00002.bin",
+        "fineweb-edu/fineweb-edu_shard_00003.bin",
+
     ]
 
     paths = [
         hf_hub_download(
-            repo_id="LaughTaleAI/LaughLM-Tokenized",
+            repo_id="LaughTaleAI/LaughLM-Tokenized-Fine",
             filename=f,
             repo_type="dataset",
         )
