@@ -4,7 +4,7 @@ model:
   num_layers: 32
   num_heads: 10
   num_kv_heads: 10
-  max_seq_len: 2048
+  max_seq_len: 8192
 
 architecture:
   positional: rope
@@ -79,7 +79,7 @@ runtime:
   #   20_000_000_000
   #
   # Do NOT use this as the LR horizon anymore.
-  total_tokens: 4_000_000_000
+  total_tokens: 3_000_000_000
 
   eval_interval: 1000
   log_interval: 50
