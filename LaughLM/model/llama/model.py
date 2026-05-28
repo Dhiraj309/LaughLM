@@ -155,6 +155,8 @@ class LlamaModel(nn.Module):
         self.norm = RMSNorm(
             hidden_size=config.hidden_size,
             eps=config.rms_norm_eps,
+            dtype=config.compute_dtype,
+            param_dtype=config.param_dtype,
             name="norm",
         )
 

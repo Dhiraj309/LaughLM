@@ -1,5 +1,8 @@
 """
 LaughLM/export/hf_config.py
+
+Build and write Hugging Face config.json and generation_config.json
+from the active LaughLM LlamaConfig.
 """
 
 from __future__ import annotations
@@ -10,11 +13,10 @@ from pathlib import Path
 
 def build_hf_config(config):
     """
-    Convert LaughLM config -> HF Llama config dict.
+    Convert LaughLM LlamaConfig -> HF Llama config dict.
     """
 
     return {
-
         # --------------------------------------------------
         # Core architecture
         # --------------------------------------------------
@@ -23,7 +25,8 @@ def build_hf_config(config):
             "LlamaForCausalLM",
         ],
 
-        "model_type": "llama",
+        "model_type":
+            "llama",
 
         "hidden_size":
             config.hidden_size,
@@ -130,8 +133,18 @@ def build_hf_config(config):
 
 
 def build_generation_config(config):
+    """
+    Base-LM-safe deterministic generation config.
+
+    Important:
+    - Single EOS: 32000 for Phi-3.5-tokenized LaughLM base LM.
+    - No Phi chat multi-EOS list.
+    - No eos_token_id=2.
+    """
 
     return {
+        "_from_model_config":
+            True,
 
         "bos_token_id":
             config.bos_token_id,
@@ -142,18 +155,15 @@ def build_generation_config(config):
         "pad_token_id":
             config.pad_token_id,
 
-        "do_sample": True,
+        "do_sample":
+            False,
 
-        "temperature": 1.0,
-
-        "top_p": 1.0,
-
-        "top_k": 50,
+        "transformers_version":
+            "4.57.0",
     }
 
 
 def _dtype_to_string(dtype):
-
     s = str(dtype)
 
     if "bfloat16" in s:
@@ -184,17 +194,14 @@ def write_hf_configs(
         config
     )
 
-    generation_json = (
-        build_generation_config(
-            config
-        )
+    generation_json = build_generation_config(
+        config
     )
 
     with open(
         output_dir / "config.json",
         "w",
     ) as f:
-
         json.dump(
             config_json,
             f,
@@ -202,11 +209,9 @@ def write_hf_configs(
         )
 
     with open(
-        output_dir
-        / "generation_config.json",
+        output_dir / "generation_config.json",
         "w",
     ) as f:
-
         json.dump(
             generation_json,
             f,
