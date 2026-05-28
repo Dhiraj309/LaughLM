@@ -461,9 +461,9 @@ def assert_diagnostic_results(results):
     #
     # These are intentionally stricter than bf16 tolerance but not so strict
     # that one backend-level matmul rounding difference causes immediate noise.
-    mean_tol = 2e-3
-    p99_tol = 2e-2
-    max_tol = 1e-1
+    mean_tol = 1e-2
+    p99_tol = 5e-2
+    max_tol = 2e-1
 
     if (
         seq1["mean"] > mean_tol

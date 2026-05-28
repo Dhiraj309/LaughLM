@@ -20,15 +20,15 @@ def main():
         # "fineweb-edu/fineweb-edu_shard_00006.bin", # Done
         # "fineweb-edu/fineweb-edu_shard_00007.bin", # Done
 
-        # "fineweb-edu/fineweb-edu_shard_00008.bin", # Done
-        # "fineweb-edu/fineweb-edu_shard_00009.bin", # Done
-        # "fineweb-edu/fineweb-edu_shard_00010.bin", # Done
-        # "fineweb-edu/fineweb-edu_shard_00011.bin", # Done
+        "fineweb-edu/fineweb-edu_shard_00008.bin", # Done
+        "fineweb-edu/fineweb-edu_shard_00009.bin", # Done
+        "fineweb-edu/fineweb-edu_shard_00010.bin", # Done
+        "fineweb-edu/fineweb-edu_shard_00011.bin", # Done
 
-        "fineweb-edu/fineweb-edu_shard_00012.bin",
-        "fineweb-edu/fineweb-edu_shard_00013.bin",
-        "fineweb-edu/fineweb-edu_shard_00014.bin",
-        "fineweb-edu/fineweb-edu_shard_00015.bin",
+        # "fineweb-edu/fineweb-edu_shard_00012.bin",
+        # "fineweb-edu/fineweb-edu_shard_00013.bin",
+        # "fineweb-edu/fineweb-edu_shard_00014.bin",
+        # "fineweb-edu/fineweb-edu_shard_00015.bin",
 
     ]
 
