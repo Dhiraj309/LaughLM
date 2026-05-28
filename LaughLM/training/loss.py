@@ -9,14 +9,8 @@ PMAP runtime fix:
 - Add exact chunked vocab cross entropy to avoid materializing [B, T, vocab].
 
 Important:
-Chunked CE is exact dense-softmax CE. It does NOT approximate the
+Chunked CE is still exact dense-softmax CE. It does NOT approximate the
 softmax denominator. It scans over vocab chunks and accumulates logsumexp.
-
-2026 runtime optimization:
-- chunked_lm_loss_from_hidden now uses a manual custom VJP.
-- This avoids XLA storing [num_chunks, B*T, chunk_size] logits residuals.
-- It should preserve the memory behavior of remat=True while reducing
-  some recomputation / residual pressure.
 """
 
 from __future__ import annotations
@@ -548,7 +542,7 @@ def dense_lm_loss_from_hidden(
 
 
 # ─────────────────────────────────────────────────────────────
-# Custom-VJP chunked exact LM loss
+# Chunked exact LM loss
 # ─────────────────────────────────────────────────────────────
 
 def chunked_lm_loss_from_hidden(
@@ -569,12 +563,8 @@ def chunked_lm_loss_from_hidden(
     Computes:
       CE = logsumexp(hidden @ W.T) - target_logit
 
-    This version uses a manual custom VJP. The backward pass scans vocab
-    chunks and computes gradients directly, instead of letting XLA keep
-    all chunk logits as residuals.
+    The logsumexp denominator is still over the full vocabulary.
     """
-    del remat_chunks  # custom VJP handles memory manually.
-
     if chunk_size <= 0:
         raise ValueError(
             f"chunk_size must be > 0, got {chunk_size}"
@@ -597,6 +587,11 @@ def chunked_lm_loss_from_hidden(
         hidden_size=D,
     )
 
+    if lm_head_bias is not None and lm_head_bias.shape != (vocab_size,):
+        raise ValueError(
+            f"lm_head_bias must be [{vocab_size}], got {lm_head_bias.shape}"
+        )
+
     padded_vocab_size = _ceil_to_multiple(
         vocab_size,
         chunk_size,
@@ -607,32 +602,31 @@ def chunked_lm_loss_from_hidden(
         // chunk_size
     )
 
-    w_padded = _pad_axis(
+    w_vocab_major = _pad_axis(
         w_vocab_major,
         padded_vocab_size,
         axis=0,
     )
 
-    if lm_head_bias is None:
-        bias_padded = jnp.zeros(
-            (padded_vocab_size,),
-            dtype=w_padded.dtype,
-        )
-    else:
-        if lm_head_bias.shape != (vocab_size,):
-            raise ValueError(
-                f"lm_head_bias must be [{vocab_size}], got {lm_head_bias.shape}"
-            )
-
-        bias_padded = _pad_axis(
+    if lm_head_bias is not None:
+        lm_head_bias = _pad_axis(
             lm_head_bias,
             padded_vocab_size,
             axis=0,
         )
 
+    hidden_flat = hidden_states.reshape(
+        B * T,
+        D,
+    )
+
+    targets_flat = targets.astype(jnp.int32).reshape(
+        B * T,
+    )
+
     if mask is None:
-        mask_array = jnp.ones(
-            targets.shape,
+        mask_flat = jnp.ones(
+            (B * T,),
             dtype=bool,
         )
     else:
@@ -641,635 +635,270 @@ def chunked_lm_loss_from_hidden(
                 f"mask must be [B, T]={B, T}, got {mask.shape}"
             )
 
-        mask_array = mask.astype(bool)
+        mask_flat = mask.astype(bool).reshape(
+            B * T,
+        )
+
+    label_present = (
+        targets_flat != ignore_index
+    )
+
+    label_in_range = (
+        (targets_flat >= 0)
+        & (targets_flat < vocab_size)
+    )
+
+    active = (
+        mask_flat
+        & label_present
+        & label_in_range
+    )
+
+    safe_targets = jnp.where(
+        active,
+        targets_flat,
+        0,
+    )
 
     neg_inf = jnp.asarray(
         -jnp.inf,
         dtype=jnp.float32,
     )
 
-    def _forward_impl(
-        hs,
-        tg,
-        mk,
-        w,
-        bias,
+    init_max = jnp.full(
+        (B * T,),
+        neg_inf,
+        dtype=jnp.float32,
+    )
+
+    init_sum = jnp.zeros(
+        (B * T,),
+        dtype=jnp.float32,
+    )
+
+    init_target_logits = jnp.zeros(
+        (B * T,),
+        dtype=jnp.float32,
+    )
+
+    def body_impl(
+        carry,
+        chunk_idx,
     ):
-        hs_flat = hs.reshape(
-            B * T,
-            D,
+        running_max, running_sum, target_logits = carry
+
+        start = (
+            chunk_idx
+            * chunk_size
         )
 
-        tg_flat = tg.astype(jnp.int32).reshape(
-            B * T,
+        w_chunk = lax.dynamic_slice_in_dim(
+            w_vocab_major,
+            start_index=start,
+            slice_size=chunk_size,
+            axis=0,
         )
 
-        mk_flat = mk.astype(bool).reshape(
-            B * T,
+        logits_chunk = jnp.einsum(
+            "nd,vd->nv",
+            hidden_flat,
+            w_chunk,
+            precision=lax.Precision.DEFAULT,
+            preferred_element_type=jnp.float32,
         )
 
-        label_present = (
-            tg_flat != ignore_index
+        if lm_head_bias is not None:
+            bias_chunk = lax.dynamic_slice_in_dim(
+                lm_head_bias,
+                start_index=start,
+                slice_size=chunk_size,
+                axis=0,
+            )
+
+            logits_chunk = (
+                logits_chunk
+                + bias_chunk.astype(jnp.float32)[None, :]
+            )
+
+        vocab_ids = (
+            start
+            + jnp.arange(
+                chunk_size,
+                dtype=jnp.int32,
+            )
         )
 
-        label_in_range = (
-            (tg_flat >= 0)
-            & (tg_flat < vocab_size)
+        valid_vocab = (
+            vocab_ids < vocab_size
         )
 
-        active = (
-            mk_flat
-            & label_present
-            & label_in_range
-        )
-
-        safe_targets = jnp.where(
-            active,
-            tg_flat,
-            0,
-        )
-
-        init_max = jnp.full(
-            (B * T,),
+        logits_chunk = jnp.where(
+            valid_vocab[None, :],
+            logits_chunk,
             neg_inf,
-            dtype=jnp.float32,
         )
 
-        init_sum = jnp.zeros(
-            (B * T,),
-            dtype=jnp.float32,
+        chunk_max = jnp.max(
+            logits_chunk,
+            axis=-1,
         )
 
-        init_target_logits = jnp.zeros(
-            (B * T,),
-            dtype=jnp.float32,
+        new_max = jnp.maximum(
+            running_max,
+            chunk_max,
         )
 
-        def body(
-            carry,
-            chunk_idx,
-        ):
-            running_max, running_sum, target_logits = carry
+        old_scale = jnp.exp(
+            running_max
+            - new_max
+        )
 
-            start = (
-                chunk_idx
-                * chunk_size
-            )
+        chunk_scale = jnp.exp(
+            logits_chunk
+            - new_max[:, None]
+        )
 
-            w_chunk = lax.dynamic_slice_in_dim(
-                w,
-                start_index=start,
-                slice_size=chunk_size,
-                axis=0,
-            )
-
-            b_chunk = lax.dynamic_slice_in_dim(
-                bias,
-                start_index=start,
-                slice_size=chunk_size,
-                axis=0,
-            )
-
-            logits_chunk = jnp.einsum(
-                "nd,vd->nv",
-                hs_flat,
-                w_chunk,
-                precision=lax.Precision.DEFAULT,
-                preferred_element_type=jnp.float32,
-            )
-
-            logits_chunk = (
-                logits_chunk
-                + b_chunk.astype(jnp.float32)[None, :]
-            )
-
-            vocab_ids = (
-                start
-                + jnp.arange(
-                    chunk_size,
-                    dtype=jnp.int32,
-                )
-            )
-
-            valid_vocab = (
-                vocab_ids < vocab_size
-            )
-
-            logits_chunk = jnp.where(
-                valid_vocab[None, :],
-                logits_chunk,
-                neg_inf,
-            )
-
-            chunk_max = jnp.max(
-                logits_chunk,
+        new_sum = (
+            running_sum
+            * old_scale
+            + jnp.sum(
+                chunk_scale,
                 axis=-1,
             )
+        )
 
-            new_max = jnp.maximum(
-                running_max,
-                chunk_max,
-            )
+        in_chunk = (
+            active
+            & (safe_targets >= start)
+            & (safe_targets < start + chunk_size)
+        )
 
-            old_scale = jnp.exp(
-                running_max
-                - new_max
-            )
+        local_targets = jnp.clip(
+            safe_targets - start,
+            0,
+            chunk_size - 1,
+        )
 
-            chunk_scale = jnp.exp(
-                logits_chunk
-                - new_max[:, None]
-            )
+        chunk_target_logits = jnp.take_along_axis(
+            logits_chunk,
+            local_targets[:, None],
+            axis=-1,
+        )[:, 0]
 
-            new_sum = (
-                running_sum
-                * old_scale
-                + jnp.sum(
-                    chunk_scale,
-                    axis=-1,
-                )
-            )
-
-            in_chunk = (
-                active
-                & (safe_targets >= start)
-                & (safe_targets < start + chunk_size)
-            )
-
-            local_targets = jnp.clip(
-                safe_targets - start,
-                0,
-                chunk_size - 1,
-            )
-
-            chunk_target_logits = jnp.take_along_axis(
-                logits_chunk,
-                local_targets[:, None],
-                axis=-1,
-            )[:, 0]
-
-            target_logits = jnp.where(
-                in_chunk,
-                chunk_target_logits,
-                target_logits,
-            )
-
-            return (
-                new_max,
-                new_sum,
-                target_logits,
-            ), None
-
-        (
-            final_max,
-            final_sum,
+        target_logits = jnp.where(
+            in_chunk,
+            chunk_target_logits,
             target_logits,
-        ), _ = lax.scan(
-            body,
-            (
-                init_max,
-                init_sum,
-                init_target_logits,
-            ),
-            jnp.arange(
-                num_chunks,
-                dtype=jnp.int32,
-            ),
-        )
-
-        log_z = (
-            final_max
-            + jnp.log(final_sum)
-        )
-
-        per_token_xent = (
-            log_z
-            - target_logits
-        )
-
-        z_loss_value_flat = (
-            z_loss
-            * jax.lax.square(log_z)
-        )
-
-        per_token_loss_flat = (
-            per_token_xent
-            + z_loss_value_flat
-        )
-
-        per_token_loss_flat = jnp.where(
-            active,
-            per_token_loss_flat,
-            0.0,
-        )
-
-        z_loss_value_flat = jnp.where(
-            active,
-            z_loss_value_flat,
-            0.0,
-        )
-
-        denom = jnp.maximum(
-            jnp.sum(active.astype(jnp.float32)),
-            1.0,
-        )
-
-        total_loss = (
-            jnp.sum(
-                per_token_loss_flat,
-                dtype=jnp.float32,
-            )
-            / denom
-        )
-
-        mean_z_loss = (
-            jnp.sum(
-                z_loss_value_flat,
-                dtype=jnp.float32,
-            )
-            / denom
-        )
-
-        bad_label_count = jnp.sum(
-            (
-                label_present
-                & (
-                    (tg_flat < 0)
-                    | (tg_flat >= vocab_size)
-                )
-            ).astype(jnp.float32)
         )
 
         return (
-            total_loss,
-            mean_z_loss,
-            denom,
-            bad_label_count,
-            hs_flat,
-            tg_flat,
-            active,
-            safe_targets,
-            log_z,
-        )
+            new_max,
+            new_sum,
+            target_logits,
+        ), None
 
-    @jax.custom_vjp
-    def _chunked_loss_custom(
-        hs,
-        tg,
-        mk,
-        w,
-        bias,
-    ):
-        (
-            total_loss,
-            mean_z_loss,
-            denom,
-            bad_label_count,
-            _hs_flat,
-            _tg_flat,
-            _active,
-            _safe_targets,
-            _log_z,
-        ) = _forward_impl(
-            hs,
-            tg,
-            mk,
-            w,
-            bias,
-        )
-
-        return (
-            total_loss,
-            mean_z_loss,
-            denom,
-            bad_label_count,
-        )
-
-    def _chunked_loss_fwd(
-        hs,
-        tg,
-        mk,
-        w,
-        bias,
-    ):
-        (
-            total_loss,
-            mean_z_loss,
-            denom,
-            bad_label_count,
-            hs_flat,
-            tg_flat,
-            active,
-            safe_targets,
-            log_z,
-        ) = _forward_impl(
-            hs,
-            tg,
-            mk,
-            w,
-            bias,
-        )
-
-        outputs = (
-            total_loss,
-            mean_z_loss,
-            denom,
-            bad_label_count,
-        )
-
-        residuals = (
-            hs,
-            hs_flat,
-            w,
-            bias,
-            tg_flat,
-            active,
-            safe_targets,
-            log_z,
-            denom,
-        )
-
-        return outputs, residuals
-
-    def _chunked_loss_bwd(
-        residuals,
-        cotangents,
-    ):
-        (
-            hs,
-            hs_flat,
-            w,
-            bias,
-            tg_flat,
-            active,
-            safe_targets,
-            log_z,
-            denom,
-        ) = residuals
-
-        g_loss = cotangents[0]
-        g_z_metric = cotangents[1]
-
-        if g_loss is None:
-            g_loss = jnp.asarray(
-                0.0,
-                dtype=jnp.float32,
-            )
-        else:
-            g_loss = jnp.asarray(
-                g_loss,
-                dtype=jnp.float32,
-            )
-
-        if g_z_metric is None:
-            g_z_metric = jnp.asarray(
-                0.0,
-                dtype=jnp.float32,
-            )
-        else:
-            g_z_metric = jnp.asarray(
-                g_z_metric,
-                dtype=jnp.float32,
-            )
-
-        hs_flat_f32 = hs_flat.astype(
-            jnp.float32
-        )
-
-        active_f32 = active.astype(
-            jnp.float32
-        )
-
-        inv_denom = (
-            1.0
-            / denom
-        )
-
-        loss_scale = (
-            g_loss
-            * active_f32
-            * inv_denom
-        )
-
-        z_metric_scale = (
-            g_z_metric
-            * active_f32
-            * inv_denom
-        )
-
-        softmax_coeff = (
-            loss_scale
-            * (
-                1.0
-                + 2.0
-                * z_loss
-                * log_z
-            )
-            + z_metric_scale
-            * (
-                2.0
-                * z_loss
-                * log_z
-            )
-        )
-
-        target_coeff = loss_scale
-
-        init_grad_hs = jnp.zeros(
-            hs_flat.shape,
-            dtype=jnp.float32,
-        )
-
-        init_grad_w = jnp.zeros(
-            w.shape,
-            dtype=jnp.float32,
-        )
-
-        init_grad_bias = jnp.zeros(
-            bias.shape,
-            dtype=jnp.float32,
-        )
-
-        def bwd_body(
-            carry,
-            chunk_idx,
-        ):
-            grad_hs, grad_w, grad_bias = carry
-
-            start = (
-                chunk_idx
-                * chunk_size
-            )
-
-            w_chunk = lax.dynamic_slice_in_dim(
-                w,
-                start_index=start,
-                slice_size=chunk_size,
-                axis=0,
-            )
-
-            b_chunk = lax.dynamic_slice_in_dim(
-                bias,
-                start_index=start,
-                slice_size=chunk_size,
-                axis=0,
-            )
-
-            logits_chunk = jnp.einsum(
-                "nd,vd->nv",
-                hs_flat,
-                w_chunk,
-                precision=lax.Precision.DEFAULT,
-                preferred_element_type=jnp.float32,
-            )
-
-            logits_chunk = (
-                logits_chunk
-                + b_chunk.astype(jnp.float32)[None, :]
-            )
-
-            vocab_ids = (
-                start
-                + jnp.arange(
-                    chunk_size,
-                    dtype=jnp.int32,
-                )
-            )
-
-            valid_vocab = (
-                vocab_ids < vocab_size
-            )
-
-            logits_chunk = jnp.where(
-                valid_vocab[None, :],
-                logits_chunk,
-                neg_inf,
-            )
-
-            probs_chunk = jnp.exp(
-                logits_chunk
-                - log_z[:, None]
-            )
-
-            target_mask = (
-                active[:, None]
-                & (safe_targets[:, None] == vocab_ids[None, :])
-                & valid_vocab[None, :]
-            )
-
-            grad_logits = (
-                softmax_coeff[:, None]
-                * probs_chunk
-                - target_coeff[:, None]
-                * target_mask.astype(jnp.float32)
-            )
-
-            grad_hs_chunk = jnp.einsum(
-                "nv,vd->nd",
-                grad_logits,
-                w_chunk.astype(jnp.float32),
-                precision=lax.Precision.DEFAULT,
-                preferred_element_type=jnp.float32,
-            )
-
-            grad_w_chunk = jnp.einsum(
-                "nv,nd->vd",
-                grad_logits,
-                hs_flat_f32,
-                precision=lax.Precision.DEFAULT,
-                preferred_element_type=jnp.float32,
-            )
-
-            grad_bias_chunk = jnp.sum(
-                grad_logits,
-                axis=0,
-                dtype=jnp.float32,
-            )
-
-            grad_hs = (
-                grad_hs
-                + grad_hs_chunk
-            )
-
-            grad_w = lax.dynamic_update_slice_in_dim(
-                grad_w,
-                grad_w_chunk,
-                start_index=start,
-                axis=0,
-            )
-
-            grad_bias = lax.dynamic_update_slice_in_dim(
-                grad_bias,
-                grad_bias_chunk,
-                start_index=start,
-                axis=0,
-            )
-
-            return (
-                grad_hs,
-                grad_w,
-                grad_bias,
-            ), None
-
-        (
-            grad_hs_flat,
-            grad_w,
-            grad_bias,
-        ), _ = lax.scan(
-            bwd_body,
-            (
-                init_grad_hs,
-                init_grad_w,
-                init_grad_bias,
-            ),
-            jnp.arange(
-                num_chunks,
-                dtype=jnp.int32,
-            ),
-        )
-
-        grad_hs = grad_hs_flat.reshape(
-            hs.shape
-        )
-
-        return (
-            grad_hs,
-            None,
-            None,
-            grad_w,
-            grad_bias,
-        )
-
-    _chunked_loss_custom.defvjp(
-        _chunked_loss_fwd,
-        _chunked_loss_bwd,
+    body = (
+        jax.checkpoint(body_impl)
+        if remat_chunks
+        else body_impl
     )
 
     (
-        total_loss,
-        mean_z_loss,
-        valid_tokens,
-        bad_label_count,
-    ) = _chunked_loss_custom(
-        hidden_states,
-        targets,
-        mask_array,
-        w_padded,
-        bias_padded,
+        final_max,
+        final_sum,
+        target_logits,
+    ), _ = lax.scan(
+        body,
+        (
+            init_max,
+            init_sum,
+            init_target_logits,
+        ),
+        jnp.arange(
+            num_chunks,
+            dtype=jnp.int32,
+        ),
     )
 
-    total_loss = constrain_loss_tensor(
-        total_loss
+    log_z = (
+        final_max
+        + jnp.log(final_sum)
     )
 
-    mean_z_loss = constrain_loss_tensor(
-        mean_z_loss
+    per_token_xent = (
+        log_z
+        - target_logits
     )
 
-    metrics = {
+    z_loss_value = (
+        z_loss
+        * jax.lax.square(log_z)
+    )
+
+    per_token_loss = (
+        per_token_xent
+        + z_loss_value
+    )
+
+    per_token_loss = jnp.where(
+        active,
+        per_token_loss,
+        0.0,
+    )
+
+    z_loss_value = jnp.where(
+        active,
+        z_loss_value,
+        0.0,
+    )
+
+    per_token_loss = per_token_loss.reshape(
+        B,
+        T,
+    )
+
+    z_loss_value = z_loss_value.reshape(
+        B,
+        T,
+    )
+
+    per_token_loss = constrain_loss_tensor(
+        per_token_loss
+    )
+
+    z_loss_value = constrain_loss_tensor(
+        z_loss_value
+    )
+
+    denom = jnp.maximum(
+        jnp.sum(active.astype(jnp.float32)),
+        1.0,
+    )
+
+    total_loss = (
+        jnp.sum(per_token_loss, dtype=jnp.float32)
+        / denom
+    )
+
+    mean_z_loss = (
+        jnp.sum(z_loss_value, dtype=jnp.float32)
+        / denom
+    )
+
+    bad_label_count = jnp.sum(
+        (
+            label_present
+            & (
+                (targets_flat < 0)
+                | (targets_flat >= vocab_size)
+            )
+        ).astype(jnp.float32)
+    )
+
+    return total_loss, {
         "loss": total_loss,
         "z_loss": mean_z_loss,
-        "valid_tokens": valid_tokens,
+        "valid_tokens": denom,
         "bad_label_count": bad_label_count,
         "logits_chunk_size": jnp.asarray(
             chunk_size,
@@ -1279,13 +908,7 @@ def chunked_lm_loss_from_hidden(
             num_chunks,
             dtype=jnp.int32,
         ),
-        "chunked_custom_vjp": jnp.asarray(
-            1,
-            dtype=jnp.int32,
-        ),
     }
-
-    return total_loss, metrics
 
 
 # ─────────────────────────────────────────────────────────────

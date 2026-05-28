@@ -4,7 +4,7 @@ model:
   num_layers: 16
   num_heads: 12
   num_kv_heads: 12
-  max_seq_len: 4096
+  max_seq_len: 2048
 
 architecture:
   positional: rope
@@ -47,16 +47,16 @@ scheduler:
 
 loss:
   chunked_logits: true
-  logits_chunk_size: 4096
+  logits_chunk_size: 4096 # 2048
   remat_logits_chunks: true
   z_loss: 1.0e-4
   ignore_index: -100
 
 runtime:
   backend: pmap
-  seq_len: 4096
-  micro_batch_per_device: 32
-  gradient_accumulation: 1
+  seq_len: 2048
+  micro_batch_per_device: 1
+  gradient_accumulation: 32
   total_tokens: 250_000_000
   eval_interval: 500
   log_interval: 10
