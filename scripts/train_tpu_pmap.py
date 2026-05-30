@@ -20,15 +20,35 @@ def main():
         # "fineweb-edu/fineweb-edu_shard_00006.bin", # Done
         # "fineweb-edu/fineweb-edu_shard_00007.bin", # Done
 
-        "fineweb-edu/fineweb-edu_shard_00008.bin", # Done
-        "fineweb-edu/fineweb-edu_shard_00009.bin", # Done
-        "fineweb-edu/fineweb-edu_shard_00010.bin", # Done
-        "fineweb-edu/fineweb-edu_shard_00011.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00008.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00009.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00010.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00011.bin", # Done
 
-        # "fineweb-edu/fineweb-edu_shard_00012.bin",
-        # "fineweb-edu/fineweb-edu_shard_00013.bin",
-        # "fineweb-edu/fineweb-edu_shard_00014.bin",
-        # "fineweb-edu/fineweb-edu_shard_00015.bin",
+        # "fineweb-edu/fineweb-edu_shard_00012.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00013.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00014.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00015.bin", # Done
+
+        # "fineweb-edu/fineweb-edu_shard_00013.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00014.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00015.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00016.bin", # Done
+
+        # "fineweb-edu/fineweb-edu_shard_00017.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00018.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00019.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00020.bin", # Done
+
+        # "fineweb-edu/fineweb-edu_shard_00021.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00022.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00023.bin", # Done
+        # "fineweb-edu/fineweb-edu_shard_00024.bin", # Done
+
+        "fineweb-edu/fineweb-edu_shard_00025.bin",
+        "fineweb-edu/fineweb-edu_shard_00026.bin",
+        "fineweb-edu/fineweb-edu_shard_00027.bin",
+        "fineweb-edu/fineweb-edu_shard_00028.bin",
 
     ]
 
