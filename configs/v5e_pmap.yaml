@@ -79,13 +79,13 @@ runtime:
   #   20_000_000_000
   #
   # Do NOT use this as the LR horizon anymore.
-  total_tokens: 3_000_000_000
+  total_tokens: 8_000_000_000
 
   eval_interval: 1000
   log_interval: 50
   checkpoint_interval: 1000
   checkpoint_max_to_keep: 2
-  checkpoint_dir: checkpoints/v5e_pmap_phi35tok_d640_l32_h10_s2048_mb2_ga16_h20b
+  checkpoint_dir: checkpoints
 
 data:
   sources:
