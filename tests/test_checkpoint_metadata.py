@@ -1,3 +1,7 @@
+import copy
+
+import pytest
+
 from LaughLM.config.loader import load_config
 from LaughLM.training.checkpoint import CheckpointManager
 
@@ -69,8 +73,6 @@ def test_checkpoint_metadata_v3_fsdp_gspmd_alias_layout():
 
     assert metadata["format"] == "laughlm_checkpoint_v3"
 
-    # raw config value remains gspmd for compatibility,
-    # but checkpoint backend is canonical fsdp.
     assert metadata["raw_backend"] == "gspmd"
     assert metadata["backend"] == "fsdp"
 
@@ -134,3 +136,159 @@ def test_checkpoint_metadata_preserves_legacy_validation_blocks():
         metadata["parallelism"]["data_parallel"]
         == cfg.parallelism.data_parallel
     )
+
+
+def test_checkpoint_metadata_validation_accepts_matching_pmap_v3():
+    cfg = load_config("configs/v5e_pmap.yaml")
+
+    metadata = CheckpointManager.build_metadata_from_config(
+        config=cfg,
+        step=1,
+        tokens_processed=1,
+        num_devices=8,
+    )
+
+    CheckpointManager.validate_metadata_compatible(
+        metadata=metadata,
+        config=cfg,
+        num_devices=8,
+    )
+
+
+def test_checkpoint_metadata_validation_accepts_matching_fsdp_v3():
+    cfg = load_config("configs/v5e_fsdp_smoke.yaml")
+
+    metadata = CheckpointManager.build_metadata_from_config(
+        config=cfg,
+        step=1,
+        tokens_processed=1,
+        num_devices=2,
+    )
+
+    CheckpointManager.validate_metadata_compatible(
+        metadata=metadata,
+        config=cfg,
+        num_devices=2,
+    )
+
+
+def test_checkpoint_metadata_validation_rejects_backend_mismatch():
+    cfg = load_config("configs/v5e_pmap.yaml")
+
+    metadata = CheckpointManager.build_metadata_from_config(
+        config=cfg,
+        step=1,
+        tokens_processed=1,
+        num_devices=8,
+    )
+
+    metadata = copy.deepcopy(metadata)
+    metadata["backend"] = "fsdp"
+
+    with pytest.raises(
+        ValueError,
+        match="backend/layout",
+    ):
+        CheckpointManager.validate_metadata_compatible(
+            metadata=metadata,
+            config=cfg,
+            num_devices=8,
+        )
+
+
+def test_checkpoint_metadata_validation_rejects_axis_size_mismatch():
+    cfg = load_config("configs/v5e_pmap.yaml")
+
+    metadata = CheckpointManager.build_metadata_from_config(
+        config=cfg,
+        step=1,
+        tokens_processed=1,
+        num_devices=8,
+    )
+
+    metadata = copy.deepcopy(metadata)
+    metadata["layout"]["axis_sizes"]["fsdp"] = 2
+
+    with pytest.raises(
+        ValueError,
+        match="layout.axis_sizes",
+    ):
+        CheckpointManager.validate_metadata_compatible(
+            metadata=metadata,
+            config=cfg,
+            num_devices=8,
+        )
+
+
+def test_checkpoint_metadata_validation_rejects_logical_axis_rule_mismatch():
+    cfg = load_config("configs/v5e_pmap.yaml")
+
+    metadata = CheckpointManager.build_metadata_from_config(
+        config=cfg,
+        step=1,
+        tokens_processed=1,
+        num_devices=8,
+    )
+
+    metadata = copy.deepcopy(metadata)
+    metadata["layout"]["logical_axis_rules"]["embed"] = "fsdp"
+
+    with pytest.raises(
+        ValueError,
+        match="layout.logical_axis_rules",
+    ):
+        CheckpointManager.validate_metadata_compatible(
+            metadata=metadata,
+            config=cfg,
+            num_devices=8,
+        )
+
+
+def test_checkpoint_metadata_validation_accepts_legacy_pmap_v2_without_layout():
+    cfg = load_config("configs/v5e_pmap.yaml")
+
+    metadata = CheckpointManager.build_metadata_from_config(
+        config=cfg,
+        step=1,
+        tokens_processed=1,
+        num_devices=8,
+    )
+
+    metadata = copy.deepcopy(metadata)
+
+    metadata["format"] = "laughlm_pmap_checkpoint_v2"
+    metadata.pop("backend", None)
+    metadata.pop("raw_backend", None)
+    metadata.pop("layout", None)
+    metadata.pop("dtype_policy", None)
+    metadata["runtime"].pop("canonical_backend", None)
+
+    CheckpointManager.validate_metadata_compatible(
+        metadata=metadata,
+        config=cfg,
+        num_devices=8,
+    )
+
+
+def test_checkpoint_metadata_validation_rejects_unknown_format():
+    cfg = load_config("configs/v5e_pmap.yaml")
+
+    metadata = CheckpointManager.build_metadata_from_config(
+        config=cfg,
+        step=1,
+        tokens_processed=1,
+        num_devices=8,
+    )
+
+    metadata = copy.deepcopy(metadata)
+    metadata["format"] = "unknown_format"
+
+    with pytest.raises(
+        ValueError,
+        match="Unknown checkpoint metadata format",
+    ):
+        CheckpointManager.validate_metadata_compatible(
+            metadata=metadata,
+            config=cfg,
+            num_devices=8,
+        )
