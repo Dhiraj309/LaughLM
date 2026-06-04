@@ -64,6 +64,18 @@ def get_dense_logical_axes(
     # Attention projections
     # --------------------------------------------------------
 
+    if name == "qkv_proj":
+        # Fused QKV kernel layout:
+        #   [hidden, q_dim + k_dim + v_dim]
+        #
+        # For current pure FSDP, shard only the input hidden dimension.
+        # Do not label output as "embed"; that would create
+        # ("embed", "embed") -> P("fsdp", "fsdp"), which Flax rejects.
+        #
+        # Future tensor-parallel fused-QKV should get an explicit qkv/tensor
+        # partition rule after TP primitives are implemented.
+        return ("embed", None)
+
     if name == "q_proj":
         return ("embed", "heads")
 
@@ -100,7 +112,11 @@ def get_dense_logical_axes(
     # Default
     # --------------------------------------------------------
 
-    return ("embed", "embed")
+    raise ValueError(
+        f"No logical partition axes registered for Dense layer {name!r}. "
+        "Add it explicitly in get_dense_logical_axes() instead of falling "
+        "back to unsafe duplicate axes."
+    )
 
 
 # ============================================================
