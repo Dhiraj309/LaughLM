@@ -688,6 +688,28 @@ class CheckpointManager:
 
             return
 
+        metadata_format = metadata.get(
+            "format",
+            None,
+        )
+
+        is_v3 = (
+            metadata_format
+            == "laughlm_checkpoint_v3"
+        )
+
+        is_legacy = (
+            metadata_format is None
+            or metadata_format == "laughlm_pmap_checkpoint_v2"
+        )
+
+        if not is_v3 and not is_legacy:
+            raise ValueError(
+                "Unknown checkpoint metadata format.\n"
+                f"  format={metadata_format!r}\n"
+                "Refusing to resume from an unknown checkpoint format."
+            )
+
         meta_model = metadata.get(
             "model",
             {},
@@ -717,6 +739,96 @@ class CheckpointManager:
             "scheduler",
             None,
         )
+
+        # ----------------------------------------------------
+        # v3 backend/layout checks
+        # ----------------------------------------------------
+        #
+        # Legacy v2 PMAP metadata does not have backend/layout fields.
+        # Keep it readable and validate the older model/scheduler fields
+        # below instead of hard-failing for missing v3-only metadata.
+        # ----------------------------------------------------
+
+        if is_v3:
+            backend_mismatches = []
+
+            checkpoint_backend = metadata.get(
+                "backend",
+                None,
+            )
+
+            current_backend = (
+                CheckpointManager._canonical_backend(
+                    config
+                )
+            )
+
+            CheckpointManager._compare_strict(
+                name="backend",
+                old=checkpoint_backend,
+                new=current_backend,
+                mismatches=backend_mismatches,
+            )
+
+            meta_layout = metadata.get(
+                "layout",
+                None,
+            )
+
+            if meta_layout is None:
+                backend_mismatches.append(
+                    "  layout: checkpoint metadata missing layout block"
+                )
+
+            else:
+                current_layout = (
+                    CheckpointManager._layout_metadata(
+                        config
+                    )
+                )
+
+                CheckpointManager._compare_strict(
+                    name="layout.mesh_axes",
+                    old=meta_layout.get("mesh_axes"),
+                    new=current_layout["mesh_axes"],
+                    mismatches=backend_mismatches,
+                )
+
+                CheckpointManager._compare_strict(
+                    name="layout.active_mesh_axes",
+                    old=meta_layout.get("active_mesh_axes"),
+                    new=current_layout["active_mesh_axes"],
+                    mismatches=backend_mismatches,
+                )
+
+                CheckpointManager._compare_strict(
+                    name="layout.axis_sizes",
+                    old=meta_layout.get("axis_sizes"),
+                    new=current_layout["axis_sizes"],
+                    mismatches=backend_mismatches,
+                )
+
+                CheckpointManager._compare_strict(
+                    name="layout.logical_axis_rules",
+                    old=meta_layout.get("logical_axis_rules"),
+                    new=current_layout["logical_axis_rules"],
+                    mismatches=backend_mismatches,
+                )
+
+            if backend_mismatches:
+                raise ValueError(
+                    "Checkpoint backend/layout is not compatible with current config.\n"
+                    "Use a checkpoint with matching backend/layout, or create an explicit "
+                    "checkpoint migration path.\n"
+                    + "\n".join(backend_mismatches)
+                )
+
+        else:
+            print(
+                "[checkpoint] warning: legacy checkpoint metadata format; "
+                "backend/layout validation is unavailable",
+                flush=True,
+            )
 
         current_kv_heads = (
             config.model.num_kv_heads
@@ -958,9 +1070,6 @@ class CheckpointManager:
         # ----------------------------------------------------
         # Runtime shape fields that affect tokens_per_step
         # ----------------------------------------------------
-        # These are intentionally strict because the LR schedule is
-        # step-based. Changing tokens_per_step after resume changes
-        # LR-vs-token semantics.
 
         old_tokens_per_step = metadata.get(
             "tokens_per_step"
