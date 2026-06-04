@@ -16,6 +16,7 @@ def validate_config(config: LaughLMConfig) -> None:
     """
 
     _validate_runtime_backend(config)
+    _validate_parallelism_mesh_alignment(config)
     _validate_attention_heads(config)
     _validate_gqa_kv_heads(config)
     _validate_positional(config)
@@ -95,6 +96,169 @@ def _scheduler_total_steps(config: LaughLMConfig) -> int:
         horizon_tokens // tokens_per_step
     )
 
+
+def _validate_parallelism_mesh_alignment(config: LaughLMConfig) -> None:
+    """
+    Ensure legacy parallelism fields agree with the SPMD mesh.
+
+    Why this matters:
+    - scheduler validation uses parallelism.data_parallel
+    - PMAP/FSDP trainers use runtime device/mesh counts
+    - mismatch silently corrupts tokens_per_step, LR horizon,
+      checkpoint metadata, and throughput reporting
+
+    Current supported canonical backends:
+    - pmap: pure data parallel
+    - fsdp: data x fsdp, no tensor/sequence/pipeline yet
+
+    parallel3d/moe are reserved and validated later by their trainers.
+    """
+
+    backend = str(
+        getattr(
+            config.runtime,
+            "canonical_backend",
+            config.runtime.backend,
+        )
+    )
+
+    if backend not in {
+        "pmap",
+        "fsdp",
+    }:
+        return
+
+    axis_sizes = config.spmd.mesh.axis_sizes()
+
+    data_axis = int(
+        axis_sizes.get(
+            "data",
+            1,
+        )
+    )
+
+    fsdp_axis = int(
+        axis_sizes.get(
+            "fsdp",
+            1,
+        )
+    )
+
+    tensor_axis = int(
+        axis_sizes.get(
+            "tensor",
+            1,
+        )
+    )
+
+    sequence_axis = int(
+        axis_sizes.get(
+            "sequence",
+            1,
+        )
+    )
+
+    pipeline_axis = int(
+        axis_sizes.get(
+            "pipeline",
+            1,
+        )
+    )
+
+    mesh_total = int(
+        config.spmd.mesh.total_devices()
+    )
+
+    legacy_data = int(
+        config.parallelism.data_parallel
+    )
+
+    legacy_model = int(
+        config.parallelism.model_parallel
+    )
+
+    if legacy_data != data_axis:
+        raise ValueError(
+            "parallelism.data_parallel must match spmd.mesh data axis.\n"
+            f"  runtime.backend:             {config.runtime.backend!r}\n"
+            f"  canonical backend:           {backend!r}\n"
+            f"  parallelism.data_parallel:   {legacy_data}\n"
+            f"  spmd.mesh axis_sizes[data]:  {data_axis}\n"
+            "This field is still used by config-time scheduler validation."
+        )
+
+    if backend == "pmap":
+        non_data_axes = {
+            "fsdp": fsdp_axis,
+            "tensor": tensor_axis,
+            "sequence": sequence_axis,
+            "pipeline": pipeline_axis,
+        }
+
+        active_non_data_axes = {
+            name: size
+            for name, size in non_data_axes.items()
+            if size > 1
+        }
+
+        if active_non_data_axes:
+            raise ValueError(
+                "runtime.backend='pmap' requires pure data-parallel mesh.\n"
+                f"  active non-data axes: {active_non_data_axes}\n"
+                "Use runtime.backend='fsdp' for fsdp>1, or a future "
+                "parallel3d backend for tensor/sequence axes."
+            )
+
+    expected_model_parallel = (
+        fsdp_axis
+        * tensor_axis
+    )
+
+    if legacy_model != expected_model_parallel:
+        raise ValueError(
+            "parallelism.model_parallel must match fsdp*tensor mesh axes "
+            "for current PMAP/FSDP backends.\n"
+            f"  runtime.backend:               {config.runtime.backend!r}\n"
+            f"  canonical backend:             {backend!r}\n"
+            f"  parallelism.model_parallel:    {legacy_model}\n"
+            f"  spmd.mesh axis_sizes[fsdp]:    {fsdp_axis}\n"
+            f"  spmd.mesh axis_sizes[tensor]:  {tensor_axis}\n"
+            f"  expected model_parallel:       {expected_model_parallel}"
+        )
+
+    if legacy_data * legacy_model != mesh_total:
+        raise ValueError(
+            "Legacy parallelism product must match total SPMD mesh devices.\n"
+            f"  data_parallel * model_parallel: {legacy_data * legacy_model}\n"
+            f"  spmd.mesh.total_devices():      {mesh_total}"
+        )
+
+    if backend == "fsdp":
+        if fsdp_axis <= 1:
+            raise ValueError(
+                "runtime.backend='fsdp' requires spmd.mesh fsdp axis > 1.\n"
+                f"  fsdp axis size: {fsdp_axis}"
+            )
+
+        unsupported_axes = {
+            "tensor": tensor_axis,
+            "sequence": sequence_axis,
+            "pipeline": pipeline_axis,
+        }
+
+        active_unsupported_axes = {
+            name: size
+            for name, size in unsupported_axes.items()
+            if size > 1
+        }
+
+        if active_unsupported_axes:
+            raise ValueError(
+                "runtime.backend='fsdp' currently supports pure FSDP only.\n"
+                f"  active unsupported axes: {active_unsupported_axes}\n"
+                "Use a future runtime.backend='parallel3d' for tensor or "
+                "sequence parallel layouts."
+            )
 
 # ------------------------------------------------------------
 # Validation Rules

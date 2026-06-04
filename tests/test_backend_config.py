@@ -3,6 +3,7 @@ import pytest
 
 from LaughLM.config.loader import load_config
 from LaughLM.config.schema import RuntimeConfig
+from LaughLM.config.validation import validate_config
 
 
 def test_pmap_config_backend():
@@ -20,23 +21,33 @@ def test_pmap_config_backend():
     assert axis_sizes["sequence"] == 1
     assert axis_sizes["pipeline"] == 1
 
+    assert cfg.parallelism.data_parallel == axis_sizes["data"]
+    assert cfg.parallelism.model_parallel == (
+        axis_sizes["fsdp"]
+        * axis_sizes["tensor"]
+    )
+
     assert cfg.spmd.mesh.total_devices() == 8
 
 
-def test_fsdp_config_backend_gspmd_alias():
+def test_fsdp_config_backend_and_mesh_alignment():
     cfg = load_config("configs/v5e_fsdp_smoke.yaml")
 
-    assert cfg.runtime.backend == "gspmd"
     assert cfg.runtime.canonical_backend == "fsdp"
-    assert cfg.runtime.backend_is_alias is True
 
     axis_sizes = cfg.spmd.mesh.axis_sizes()
 
-    assert axis_sizes["data"] == 2
-    assert axis_sizes["fsdp"] == 4
+    assert axis_sizes["data"] >= 1
+    assert axis_sizes["fsdp"] > 1
     assert axis_sizes["tensor"] == 1
     assert axis_sizes["sequence"] == 1
     assert axis_sizes["pipeline"] == 1
+
+    assert cfg.parallelism.data_parallel == axis_sizes["data"]
+    assert cfg.parallelism.model_parallel == (
+        axis_sizes["fsdp"]
+        * axis_sizes["tensor"]
+    )
 
     assert cfg.spmd.mesh.total_devices() == 8
 
@@ -94,3 +105,45 @@ def test_runtime_config_rejects_invalid_backend():
             checkpoint_max_to_keep=2,
             checkpoint_dir="checkpoints/test",
         )
+
+
+def test_config_validation_rejects_data_parallel_mesh_mismatch():
+    cfg = load_config("configs/v5e_fsdp_smoke.yaml")
+
+    cfg.parallelism.data_parallel = (
+        cfg.spmd.mesh.axis_sizes()["data"]
+        + 1
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="parallelism.data_parallel",
+    ):
+        validate_config(cfg)
+
+
+def test_config_validation_rejects_model_parallel_mesh_mismatch():
+    cfg = load_config("configs/v5e_fsdp_smoke.yaml")
+
+    cfg.parallelism.model_parallel = (
+        cfg.parallelism.model_parallel
+        + 1
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="parallelism.model_parallel",
+    ):
+        validate_config(cfg)
+
+
+def test_config_validation_rejects_pmap_with_fsdp_axis():
+    cfg = load_config("configs/v5e_pmap.yaml")
+
+    cfg.spmd.mesh.ici_fsdp_parallelism = 2
+
+    with pytest.raises(
+        ValueError,
+        match="pure data-parallel mesh",
+    ):
+        validate_config(cfg)

@@ -266,184 +266,258 @@ class FSDPTrainer:
 
         return state
 
-    def train(self, dataloader: Iterator):
-        cfg = self.config
-
-        total_steps = compute_total_steps(
-            cfg,
-            num_devices=self.data_replicas,
-        )
-
-        tokens_per_step = (
-            cfg.runtime.seq_len
-            * self.global_batch_size
-            * self.grad_accum
-        )
-
-        print(
-            f"\nTraining for {total_steps:,} optimizer steps with GSPMD/FSDP\n",
-            flush=True,
-        )
-
-        data_iter = iter(
-            prefetch_to_device(
-                iter(dataloader),
-                size=8,
+        def train(self, dataloader: Iterator):
+            cfg = self.config
+    
+            total_steps = compute_total_steps(
+                cfg,
+                num_devices=self.data_replicas,
             )
-        )
-
-        try:
-            while True:
-                step = _device_scalar_int(self.state.step)
-
-                if step >= total_steps:
-                    break
-
-                step_start = time.perf_counter()
-
-                micro_batches = []
-
-                for _ in range(self.grad_accum):
-                    batch = next(data_iter)
-
-                    if not isinstance(batch, np.ndarray):
-                        batch = np.asarray(batch)
-
-                    if batch.dtype != np.int32:
-                        batch = batch.astype(np.int32)
-
-                    expected_shape = (
-                        self.global_batch_size,
-                        cfg.runtime.seq_len,
+    
+            tokens_per_step = (
+                cfg.runtime.seq_len
+                * self.global_batch_size
+                * self.grad_accum
+            )
+    
+            print(
+                f"\nTraining for {total_steps:,} optimizer steps with GSPMD/FSDP\n",
+                flush=True,
+            )
+    
+            data_iter = iter(
+                prefetch_to_device(
+                    iter(dataloader),
+                    size=8,
+                )
+            )
+    
+            try:
+                while True:
+                    step = _device_scalar_int(
+                        self.state.step
                     )
-
-                    if batch.shape != expected_shape:
-                        raise ValueError(
-                            f"Batch shape mismatch: got {batch.shape}, "
-                            f"expected {expected_shape}"
+    
+                    if step >= total_steps:
+                        break
+    
+                    total_step_start = time.perf_counter()
+    
+                    data_wait_time = 0.0
+                    host_batch_prepare_time = 0.0
+    
+                    micro_batches = []
+    
+                    for _ in range(self.grad_accum):
+                        data_wait_start = time.perf_counter()
+                        batch = next(data_iter)
+                        data_wait_time += (
+                            time.perf_counter()
+                            - data_wait_start
                         )
-
-                    micro_batches.append(batch)
-
-                batch = np.stack(
-                    micro_batches,
-                    axis=0,
-                )
-
-                batch = jax.device_put(
-                    batch,
-                    self.input_sharding,
-                )
-
-                self.state, metrics = self.train_step(
-                    self.state,
-                    batch,
-                )
-
-                metrics = jax.tree_util.tree_map(
-                    lambda x: x.block_until_ready(),
-                    metrics,
-                )
-
-                self.state.step.block_until_ready()
-
-                step_time = time.perf_counter() - step_start
-
-                current_step = _device_scalar_int(
-                    self.state.step
-                )
-
-                tokens_seen = _device_scalar_int(
-                    self.state.tokens_processed
-                )
-
-                metrics_host = jax.tree_util.tree_map(
-                    lambda x: float(jax.device_get(x)),
-                    metrics,
-                )
-
-                lr = _scalar(
-                    self.schedule(current_step)
-                )
-
-                self.logger.log_metrics(
-                    step=current_step,
-                    metrics=metrics_host,
-                    lr=lr,
-                    grad_norm=metrics_host.get("grad_norm"),
-                    tokens_seen=tokens_seen,
-                    tokens_in_step=tokens_per_step,
-                    step_time=step_time,
-                )
-
-                if current_step % cfg.runtime.log_interval == 0:
-                    self.logger.log_step(
+    
+                        host_prepare_start = time.perf_counter()
+    
+                        if not isinstance(batch, np.ndarray):
+                            batch = np.asarray(batch)
+    
+                        if batch.dtype != np.int32:
+                            batch = batch.astype(np.int32)
+    
+                        expected_shape = (
+                            self.global_batch_size,
+                            cfg.runtime.seq_len,
+                        )
+    
+                        if batch.shape != expected_shape:
+                            raise ValueError(
+                                f"Batch shape mismatch: got {batch.shape}, "
+                                f"expected {expected_shape}"
+                            )
+    
+                        micro_batches.append(batch)
+    
+                        host_batch_prepare_time += (
+                            time.perf_counter()
+                            - host_prepare_start
+                        )
+    
+                    stack_start = time.perf_counter()
+    
+                    batch = np.stack(
+                        micro_batches,
+                        axis=0,
+                    )
+    
+                    host_batch_prepare_time += (
+                        time.perf_counter()
+                        - stack_start
+                    )
+    
+                    device_put_start = time.perf_counter()
+    
+                    batch = jax.device_put(
+                        batch,
+                        self.input_sharding,
+                    )
+    
+                    # Benchmark hygiene:
+                    # block here so device_put_time is not just dispatch time.
+                    # This makes data/input placement cost visible and keeps
+                    # device_step_time closer to compiled train-step execution.
+                    batch.block_until_ready()
+    
+                    device_put_time = (
+                        time.perf_counter()
+                        - device_put_start
+                    )
+    
+                    device_step_start = time.perf_counter()
+    
+                    self.state, metrics = self.train_step(
+                        self.state,
+                        batch,
+                    )
+    
+                    metrics = jax.tree_util.tree_map(
+                        lambda x: x.block_until_ready(),
+                        metrics,
+                    )
+    
+                    self.state.step.block_until_ready()
+    
+                    device_step_time = (
+                        time.perf_counter()
+                        - device_step_start
+                    )
+    
+                    total_step_time = (
+                        time.perf_counter()
+                        - total_step_start
+                    )
+    
+                    current_step = _device_scalar_int(
+                        self.state.step
+                    )
+    
+                    tokens_seen = _device_scalar_int(
+                        self.state.tokens_processed
+                    )
+    
+                    expected_tokens_seen = (
+                        current_step
+                        * tokens_per_step
+                    )
+    
+                    if tokens_seen != expected_tokens_seen:
+                        raise ValueError(
+                            "FSDP token accounting mismatch.\n"
+                            f"  step:                 {current_step:,}\n"
+                            f"  tokens_seen:          {tokens_seen:,}\n"
+                            f"  expected_tokens_seen: {expected_tokens_seen:,}\n"
+                            f"  tokens_per_step:      {tokens_per_step:,}"
+                        )
+    
+                    metrics_host = jax.tree_util.tree_map(
+                        lambda x: float(jax.device_get(x)),
+                        metrics,
+                    )
+    
+                    lr = _scalar(
+                        self.schedule(current_step)
+                    )
+    
+                    timing_breakdown = {
+                        "data_wait_time": float(data_wait_time),
+                        "host_batch_prepare_time": float(host_batch_prepare_time),
+                        "device_put_time": float(device_put_time),
+                        "device_step_time": float(device_step_time),
+                        "total_step_time": float(total_step_time),
+                    }
+    
+                    self.logger.log_metrics(
                         step=current_step,
                         metrics=metrics_host,
                         lr=lr,
                         grad_norm=metrics_host.get("grad_norm"),
                         tokens_seen=tokens_seen,
                         tokens_in_step=tokens_per_step,
-                        step_time=step_time,
+                        step_time=total_step_time,
+                        timing_breakdown=timing_breakdown,
                     )
-
-                if (
-                    current_step > 0
-                    and current_step % self.checkpoint_interval == 0
-                ):
-                    self.logger.flush()
-
-                    metadata = self.checkpoints.build_metadata_from_config(
-                        config=cfg,
-                        step=current_step,
-                        tokens_processed=tokens_seen,
-                        num_devices=self.data_replicas,
-                    )
-
-                    self.checkpoints.save(
-                        step=current_step,
-                        state=self.state,
-                        metadata=metadata,
-                    )
-
-                    print(
-                        f"[fsdp] checkpoint saved step={current_step:,}",
-                        flush=True,
-                    )
-
-            print("[fsdp] saving final checkpoint...", flush=True)
-
-            self.logger.flush()
-
-            final_step = _device_scalar_int(self.state.step)
-            tokens_seen = _device_scalar_int(
-                self.state.tokens_processed
-            )
-
-            metadata = self.checkpoints.build_metadata_from_config(
-                config=cfg,
-                step=final_step,
-                tokens_processed=tokens_seen,
-                num_devices=self.data_replicas,
-            )
-
-            self.checkpoints.save(
-                step=final_step,
-                state=self.state,
-                metadata=metadata,
-            )
-
-            self.checkpoints.wait()
-
-            self.logger.log_summary(
-                step=final_step,
-                tokens_processed=tokens_seen,
-            )
-
-        finally:
-            self.logger.close()
-
-            if hasattr(self.checkpoints, "close"):
-                self.checkpoints.close()
-            else:
+    
+                    if current_step % cfg.runtime.log_interval == 0:
+                        self.logger.log_step(
+                            step=current_step,
+                            metrics=metrics_host,
+                            lr=lr,
+                            grad_norm=metrics_host.get("grad_norm"),
+                            tokens_seen=tokens_seen,
+                            tokens_in_step=tokens_per_step,
+                            step_time=total_step_time,
+                            timing_breakdown=timing_breakdown,
+                        )
+    
+                    if (
+                        current_step > 0
+                        and current_step % self.checkpoint_interval == 0
+                    ):
+                        self.logger.flush()
+    
+                        metadata = self.checkpoints.build_metadata_from_config(
+                            config=cfg,
+                            step=current_step,
+                            tokens_processed=tokens_seen,
+                            num_devices=self.data_replicas,
+                        )
+    
+                        self.checkpoints.save(
+                            step=current_step,
+                            state=self.state,
+                            metadata=metadata,
+                        )
+    
+                        print(
+                            f"[fsdp] checkpoint saved step={current_step:,}",
+                            flush=True,
+                        )
+    
+                print("[fsdp] saving final checkpoint...", flush=True)
+    
+                self.logger.flush()
+    
+                final_step = _device_scalar_int(
+                    self.state.step
+                )
+    
+                tokens_seen = _device_scalar_int(
+                    self.state.tokens_processed
+                )
+    
+                metadata = self.checkpoints.build_metadata_from_config(
+                    config=cfg,
+                    step=final_step,
+                    tokens_processed=tokens_seen,
+                    num_devices=self.data_replicas,
+                )
+    
+                self.checkpoints.save(
+                    step=final_step,
+                    state=self.state,
+                    metadata=metadata,
+                )
+    
                 self.checkpoints.wait()
+    
+                self.logger.log_summary(
+                    step=final_step,
+                    tokens_processed=tokens_seen,
+                )
+    
+            finally:
+                self.logger.close()
+    
+                if hasattr(self.checkpoints, "close"):
+                    self.checkpoints.close()
+                else:
+                    self.checkpoints.wait()
