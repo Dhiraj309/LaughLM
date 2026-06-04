@@ -6,6 +6,17 @@ GSPMD/FSDP train step.
 No pmap.
 No lax.pmean.
 Global array semantics + shardings handle collectives.
+
+Phase 4 parity fix:
+- Match PMAP hidden-state LM loss path.
+- Avoid materializing [B, T, vocab] when loss.chunked_logits=True.
+- Respect loss config:
+    chunked_logits
+    logits_chunk_size
+    remat_logits_chunks
+    z_loss
+    ignore_index
+- Handle tied and untied LM heads explicitly.
 """
 
 from __future__ import annotations
@@ -16,12 +27,153 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from LaughLM.training.loss import shift_tokens, compute_loss
-from LaughLM.distributed.sharding import constrain_batch, constrain_logits
+from LaughLM.training.loss import (
+    shift_tokens,
+    compute_lm_loss_from_hidden,
+)
+from LaughLM.distributed.sharding import (
+    constrain_batch,
+    constrain_hidden_states,
+)
 
 
+Params = Any
 Metrics = Dict[str, jnp.ndarray]
 
+
+# ============================================================
+# Loss config helpers
+# ============================================================
+
+def _loss_attr(
+    loss_config,
+    name: str,
+    default,
+):
+    if loss_config is None:
+        return default
+
+    return getattr(
+        loss_config,
+        name,
+        default,
+    )
+
+
+def _loss_kwargs(
+    loss_config,
+):
+    return {
+        "chunked_logits": bool(
+            _loss_attr(
+                loss_config,
+                "chunked_logits",
+                False,
+            )
+        ),
+        "logits_chunk_size": int(
+            _loss_attr(
+                loss_config,
+                "logits_chunk_size",
+                4096,
+            )
+        ),
+        "remat_logits_chunks": bool(
+            _loss_attr(
+                loss_config,
+                "remat_logits_chunks",
+                True,
+            )
+        ),
+        "z_loss": float(
+            _loss_attr(
+                loss_config,
+                "z_loss",
+                1e-4,
+            )
+        ),
+        "ignore_index": int(
+            _loss_attr(
+                loss_config,
+                "ignore_index",
+                -100,
+            )
+        ),
+    }
+
+
+def _unbox_param_leaf(x):
+    """
+    Flax logical partition wrappers may appear in params depending on
+    initialization/restoration path. The training loss needs raw arrays.
+    """
+    if hasattr(x, "unbox"):
+        try:
+            return x.unbox(
+                apply_constraint=False,
+            )
+        except TypeError:
+            return x.unbox()
+
+    if isinstance(x, dict) and "value" in x:
+        return x["value"]
+
+    return x
+
+
+def _get_lm_head_kernel(
+    params,
+    *,
+    tie_word_embeddings: bool,
+):
+    """
+    Return the LM projection weight.
+
+    Current production tied path:
+      params["model"]["embed_tokens"]["embedding"]  # [vocab, hidden]
+
+    Untied path:
+      params["lm_head"]["kernel"]                   # [hidden, vocab]
+    """
+    if tie_word_embeddings:
+        return _unbox_param_leaf(
+            params["model"]["embed_tokens"]["embedding"]
+        )
+
+    return _unbox_param_leaf(
+        params["lm_head"]["kernel"]
+    )
+
+
+def _get_lm_head_bias(
+    params,
+    *,
+    tie_word_embeddings: bool,
+):
+    if tie_word_embeddings:
+        return None
+
+    lm_head = params.get(
+        "lm_head",
+        {},
+    )
+
+    bias = lm_head.get(
+        "bias",
+        None,
+    )
+
+    if bias is None:
+        return None
+
+    return _unbox_param_leaf(
+        bias
+    )
+
+
+# ============================================================
+# FSDP train step
+# ============================================================
 
 def create_fsdp_train_step(
     *,
@@ -32,47 +184,119 @@ def create_fsdp_train_step(
     metrics_sharding,
     grad_accum: int,
     max_grad_norm: float = 1.0,
+    loss_config=None,
 ):
+    if grad_accum <= 0:
+        raise ValueError(
+            "grad_accum must be > 0"
+        )
 
-    def loss_fn(params, micro_batch):
-        inputs, targets = shift_tokens(micro_batch)
+    loss_options = _loss_kwargs(
+        loss_config
+    )
 
-        logits, _ = model.apply(
+    tie_word_embeddings = bool(
+        getattr(
+            model.config,
+            "tie_word_embeddings",
+            False,
+        )
+    )
+
+    def loss_fn(
+        params: Params,
+        micro_batch: jnp.ndarray,
+    ):
+        inputs, targets = shift_tokens(
+            micro_batch
+        )
+
+        hidden_states, _ = model.apply(
             {"params": params},
             input_ids=inputs,
             use_cache=False,
             mode="train",
+            return_hidden=True,
         )
 
-        logits = constrain_logits(logits)
+        hidden_states = constrain_hidden_states(
+            hidden_states
+        )
 
-        loss, metrics = compute_loss(
-            logits,
-            targets,
+        lm_head_kernel = _get_lm_head_kernel(
+            params,
+            tie_word_embeddings=tie_word_embeddings,
+        )
+
+        lm_head_bias = _get_lm_head_bias(
+            params,
+            tie_word_embeddings=tie_word_embeddings,
+        )
+
+        loss, metrics = compute_lm_loss_from_hidden(
+            hidden_states=hidden_states,
+            targets=targets,
+            lm_head_kernel=lm_head_kernel,
+            lm_head_bias=lm_head_bias,
+            **loss_options,
         )
 
         return loss, metrics
 
-    def train_step(state, batch):
-        batch = constrain_batch(batch)
+    def train_step(
+        state,
+        batch,
+    ):
+        batch = constrain_batch(
+            batch
+        )
 
         params = state.params
 
         grads_accum = jax.tree_util.tree_map(
-            lambda p: jnp.zeros_like(p, dtype=jnp.float32),
+            lambda p: jnp.zeros_like(
+                p,
+                dtype=jnp.float32,
+            ),
             params,
         )
 
-        step_rng = jax.random.fold_in(
-            state.rng_key,
-            state.step,
+        init_loss_sum = jnp.asarray(
+            0.0,
+            dtype=jnp.float32,
         )
 
-        def scan_fn(carry, micro_batch):
-            grads_accum, rng = carry
-            rng, _ = jax.random.split(rng)
+        init_z_loss_sum = jnp.asarray(
+            0.0,
+            dtype=jnp.float32,
+        )
 
-            (loss, _metrics), grads = jax.value_and_grad(
+        init_valid_tokens = jnp.asarray(
+            0.0,
+            dtype=jnp.float32,
+        )
+
+        init_bad_label_count = jnp.asarray(
+            0.0,
+            dtype=jnp.float32,
+        )
+
+        def scan_fn(
+            carry,
+            micro_batch,
+        ):
+            (
+                grads_accum,
+                loss_sum,
+                z_loss_sum,
+                valid_tokens_sum,
+                bad_label_count_sum,
+            ) = carry
+
+            (
+                (loss, aux_metrics),
+                grads,
+            ) = jax.value_and_grad(
                 loss_fn,
                 has_aux=True,
             )(
@@ -86,26 +310,83 @@ def create_fsdp_train_step(
                 grads,
             )
 
-            return (grads_accum, rng), loss
+            loss_sum = (
+                loss_sum
+                + loss.astype(jnp.float32)
+            )
 
-        (grads_accum, _), losses = jax.lax.scan(
+            z_loss_sum = (
+                z_loss_sum
+                + aux_metrics["z_loss"].astype(jnp.float32)
+            )
+
+            valid_tokens_sum = (
+                valid_tokens_sum
+                + aux_metrics["valid_tokens"].astype(jnp.float32)
+            )
+
+            bad_label_count_sum = (
+                bad_label_count_sum
+                + aux_metrics["bad_label_count"].astype(jnp.float32)
+            )
+
+            return (
+                grads_accum,
+                loss_sum,
+                z_loss_sum,
+                valid_tokens_sum,
+                bad_label_count_sum,
+            ), None
+
+        (
+            grads_accum,
+            loss_sum,
+            z_loss_sum,
+            valid_tokens,
+            bad_label_count,
+        ), _ = jax.lax.scan(
             scan_fn,
-            (grads_accum, step_rng),
+            (
+                grads_accum,
+                init_loss_sum,
+                init_z_loss_sum,
+                init_valid_tokens,
+                init_bad_label_count,
+            ),
             batch,
         )
 
+        grad_accum_f32 = jnp.asarray(
+            grad_accum,
+            dtype=jnp.float32,
+        )
+
         grads = jax.tree_util.tree_map(
-            lambda g: g / jnp.asarray(grad_accum, dtype=jnp.float32),
+            lambda g: g / grad_accum_f32,
             grads_accum,
         )
 
-        loss = jnp.mean(losses, dtype=jnp.float32)
+        loss = (
+            loss_sum
+            / grad_accum_f32
+        ).astype(jnp.float32)
 
-        grad_norm = optax.global_norm(grads).astype(jnp.float32)
+        z_loss = (
+            z_loss_sum
+            / grad_accum_f32
+        ).astype(jnp.float32)
+
+        grad_norm = optax.global_norm(
+            grads
+        ).astype(jnp.float32)
 
         clip_scale = jnp.minimum(
             1.0,
-            max_grad_norm / jnp.maximum(grad_norm, 1e-6),
+            max_grad_norm
+            / jnp.maximum(
+                grad_norm,
+                1e-6,
+            ),
         )
 
         grads = jax.tree_util.tree_map(
@@ -125,7 +406,9 @@ def create_fsdp_train_step(
         )
 
         tokens_in_step = jnp.asarray(
-            batch.shape[0] * batch.shape[1] * batch.shape[2],
+            batch.shape[0]
+            * batch.shape[1]
+            * batch.shape[2],
             dtype=jnp.int32,
         )
 
@@ -138,6 +421,9 @@ def create_fsdp_train_step(
         metrics = {
             "loss": loss.astype(jnp.float32),
             "grad_norm": grad_norm.astype(jnp.float32),
+            "z_loss": z_loss.astype(jnp.float32),
+            "valid_tokens": valid_tokens.astype(jnp.float32),
+            "bad_label_count": bad_label_count.astype(jnp.float32),
         }
 
         return new_state, metrics

@@ -163,6 +163,7 @@ class FSDPTrainer:
             metrics_sharding=self.metrics_sharding,
             grad_accum=self.grad_accum,
             max_grad_norm=config.optimizer.gradient_clip,
+            loss_config=config.loss,
         )
 
         param_info = estimate_parameters(config)
