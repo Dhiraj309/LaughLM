@@ -2,7 +2,7 @@ from huggingface_hub import hf_hub_download
 import jax
 
 from LaughLM.config.loader import load_config
-from LaughLM.training.fsdp_trainer import FSDPTrainer
+from LaughLM.training.trainer import Trainer
 from LaughLM.data.memmap_loader import MemmapDataset
 
 
@@ -16,7 +16,7 @@ def main():
     # Skip shard_00010 because it is the tiny final partial shard.
     files = [
         f"{folder}/LaughLM-v0.2-cpt-smollm-edu-1B_shard_{i:05d}.bin"
-        for i in range(0, 10)
+        for i in range(50, 100)
     ]
 
     print("Downloading CPT shards:")
@@ -32,14 +32,24 @@ def main():
         for f in files
     ]
 
-    config = load_config("configs/v5e_fsdp_smoke.yaml")
-
-    data_replicas = config.spmd.mesh.axis_sizes()["data"]
+    config = load_config("configs/v5e_pmap_cpt_smoke_100m.yaml")
 
     global_batch_size = (
         config.runtime.micro_batch_per_device
-        * data_replicas
+        * jax.local_device_count()
     )
+
+    print("global_batch_size before grad accum:", global_batch_size)
+    print("seq_len:", config.runtime.seq_len)
+    print("grad_accum:", config.runtime.gradient_accumulation)
+
+    tokens_per_optimizer_step = (
+        global_batch_size
+        * config.runtime.seq_len
+        * config.runtime.gradient_accumulation
+    )
+
+    print("tokens_per_optimizer_step:", tokens_per_optimizer_step)
 
     dataset = MemmapDataset(
         paths=paths,
@@ -49,7 +59,7 @@ def main():
         process_count=jax.process_count(),
     )
 
-    trainer = FSDPTrainer(
+    trainer = Trainer(
         config=config,
         resume_dir=config.runtime.checkpoint_dir,
     )

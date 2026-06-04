@@ -14,9 +14,11 @@ architecture:
   attention_impl: splash
   attention_fallback: error
 
-  # Speed path.
-  # IMPORTANT: changes parameter layout vs fused_qkv=false.
-  # Use a fresh checkpoint_dir.
+  # IMPORTANT:
+  # Keep disabled for current FSDP.
+  # fused_qkv=true currently creates repeated logical "embed" axes
+  # under axis_rules.embed=fsdp, which Flax rejects during
+  # logical_to_mesh_sharding().
   fused_qkv: false
 
   ffn_type: swiglu
@@ -36,7 +38,10 @@ initialization:
 
 optimizer:
   type: adamw
+
+  # CPT / smoke-safe LR.
   learning_rate: 5.0e-5
+
   beta1: 0.9
   beta2: 0.95
   eps: 1e-8
@@ -47,73 +52,43 @@ optimizer:
 scheduler:
   type: wsd
 
-  # Throughput/smoke horizon.
-  # Keep equal to runtime.total_tokens for this fresh speed run.
-  horizon_tokens: 100_007_936
-
+  # Keep long horizon if this is meant to be compatible with staged CPT.
+  # For a pure fresh 100M-token speed smoke, we can make a separate
+  # short-horizon config later.
+  horizon_tokens: 20_000_000_000
   warmup_fraction: 0.01
   stable_fraction: 0.95
   min_lr_ratio: 0.05
 
 loss:
   chunked_logits: true
-
-  # Faster than 4096 if memory fits.
-  # If this OOMs, fall back to 4096.
   logits_chunk_size: 4096
-
-  # Speed-first.
-  # If this OOMs, set true.
-  remat_logits_chunks: True
-
+  remat_logits_chunks: true
   z_loss: 1.0e-4
   ignore_index: -100
 
 runtime:
   backend: fsdp
   seq_len: 2048
-
-  # Throughput-tuned FSDP attempt.
-  #
-  # Mesh:
-  #   data=4
-  #   fsdp=2
-  #
-  # Global microbatch:
-  #   data replicas * micro_batch_per_device
-  #   4 * 4 = 16 sequences
-  #
-  # Tokens/update:
-  #   seq_len * global_microbatch * gradient_accumulation
-  #   2048 * 16 * 4 = 131,072
-  #
-  # Total steps:
-  #   100,007,936 / 131,072 = 763
   micro_batch_per_device: 2
-  gradient_accumulation: 8
+  gradient_accumulation: 16
 
+  # 763 steps:
+  # 2048 * (2 data replicas * 2 micro_batch_per_device) * 16 = 131,072 tokens/step
+  # 763 * 131,072 = 100,007,936
   total_tokens: 100_007_936
 
-  eval_interval: 10000
-  log_interval: 20
-
-  # Disable mid-run checkpoint for clean throughput measurement.
-  # Trainer still saves final checkpoint.
-  checkpoint_interval: 10000
+  eval_interval: 500
+  log_interval: 10
+  checkpoint_interval: 500
   checkpoint_max_to_keep: 2
-
-  # Fresh dir required because this config changes:
-  # - fused_qkv
-  # - mesh layout
-  # - loss chunk/remat behavior
-  checkpoint_dir: checkpoints/v5e_fsdp_1p3b_speed_d4_f2_mb4_ga4_fqkv_lc8192_noremat
+  checkpoint_dir: checkpoints/v5e_fsdp_1p3b_cpt_smoke_100m
 
 data:
   sources:
     - name: cpt-smollm-edu-smoke-100m
       weight: 1.0
       split: train
-
   max_seq_len: 2048
   packing: true
   eos_between_docs: true
@@ -127,27 +102,18 @@ tokenizer:
   output_format: huggingface_fast
 
 parallelism:
-  # Legacy compatibility block.
-  # Keep data_parallel aligned with spmd.mesh data axis because config
-  # validation and scheduler accounting still inspect this field.
-  data_parallel: 4
-
-  # Legacy field; for this FSDP run, mirror fsdp axis size.
-  model_parallel: 2
-
+  data_parallel: 2
+  model_parallel: 4
   compute_dtype: bfloat16
   param_dtype: float32
 
 spmd:
   mesh:
-    # v5e-8 optimized speed sweep:
-    # more data replicas, less FSDP sharding than data=2/fsdp=4.
-    ici_data_parallelism: 4
-    ici_fsdp_parallelism: 2
+    ici_data_parallelism: 2
+    ici_fsdp_parallelism: 4
     ici_tensor_parallelism: 1
     ici_sequence_parallelism: 1
     ici_pipeline_parallelism: 1
-
     dcn_data_parallelism: 1
     dcn_fsdp_parallelism: 1
     dcn_tensor_parallelism: 1
@@ -156,6 +122,8 @@ spmd:
   axis_rules:
     batch: data
     embed: fsdp
+
+    # Keep replicated until TP/SP primitive tests exist.
     heads: null
     kv_heads: null
     mlp: null
