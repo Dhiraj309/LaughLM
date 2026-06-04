@@ -15,6 +15,7 @@ def validate_config(config: LaughLMConfig) -> None:
         If any configuration rule is violated.
     """
 
+    _validate_runtime_backend(config)
     _validate_attention_heads(config)
     _validate_gqa_kv_heads(config)
     _validate_positional(config)
@@ -22,7 +23,6 @@ def validate_config(config: LaughLMConfig) -> None:
     _validate_moe_requirements(config)
     _validate_scheduler_horizon(config)
     _validate_wsd_scheduler(config)
-
 
 # ------------------------------------------------------------
 # Shared helpers
@@ -358,4 +358,46 @@ def _validate_wsd_scheduler(config: LaughLMConfig) -> None:
             f"  decay:                    {decay_steps:,}\n"
             "No room left for decay phase. "
             "Reduce warmup, reduce stable_fraction, or increase horizon_tokens."
+        )
+
+def _validate_runtime_backend(config: LaughLMConfig) -> None:
+    """
+    Validate runtime backend naming.
+
+    Accepted canonical backends:
+      - pmap
+      - fsdp
+      - parallel3d
+      - moe
+
+    Temporary compatibility alias:
+      - gspmd -> fsdp
+
+    This validation only checks naming. Trainer availability is checked
+    by entrypoints/scripts so config loading remains useful for future
+    reserved backend configs.
+    """
+
+    backend = str(config.runtime.backend)
+
+    canonical_backend = getattr(
+        config.runtime,
+        "canonical_backend",
+        backend,
+    )
+
+    valid_canonical = {
+        "pmap",
+        "fsdp",
+        "parallel3d",
+        "moe",
+    }
+
+    if canonical_backend not in valid_canonical:
+        raise ValueError(
+            "Invalid runtime.backend.\n"
+            f"  backend:           {backend!r}\n"
+            f"  canonical_backend: {canonical_backend!r}\n"
+            f"  valid:             {sorted(valid_canonical)}\n"
+            "Temporary alias supported: 'gspmd' -> 'fsdp'."
         )

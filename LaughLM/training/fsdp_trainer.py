@@ -57,9 +57,25 @@ class FSDPTrainer:
         config: LaughLMConfig,
         resume_dir: str | None = None,
     ):
-        if config.runtime.backend != "gspmd":
+        backend = getattr(
+            config.runtime,
+            "canonical_backend",
+            config.runtime.backend,
+        )
+        
+        if backend != "fsdp":
             raise ValueError(
-                "FSDPTrainer requires runtime.backend='gspmd'."
+                "FSDPTrainer requires runtime.backend='fsdp' "
+                "or temporary alias runtime.backend='gspmd'.\n"
+                f"Got raw backend={config.runtime.backend!r}, "
+                f"canonical backend={backend!r}."
+            )
+        
+        if config.runtime.backend == "gspmd":
+            print(
+                "[fsdp] runtime.backend='gspmd' is deprecated; "
+                "using canonical backend='fsdp'.",
+                flush=True,
             )
 
         self.config = config
