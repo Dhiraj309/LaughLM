@@ -1,5 +1,7 @@
 # tests/test_tpu_train_step.py
 
+from __future__ import annotations
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -19,8 +21,8 @@ from LaughLM.model.llama.model import (
     LlamaForCausalLM,
 )
 
-from LaughLM.training.train_step import (
-    create_train_step,
+from LaughLM.training.fsdp_train_step import (
+    create_fsdp_train_step,
 )
 
 from LaughLM.training.train_state import (
@@ -33,7 +35,6 @@ from LaughLM.training.train_state import (
 # ============================================================
 
 def build_test_config():
-
     return LlamaConfig(
         vocab_size=256,
         hidden_size=128,
@@ -51,33 +52,34 @@ def build_test_config():
 # ============================================================
 
 def create_batch():
+    """
+    Shape:
+        [grad_accum, batch, seq]
+    """
 
-    #
-    # Shape:
-    #
-    # [grad_accum, batch, seq]
-    #
-
-    return jnp.arange(
-        2 * 2 * 16,
-        dtype=jnp.int32,
-    ).reshape(
-        2,
-        2,
-        16,
-    ) % 256
+    return (
+        jnp.arange(
+            2 * 2 * 16,
+            dtype=jnp.int32,
+        )
+        .reshape(
+            2,
+            2,
+            16,
+        )
+        % 256
+    )
 
 
 # ============================================================
-# TPU train step
+# Mesh train step
 # ============================================================
 
 def test_tpu_train_step():
-
     config = build_test_config()
 
     model = LlamaForCausalLM(
-        config=config
+        config=config,
     )
 
     rng = jax.random.PRNGKey(0)
@@ -87,11 +89,19 @@ def test_tpu_train_step():
     )
 
     # --------------------------------------------------------
-    # TPU mesh
+    # Mesh
+    # --------------------------------------------------------
+    #
+    # Use a single-device mesh for this unit test so the test is portable
+    # across CPU/GPU/TPU and does not require batch-size divisibility by
+    # all available devices.
+    #
+    # This test validates the mesh-jit train-step API, not multi-device
+    # throughput.
     # --------------------------------------------------------
 
-    devices = np.array(
-        jax.devices()
+    devices = np.asarray(
+        jax.devices()[:1],
     )
 
     mesh = Mesh(
@@ -112,7 +122,6 @@ def test_tpu_train_step():
     )
 
     with mesh:
-
         variables = model.init(
             rng,
             input_ids=dummy_input,
@@ -123,14 +132,14 @@ def test_tpu_train_step():
     params = variables["params"]
 
     opt_state = optimizer.init(
-        params
+        params,
     )
 
     state = TrainState(
         params=params,
         opt_state=opt_state,
-        step=0,
-        tokens_processed=0,
+        step=jnp.asarray(0, dtype=jnp.int32),
+        tokens_processed=jnp.asarray(0, dtype=jnp.int32),
         rng_key=rng,
     )
 
@@ -143,7 +152,7 @@ def test_tpu_train_step():
         P(),
     )
 
-    data_sharding = NamedSharding(
+    batch_sharding = NamedSharding(
         mesh,
         P(
             None,
@@ -152,18 +161,23 @@ def test_tpu_train_step():
         ),
     )
 
+    metrics_sharding = NamedSharding(
+        mesh,
+        P(),
+    )
+
     # --------------------------------------------------------
     # Train step
     # --------------------------------------------------------
 
-    train_step = create_train_step(
+    train_step = create_fsdp_train_step(
         model=model,
         optimizer=optimizer,
-        config=config,
-        mesh=mesh,
-        state_shardings=state_sharding,
-        data_sharding=data_sharding,
+        state_sharding=state_sharding,
+        batch_sharding=batch_sharding,
+        metrics_sharding=metrics_sharding,
         grad_accum=2,
+        max_grad_norm=1.0,
     )
 
     batch = create_batch()
@@ -173,7 +187,6 @@ def test_tpu_train_step():
     # --------------------------------------------------------
 
     with mesh:
-
         new_state, metrics = train_step(
             state,
             batch,
@@ -183,34 +196,37 @@ def test_tpu_train_step():
     # Assertions
     # --------------------------------------------------------
 
-    assert new_state.step == 1
+    expected_tokens = (
+        batch.shape[0]
+        * batch.shape[1]
+        * batch.shape[2]
+    )
+
+    assert int(jax.device_get(new_state.step)) == 1
 
     assert (
-        new_state.tokens_processed
-        > 0
+        int(jax.device_get(new_state.tokens_processed))
+        == expected_tokens
     )
 
     assert "loss" in metrics
-
     assert "grad_norm" in metrics
 
     loss = float(
-        metrics["loss"]
+        jax.device_get(metrics["loss"])
     )
 
     grad_norm = float(
-        metrics["grad_norm"]
+        jax.device_get(metrics["grad_norm"])
     )
 
     print()
     print(
         f"loss={loss:.6f}"
     )
-
     print(
         f"grad_norm={grad_norm:.6f}"
     )
 
     assert np.isfinite(loss)
-
     assert np.isfinite(grad_norm)
