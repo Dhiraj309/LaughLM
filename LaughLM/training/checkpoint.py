@@ -296,6 +296,122 @@ class CheckpointManager:
 
         return int(total_steps)
 
+    @staticmethod
+    def _canonical_backend(config) -> str:
+        """
+        Return canonical trainer backend name.
+
+        Backward compatibility:
+          gspmd -> fsdp
+
+        This helper intentionally does not require config.runtime to expose
+        canonical_backend, so older config objects remain supported.
+        """
+
+        raw_backend = str(
+            getattr(
+                config.runtime,
+                "backend",
+                "pmap",
+            )
+        )
+
+        canonical = getattr(
+            config.runtime,
+            "canonical_backend",
+            None,
+        )
+
+        if canonical is not None:
+            return str(canonical)
+
+        if raw_backend == "gspmd":
+            return "fsdp"
+
+        return raw_backend
+
+    @staticmethod
+    def _logical_axis_rules_dict(config) -> dict:
+        """
+        Serialize logical axis rules as JSON-safe metadata.
+        """
+
+        rules = config.spmd.axis_rules
+
+        return {
+            "batch": rules.batch,
+            "embed": rules.embed,
+            "heads": rules.heads,
+            "kv_heads": rules.kv_heads,
+            "mlp": rules.mlp,
+            "vocab": rules.vocab,
+            "sequence": rules.sequence,
+            "layers": rules.layers,
+        }
+
+    @staticmethod
+    def _layout_metadata(config) -> dict:
+        """
+        Build backend/layout metadata.
+
+        mesh_axes records the full logical mesh order, including inactive axes.
+        active_mesh_axes records axes whose size is > 1.
+        axis_sizes records all logical axis sizes.
+        """
+
+        axis_order = [
+            "data",
+            "fsdp",
+            "tensor",
+            "sequence",
+            "pipeline",
+        ]
+
+        axis_sizes = {
+            str(k): int(v)
+            for k, v in config.spmd.mesh.axis_sizes().items()
+        }
+
+        return {
+            "mesh_axes": axis_order,
+            "active_mesh_axes": [
+                axis
+                for axis in axis_order
+                if int(axis_sizes.get(axis, 1)) > 1
+            ],
+            "axis_sizes": {
+                axis: int(axis_sizes.get(axis, 1))
+                for axis in axis_order
+            },
+            "logical_axis_rules": (
+                CheckpointManager._logical_axis_rules_dict(
+                    config
+                )
+            ),
+        }
+
+    @staticmethod
+    def _dtype_policy_metadata(config) -> dict:
+        """
+        Record both canonical SPMD dtype policy and legacy parallelism dtype.
+
+        During migration, config_factory.py may still use parallelism dtype
+        while distributed metadata records spmd dtype. Keeping both makes
+        checkpoint audits explicit.
+        """
+
+        return {
+            "spmd": {
+                "param_dtype": str(config.spmd.dtype.param_dtype),
+                "compute_dtype": str(config.spmd.dtype.compute_dtype),
+                "output_dtype": str(config.spmd.dtype.output_dtype),
+            },
+            "parallelism": {
+                "param_dtype": str(config.parallelism.param_dtype),
+                "compute_dtype": str(config.parallelism.compute_dtype),
+            },
+        }
+
     # --------------------------------------------------------
     # Build checkpoint metadata
     # --------------------------------------------------------
@@ -308,7 +424,43 @@ class CheckpointManager:
         tokens_processed: int,
         num_devices: int,
     ) -> dict:
+        """
+        Build backend/layout-aware checkpoint metadata.
+
+        Format:
+          laughlm_checkpoint_v3
+
+        Backward compatibility:
+          Preserves existing validation blocks:
+            - model
+            - runtime
+            - optimizer
+            - scheduler
+            - parallelism
+            - architecture
+            - tokens_per_step
+            - num_devices
+
+        New in v3:
+          - backend
+          - raw_backend
+          - layout
+          - dtype_policy
+        """
+
         arch = config.architecture
+
+        raw_backend = str(
+            getattr(
+                config.runtime,
+                "backend",
+                "pmap",
+            )
+        )
+
+        backend = CheckpointManager._canonical_backend(
+            config
+        )
 
         tokens_per_step = (
             CheckpointManager._tokens_per_step(
@@ -337,8 +489,24 @@ class CheckpointManager:
             )
         )
 
+        layout = CheckpointManager._layout_metadata(
+            config
+        )
+
+        dtype_policy = (
+            CheckpointManager._dtype_policy_metadata(
+                config
+            )
+        )
+
         return {
-            "format": "laughlm_pmap_checkpoint_v2",
+            "format": "laughlm_checkpoint_v3",
+
+            "backend": backend,
+            "raw_backend": raw_backend,
+            "layout": layout,
+            "dtype_policy": dtype_policy,
+
             "step": int(step),
             "tokens_processed": int(tokens_processed),
             "num_devices": int(num_devices),
@@ -358,6 +526,8 @@ class CheckpointManager:
             },
 
             "runtime": {
+                "backend": raw_backend,
+                "canonical_backend": backend,
                 "seq_len": int(config.runtime.seq_len),
                 "micro_batch_per_device": int(
                     config.runtime.micro_batch_per_device
@@ -446,6 +616,13 @@ class CheckpointManager:
                 "positional": str(arch.positional),
                 "normalization": str(arch.normalization),
                 "attention_impl": str(arch.attention_impl),
+                "attention_fallback": str(
+                    getattr(
+                        arch,
+                        "attention_fallback",
+                        "warn",
+                    )
+                ),
                 "attention_variant": str(arch.attention_variant),
                 "parallel_block": bool(arch.parallel_block),
                 "fused_qkv": bool(
