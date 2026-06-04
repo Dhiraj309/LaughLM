@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+      - "roadmap/**"
+      - "fix/**"
+      - "feature/**"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run stable test gate
+        run: |
+          pytest tests/test_backend_config.py \
+                 tests/test_gspmd_compile.py \
+                 tests/test_kv_cache_parity.py \
+                 tests/test_tiny_overfit.py \
+                 tests/test_tpu_train_step.py \
+                 tests/test_train_state.py \
+                 -q
