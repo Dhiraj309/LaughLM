@@ -363,14 +363,40 @@ class RuntimeConfig(BaseModel):
     backend: Literal[
         "pmap",
         "gspmd",
+        "fsdp",
+        "parallel3d",
+        "moe",
     ] = Field(
         default="pmap",
         description=(
             "Training backend. "
             "'pmap' = replicated data-parallel stable path. "
-            "'gspmd' = mesh-native FSDP/ZeRO path."
+            "'fsdp' = mesh-native FSDP/ZeRO-style path. "
+            "'gspmd' = temporary backward-compatible alias for 'fsdp'. "
+            "'parallel3d' and 'moe' are reserved for future trainers."
         ),
     )
+    
+    @property
+    def canonical_backend(self) -> str:
+        """
+        Canonical backend name.
+    
+        Backward compatibility:
+          gspmd -> fsdp
+    
+        Do not remove the gspmd alias until all old configs/checkpoints
+        have a migration path.
+        """
+    
+        if self.backend == "gspmd":
+            return "fsdp"
+    
+        return self.backend
+    
+    @property
+    def backend_is_alias(self) -> bool:
+        return self.backend != self.canonical_backend
 
     seq_len: int = Field(
         ...,
