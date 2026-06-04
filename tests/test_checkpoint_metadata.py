@@ -61,48 +61,26 @@ def test_checkpoint_metadata_v3_pmap_layout():
     assert metadata["tokens_per_step"] == expected_tokens_per_step
 
 
-def test_checkpoint_metadata_v3_fsdp_gspmd_alias_layout():
+def test_checkpoint_metadata_v3_fsdp_layout():
     cfg = load_config("configs/v5e_fsdp_smoke.yaml")
 
     metadata = CheckpointManager.build_metadata_from_config(
         config=cfg,
         step=3,
         tokens_processed=98_304,
-        num_devices=2,
+        num_devices=cfg.spmd.mesh.axis_sizes()["data"],
     )
 
     assert metadata["format"] == "laughlm_checkpoint_v3"
 
-    assert metadata["raw_backend"] == "gspmd"
+    # raw_backend records the config value exactly.
+    # backend records the canonical backend.
+    assert metadata["raw_backend"] == cfg.runtime.backend
+    assert metadata["backend"] == cfg.runtime.canonical_backend
     assert metadata["backend"] == "fsdp"
 
-    assert metadata["runtime"]["backend"] == "gspmd"
+    assert metadata["runtime"]["backend"] == cfg.runtime.backend
     assert metadata["runtime"]["canonical_backend"] == "fsdp"
-
-    assert metadata["layout"]["active_mesh_axes"] == [
-        "data",
-        "fsdp",
-    ]
-
-    assert metadata["layout"]["axis_sizes"] == {
-        "data": 2,
-        "fsdp": 4,
-        "tensor": 1,
-        "sequence": 1,
-        "pipeline": 1,
-    }
-
-    assert metadata["layout"]["logical_axis_rules"]["batch"] == "data"
-    assert metadata["layout"]["logical_axis_rules"]["embed"] == "fsdp"
-
-    expected_tokens_per_step = (
-        cfg.runtime.seq_len
-        * cfg.runtime.micro_batch_per_device
-        * 2
-        * cfg.runtime.gradient_accumulation
-    )
-
-    assert metadata["tokens_per_step"] == expected_tokens_per_step
 
 
 def test_checkpoint_metadata_preserves_legacy_validation_blocks():

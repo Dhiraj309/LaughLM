@@ -16,6 +16,7 @@ PMAP measurement cleanup:
 3. Persists timing breakdown:
    - data_wait_time
    - host_batch_prepare_time
+   - device_put_time
    - device_step_time
    - total_step_time
 4. Avoids double EMA update when log_metrics() and log_step() are both called.
@@ -456,6 +457,13 @@ class TrainingLogger:
             )
         )
 
+        device_put_time = float(
+            timing_breakdown.get(
+                "device_put_time",
+                0.0,
+            )
+        )
+
         device_step_time = float(
             timing_breakdown.get(
                 "device_step_time",
@@ -558,6 +566,7 @@ class TrainingLogger:
             "total_step_time": float(total_step_time),
             "data_wait_time": float(data_wait_time),
             "host_batch_prepare_time": float(host_batch_prepare_time),
+            "device_put_time": float(device_put_time),
             "device_step_time": float(device_step_time),
 
             # Shape/runtime metadata.
