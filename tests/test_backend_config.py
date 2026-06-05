@@ -4,6 +4,7 @@ import pytest
 from LaughLM.config.loader import load_config
 from LaughLM.config.schema import RuntimeConfig
 from LaughLM.config.validation import validate_config
+from LaughLM.distributed.sharding import get_logical_axis_rules
 
 
 def test_pmap_config_backend():
@@ -147,3 +148,43 @@ def test_config_validation_rejects_pmap_with_fsdp_axis():
         match="pure data-parallel mesh",
     ):
         validate_config(cfg)
+
+def test_config_validation_rejects_fsdp_splash_without_active_data_axis():
+    cfg = load_config("configs/v5e_fsdp_smoke.yaml")
+
+    cfg.runtime.backend = "fsdp"
+    cfg.spmd.mesh.ici_data_parallelism = 1
+    cfg.spmd.mesh.ici_fsdp_parallelism = 8
+
+    cfg.parallelism.data_parallel = 1
+    cfg.parallelism.model_parallel = 8
+
+    cfg.architecture.attention_impl = "splash"
+
+    with pytest.raises(
+        ValueError,
+        match="active 'data' mesh axis",
+    ):
+        validate_config(cfg)
+
+
+def test_logical_axis_rules_drop_inactive_mesh_axes():
+    cfg = load_config("configs/v5e_fsdp_smoke.yaml")
+
+    cfg.spmd.mesh.ici_data_parallelism = 1
+    cfg.spmd.mesh.ici_fsdp_parallelism = 8
+    cfg.spmd.axis_rules.batch = "data"
+    cfg.spmd.axis_rules.embed = "fsdp"
+
+    class DummyMesh:
+        axis_names = ("fsdp",)
+
+    rules = dict(
+        get_logical_axis_rules(
+            cfg,
+            mesh=DummyMesh(),
+        )
+    )
+
+    assert rules["batch"] is None
+    assert rules["embed"] == "fsdp"

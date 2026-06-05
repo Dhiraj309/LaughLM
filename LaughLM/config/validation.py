@@ -17,6 +17,7 @@ def validate_config(config: LaughLMConfig) -> None:
 
     _validate_runtime_backend(config)
     _validate_parallelism_mesh_alignment(config)
+    _validate_attention_mesh_compatibility(config)
     _validate_attention_heads(config)
     _validate_gqa_kv_heads(config)
     _validate_positional(config)
@@ -259,6 +260,63 @@ def _validate_parallelism_mesh_alignment(config: LaughLMConfig) -> None:
                 "Use a future runtime.backend='parallel3d' for tensor or "
                 "sequence parallel layouts."
             )
+
+
+def _validate_attention_mesh_compatibility(config: LaughLMConfig) -> None:
+    """
+    Validate attention implementation against the selected backend/mesh.
+
+    Current known limitation:
+    - GSPMD SplashAttention shard_map path requires an active "data" mesh axis.
+    - A pure fsdp=8 mesh has axis_names=("fsdp",), because data=1 is removed.
+    - Therefore runtime.backend='fsdp' + attention_impl='splash' requires
+      spmd.mesh.axis_sizes()["data"] > 1 for now.
+
+    This fails early at config-load time instead of during TPU model init.
+    """
+
+    backend = str(
+        getattr(
+            config.runtime,
+            "canonical_backend",
+            config.runtime.backend,
+        )
+    )
+
+    attention_impl = str(
+        getattr(
+            config.architecture,
+            "attention_impl",
+            "standard",
+        )
+    )
+
+    if backend != "fsdp":
+        return
+
+    if attention_impl != "splash":
+        return
+
+    axis_sizes = config.spmd.mesh.axis_sizes()
+
+    data_axis = int(
+        axis_sizes.get(
+            "data",
+            1,
+        )
+    )
+
+    if data_axis <= 1:
+        raise ValueError(
+            "runtime.backend='fsdp' with attention_impl='splash' requires "
+            "an active 'data' mesh axis for the current GSPMD Splash "
+            "shard_map path.\n"
+            f"  data axis size: {data_axis}\n"
+            f"  fsdp axis size: {axis_sizes.get('fsdp', 1)}\n"
+            "Use a hybrid mesh such as data=2/fsdp=4 or data=4/fsdp=2. "
+            "For pure fsdp=8, set architecture.attention_impl='standard'."
+        )
+
 
 # ------------------------------------------------------------
 # Validation Rules
