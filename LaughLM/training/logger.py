@@ -577,6 +577,13 @@ class TrainingLogger:
             "micro_batch_per_device": int(self._micro_batch_per_device),
             "gradient_accumulation": int(self._grad_accum),
             "num_devices": int(self._num_devices),
+            "benchmark_mode": bool(
+                getattr(
+                    self.config.runtime,
+                    "benchmark_mode",
+                    False,
+                )
+            ),
 
             "wall_time": float(time.time()),
         }
