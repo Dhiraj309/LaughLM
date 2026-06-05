@@ -458,6 +458,18 @@ class RuntimeConfig(BaseModel):
         ),
     )
 
+    metrics_interval: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "FSDP metrics JSONL logging interval. "
+            "0 = automatic: every step in benchmark_mode, otherwise log_interval. "
+            "1 = every optimizer step. "
+            "N > 1 = every N optimizer steps. "
+            "Console logging still uses runtime.log_interval."
+        ),
+    )
+
 
 # ═══════════════════════════════════════════════════════
 # Data
