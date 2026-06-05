@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import argparse
+
 from huggingface_hub import hf_hub_download
 import jax
 
@@ -6,8 +10,52 @@ from LaughLM.training.fsdp_trainer import FSDPTrainer
 from LaughLM.data.memmap_loader import MemmapDataset
 
 
+def _canonical_backend(config) -> str:
+    return str(
+        getattr(
+            config.runtime,
+            "canonical_backend",
+            config.runtime.backend,
+        )
+    )
+
+
+def _validate_fsdp_config(config, config_path: str) -> None:
+    backend = _canonical_backend(
+        config
+    )
+
+    if backend != "fsdp":
+        raise ValueError(
+            "scripts/train_tpu_fsdp.py only supports FSDP configs.\n"
+            f"  config:            {config_path}\n"
+            f"  raw backend:       {config.runtime.backend!r}\n"
+            f"  canonical backend: {backend!r}\n"
+            "Use scripts/train.py for backend registry dispatch, or use "
+            "a PMAP-specific launcher for runtime.backend='pmap'."
+        )
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--config",
+        default="configs/v5e_fsdp_smoke.yaml",
+        help="FSDP config YAML path.",
+    )
+
+    args = parser.parse_args()
+
     print(f"JAX devices: {jax.devices()}")
+
+    config = load_config(
+        args.config
+    )
+
+    _validate_fsdp_config(
+        config,
+        args.config,
+    )
 
     repo_id = "LaughTaleAI/LaughLM-Tokenized-Fine"
     folder = "LaughLM-v0.2-cpt-smollm-edu-1B"
@@ -32,9 +80,9 @@ def main():
         for f in files
     ]
 
-    config = load_config("configs/v5e_fsdp_smoke.yaml")
-
-    data_replicas = config.spmd.mesh.axis_sizes()["data"]
+    data_replicas = int(
+        config.spmd.mesh.axis_sizes()["data"]
+    )
 
     global_batch_size = (
         config.runtime.micro_batch_per_device
@@ -54,7 +102,9 @@ def main():
         resume_dir=config.runtime.checkpoint_dir,
     )
 
-    trainer.train(dataset)
+    trainer.train(
+        dataset
+    )
 
 
 if __name__ == "__main__":
