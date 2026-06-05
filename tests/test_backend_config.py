@@ -188,3 +188,37 @@ def test_logical_axis_rules_drop_inactive_mesh_axes():
 
     assert rules["batch"] is None
     assert rules["embed"] == "fsdp"
+
+def test_runtime_config_benchmark_mode_defaults_false():
+    runtime = RuntimeConfig(
+        backend="fsdp",
+        seq_len=1024,
+        micro_batch_per_device=4,
+        gradient_accumulation=1,
+        total_tokens=1_000_000,
+        eval_interval=100,
+        log_interval=10,
+        checkpoint_interval=100,
+        checkpoint_max_to_keep=2,
+        checkpoint_dir="checkpoints/test",
+    )
+
+    assert runtime.benchmark_mode is False
+
+
+def test_runtime_config_accepts_benchmark_mode_true():
+    runtime = RuntimeConfig(
+        backend="fsdp",
+        seq_len=1024,
+        micro_batch_per_device=4,
+        gradient_accumulation=1,
+        total_tokens=1_000_000,
+        eval_interval=100,
+        log_interval=10,
+        checkpoint_interval=100,
+        checkpoint_max_to_keep=2,
+        checkpoint_dir="checkpoints/test",
+        benchmark_mode=True,
+    )
+
+    assert runtime.benchmark_mode is True

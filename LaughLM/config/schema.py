@@ -448,6 +448,17 @@ class RuntimeConfig(BaseModel):
     )
 
 
+    benchmark_mode: bool = Field(
+        default=False,
+        description=(
+            "When true, FSDP trainer uses extra block_until_ready calls "
+            "to produce cleaner timing breakdowns for benchmarking. "
+            "When false, trainer avoids benchmark-only synchronization "
+            "where possible for better real training throughput."
+        ),
+    )
+
+
 # ═══════════════════════════════════════════════════════
 # Data
 # ═══════════════════════════════════════════════════════
