@@ -584,6 +584,13 @@ class TrainingLogger:
                     False,
                 )
             ),
+            "metrics_interval": int(
+                getattr(
+                    self.config.runtime,
+                    "metrics_interval",
+                    0,
+                )
+            ),
 
             "wall_time": float(time.time()),
         }
