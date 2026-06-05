@@ -275,9 +275,15 @@ class FSDPTrainer:
             * self.grad_accum
         )
 
+        effective_global_batch = (
+            self.global_batch_size
+            * self.grad_accum
+        )
+
         print(
             "[fsdp] training shape:\n"
-            f"  global_batch={self.global_batch_size}\n"
+            f"  micro_global_batch={self.global_batch_size}\n"
+            f"  effective_global_batch={effective_global_batch}\n"
             f"  seq_len={config.runtime.seq_len}\n"
             f"  grad_accum={self.grad_accum}\n"
             f"  tokens_per_step={tokens_per_step:,}",
@@ -396,6 +402,11 @@ class FSDPTrainer:
             * self.grad_accum
         )
 
+        effective_global_batch = (
+            self.global_batch_size
+            * self.grad_accum
+        )
+
         print(
             f"\nTraining for {total_steps:,} optimizer steps with GSPMD/FSDP\n",
             flush=True,
@@ -407,18 +418,6 @@ class FSDPTrainer:
                 size=8,
             )
         )
-
-        # ----------------------------------------------------
-        # Host-side counters.
-        #
-        # Fast mode avoids device_get(state.step/tokens) every step.
-        # We sync and validate on:
-        # - benchmark_mode
-        # - console log interval
-        # - metrics interval
-        # - checkpoint interval
-        # - final step
-        # ----------------------------------------------------
 
         host_step = _device_scalar_int(
             self.state.step
@@ -441,6 +440,9 @@ class FSDPTrainer:
                 f"  expected_tokens_seen: {expected_start_tokens:,}\n"
                 f"  tokens_per_step:      {tokens_per_step:,}"
             )
+
+        timing_interval_start = time.perf_counter()
+        timing_interval_step = host_step
 
         try:
             while host_step < total_steps:
@@ -621,15 +623,47 @@ class FSDPTrainer:
                             f"  tokens_per_step:      {tokens_per_step:,}"
                         )
 
-                    device_step_time = (
-                        time.perf_counter()
+                    now = time.perf_counter()
+
+                    interval_steps = max(
+                        1,
+                        current_step - timing_interval_step,
+                    )
+
+                    interval_wall_time = (
+                        now
+                        - timing_interval_start
+                    )
+
+                    avg_step_time = (
+                        interval_wall_time
+                        / interval_steps
+                    )
+
+                    raw_sync_step_time = (
+                        now
+                        - total_step_start
+                    )
+
+                    raw_device_step_time = (
+                        now
                         - device_step_start
                     )
 
-                    total_step_time = (
-                        time.perf_counter()
-                        - total_step_start
-                    )
+                    # ------------------------------------------------
+                    # Important:
+                    #
+                    # Logger computes TOK/S from total_step_time.
+                    # Logger computes main MFU from device_step_time.
+                    #
+                    # In fast mode, sync happens every N steps, so both
+                    # fields must be average per-step times.
+                    #
+                    # Raw sync timings are still persisted separately.
+                    # ------------------------------------------------
+
+                    step_time_for_logger = avg_step_time
+                    device_step_time_for_logger = avg_step_time
 
                     lr = _scalar(
                         self.schedule(
@@ -647,11 +681,35 @@ class FSDPTrainer:
                         "device_put_time": float(
                             device_put_time
                         ),
+
+                        # Used by logger MFU calculation.
                         "device_step_time": float(
-                            device_step_time
+                            device_step_time_for_logger
                         ),
+
+                        # Used by logger TOK/S calculation.
                         "total_step_time": float(
-                            total_step_time
+                            step_time_for_logger
+                        ),
+
+                        # Debug-only raw sync timings.
+                        "raw_sync_step_time": float(
+                            raw_sync_step_time
+                        ),
+                        "raw_device_step_time": float(
+                            raw_device_step_time
+                        ),
+                        "interval_steps": float(
+                            interval_steps
+                        ),
+                        "interval_wall_time": float(
+                            interval_wall_time
+                        ),
+                        "micro_global_batch": float(
+                            self.global_batch_size
+                        ),
+                        "effective_global_batch": float(
+                            effective_global_batch
                         ),
                     }
 
@@ -670,7 +728,7 @@ class FSDPTrainer:
                             ),
                             tokens_seen=tokens_seen,
                             tokens_in_step=tokens_per_step,
-                            step_time=total_step_time,
+                            step_time=step_time_for_logger,
                             timing_breakdown=timing_breakdown,
                         )
 
@@ -684,12 +742,15 @@ class FSDPTrainer:
                             ),
                             tokens_seen=tokens_seen,
                             tokens_in_step=tokens_per_step,
-                            step_time=total_step_time,
+                            step_time=step_time_for_logger,
                             timing_breakdown=timing_breakdown,
                         )
 
                     host_step = current_step
                     host_tokens_seen = tokens_seen
+
+                    timing_interval_start = now
+                    timing_interval_step = current_step
 
                 else:
                     host_step = next_host_step
