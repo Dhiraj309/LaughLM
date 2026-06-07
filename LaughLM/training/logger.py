@@ -569,11 +569,58 @@ class TrainingLogger:
             "device_put_time": float(device_put_time),
             "device_step_time": float(device_step_time),
 
+            # Derived overheads.
+            "host_overhead_time": float(
+                max(
+                    0.0,
+                    total_step_time - device_step_time,
+                )
+            ),
+            "input_pipeline_time": float(
+                data_wait_time
+                + host_batch_prepare_time
+                + device_put_time
+            ),
+
+            # Optional raw FSDP sync/debug timings.
+            "raw_sync_step_time": (
+                None
+                if "raw_sync_step_time" not in timing_breakdown
+                else float(timing_breakdown["raw_sync_step_time"])
+            ),
+            "raw_device_step_time": (
+                None
+                if "raw_device_step_time" not in timing_breakdown
+                else float(timing_breakdown["raw_device_step_time"])
+            ),
+            "interval_steps": (
+                None
+                if "interval_steps" not in timing_breakdown
+                else float(timing_breakdown["interval_steps"])
+            ),
+            "interval_wall_time": (
+                None
+                if "interval_wall_time" not in timing_breakdown
+                else float(timing_breakdown["interval_wall_time"])
+            ),
+
             # Shape/runtime metadata.
             "tokens_processed": int(tokens_seen),
             "tokens_in_step": int(tokens_in_step),
             "seq_len": int(self._seq_len),
             "global_batch": int(self._global_batch),
+            "micro_global_batch": int(
+                timing_breakdown.get(
+                    "micro_global_batch",
+                    self._global_batch,
+                )
+            ),
+            "effective_global_batch": int(
+                timing_breakdown.get(
+                    "effective_global_batch",
+                    self._global_batch * self._grad_accum,
+                )
+            ),
             "micro_batch_per_device": int(self._micro_batch_per_device),
             "gradient_accumulation": int(self._grad_accum),
             "num_devices": int(self._num_devices),
