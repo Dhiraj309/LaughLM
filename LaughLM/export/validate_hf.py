@@ -692,8 +692,88 @@ if __name__ == "__main__":
         args.checkpoint_dir
     )
 
+    exp_config = load_config(
+        args.config
+    )
+
+    backend = str(
+        getattr(
+            exp_config.runtime,
+            "canonical_backend",
+            exp_config.runtime.backend,
+        )
+    )
+
+    if backend == "pmap":
+        num_devices = int(jax.local_device_count())
+
+    elif backend == "fsdp":
+        raise NotImplementedError(
+            "validate_hf.py CLI cannot restore FSDP checkpoints directly yet. "
+            "Use the Phase 4B canonical unshard/gather export path first."
+        )
+
+    else:
+        raise NotImplementedError(
+            f"HF validation for backend={backend!r} is not implemented."
+        )
+
+    llama_config = build_llama_config(
+        exp_config
+    )
+
+    native_model = LlamaForCausalLM(
+        config=llama_config
+    )
+
+    rng = jax.random.PRNGKey(0)
+
+    dummy = jnp.zeros(
+        (
+            exp_config.runtime.micro_batch_per_device,
+            exp_config.runtime.seq_len,
+        ),
+        dtype=jnp.int32,
+    )
+
+    variables = native_model.init(
+        rng,
+        input_ids=dummy,
+        use_cache=False,
+        mode="train",
+        return_hidden=bool(
+            exp_config.architecture.weight_tying
+        ),
+    )
+
+    from LaughLM.training.optimizer import build_optimizer
+    from LaughLM.training.scheduler import build_scheduler
+
+    schedule = build_scheduler(
+        exp_config,
+        num_devices=num_devices,
+    )
+
+    optimizer = build_optimizer(
+        exp_config,
+        schedule,
+    )
+
+    target_state = TrainState(
+        params=variables["params"],
+        opt_state=optimizer.init(variables["params"]),
+        step=jnp.asarray(0, dtype=jnp.int32),
+        tokens_processed=jnp.asarray(0, dtype=jnp.int64),
+        rng_key=rng,
+    )
+
     restored = checkpoints.restore_latest(
-        target_state=None,
+        target_state=target_state,
+        config=exp_config,
+        num_devices=num_devices,
+        require_metadata=True,
+        require_v3=True,
+        purpose="hf_validation",
     )
 
     if restored is None:
@@ -714,8 +794,8 @@ if __name__ == "__main__":
         params
     )
 
-    validate_hf_export(
-        hf_dir=args.hf_dir,
-        config_path=args.config,
-        params=params,
-    )
+    # validate_hf_export(
+    #     hf_dir=args.hf_dir,
+    #     config_path=args.config,
+    #     params=params,
+    # )

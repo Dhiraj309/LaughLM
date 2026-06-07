@@ -109,16 +109,97 @@ def load_token_batch(args):
     return input_ids_np
 
 
-def restore_params(checkpoint_dir):
+def restore_params(checkpoint_dir, exp_config):
     print("\n================ RESTORE JAX CHECKPOINT ================\n")
 
     checkpoints = CheckpointManager(
         checkpoint_dir,
     )
 
-    restored = checkpoints.restore_latest(
-        target_state=None,
+    backend = str(
+        getattr(
+            exp_config.runtime,
+            "canonical_backend",
+            exp_config.runtime.backend,
+        )
     )
+
+    if backend == "pmap":
+        num_devices = int(jax.local_device_count())
+
+    elif backend == "fsdp":
+        raise NotImplementedError(
+            "debug_hf_export_loss_parity.py cannot restore FSDP checkpoints "
+            "directly yet. Use the Phase 4B canonical unshard/gather export "
+            "path first."
+        )
+
+    else:
+        raise NotImplementedError(
+            f"HF parity debug restore for backend={backend!r} is not implemented."
+        )
+
+    train_llama_config = build_llama_config(
+        exp_config
+    )
+
+    target_model = LlamaForCausalLM(
+        config=train_llama_config
+    )
+
+    rng = jax.random.PRNGKey(0)
+
+    dummy = jnp.zeros(
+        (
+            exp_config.runtime.micro_batch_per_device,
+            exp_config.runtime.seq_len,
+        ),
+        dtype=jnp.int32,
+    )
+
+    variables = target_model.init(
+        rng,
+        input_ids=dummy,
+        use_cache=False,
+        mode="train",
+        return_hidden=bool(
+            exp_config.architecture.weight_tying
+        ),
+    )
+
+    from LaughLM.training.optimizer import build_optimizer
+    from LaughLM.training.scheduler import build_scheduler
+
+    schedule = build_scheduler(
+        exp_config,
+        num_devices=num_devices,
+    )
+
+    optimizer = build_optimizer(
+        exp_config,
+        schedule,
+    )
+
+    target_state = TrainState(
+        params=variables["params"],
+        opt_state=optimizer.init(variables["params"]),
+        step=jnp.asarray(0, dtype=jnp.int32),
+        tokens_processed=jnp.asarray(0, dtype=jnp.int64),
+        rng_key=rng,
+    )
+
+    restored = checkpoints.restore_latest(
+        target_state=target_state,
+        config=exp_config,
+        num_devices=num_devices,
+        require_metadata=True,
+        require_v3=True,
+        purpose="hf_parity_debug",
+    )
+
+
+
+    
 
     if restored is None:
         raise RuntimeError("No checkpoint found.")
@@ -393,7 +474,8 @@ def main():
     )
 
     params, _ = restore_params(
-        args.checkpoint_dir
+        args.checkpoint_dir,
+        exp_config,
     )
 
     native_logits_np, native_loss_value = run_native(
