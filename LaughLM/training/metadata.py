@@ -402,10 +402,22 @@ def build_checkpoint_metadata(
     mesh,
     step: int,
     tokens_processed: int,
+    allow_legacy_v2: bool = False,
 ) -> dict[str, Any]:
     num_devices = int(
         jax.device_count()
     )
+    
+    if not allow_legacy_v2:
+        raise RuntimeError(
+            "build_checkpoint_metadata() emits legacy "
+            "'laughlm_pmap_checkpoint_v2' metadata and must not be used "
+            "for new PMAP/FSDP checkpoints.\n"
+            "Use CheckpointManager.build_metadata_from_config() for "
+            "layout-aware v3 checkpoint metadata.\n"
+            "Pass allow_legacy_v2=True only for explicit legacy migration "
+            "or compatibility tests."
+        )
 
     runtime = _runtime_metadata(
         config=config,
