@@ -366,6 +366,9 @@ class FSDPTrainer:
             target_state=state,
             config=cfg,
             num_devices=self.data_replicas,
+            require_metadata=True,
+            require_v3=True,
+            purpose="fsdp_resume",
         )
 
         if restored is not None:
