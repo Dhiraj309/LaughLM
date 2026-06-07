@@ -678,8 +678,32 @@ class CheckpointManager:
         metadata: dict | None,
         config,
         num_devices: int,
+        require_metadata: bool = False,
+        require_v3: bool = False,
+        purpose: str = "resume",
     ):
+        """
+        Validate checkpoint metadata against the current config.
+
+        Default behavior is resume-compatible:
+        - missing metadata warns and returns
+        - legacy v2 metadata is allowed with warning
+
+        Strict behavior is intended for export or future production-safe
+        restore paths:
+        - require_metadata=True rejects missing metadata
+        - require_v3=True rejects legacy/non-v3 metadata
+        """
+
         if metadata is None:
+            if require_metadata:
+                raise ValueError(
+                    "Checkpoint metadata is required for this operation.\n"
+                    f"  purpose: {purpose!r}\n"
+                    "Refusing to continue because checkpoint/config "
+                    "compatibility cannot be validated."
+                )
+
             print(
                 "[checkpoint] warning: no metadata found; "
                 "cannot validate resume compatibility",
@@ -707,7 +731,17 @@ class CheckpointManager:
             raise ValueError(
                 "Unknown checkpoint metadata format.\n"
                 f"  format={metadata_format!r}\n"
-                "Refusing to resume from an unknown checkpoint format."
+                f"  purpose={purpose!r}\n"
+                "Refusing to continue from an unknown checkpoint format."
+            )
+
+        if require_v3 and not is_v3:
+            raise ValueError(
+                "Checkpoint metadata format is not export-safe.\n"
+                f"  format={metadata_format!r}\n"
+                f"  purpose={purpose!r}\n"
+                "This operation requires format='laughlm_checkpoint_v3' "
+                "so backend/layout/dtype/export safety can be validated."
             )
 
         meta_model = metadata.get(
@@ -741,12 +775,13 @@ class CheckpointManager:
         )
 
         # ----------------------------------------------------
-        # v3 backend/layout checks
+        # v3 backend/layout/dtype checks
         # ----------------------------------------------------
         #
-        # Legacy v2 PMAP metadata does not have backend/layout fields.
-        # Keep it readable and validate the older model/scheduler fields
-        # below instead of hard-failing for missing v3-only metadata.
+        # Legacy v2 PMAP metadata does not have backend/layout/dtype fields.
+        # Keep it readable in default resume mode and validate older model /
+        # scheduler fields below instead of hard-failing for missing v3-only
+        # metadata. Strict export mode rejects legacy before this point.
         # ----------------------------------------------------
 
         if is_v3:
@@ -815,18 +850,43 @@ class CheckpointManager:
                     mismatches=backend_mismatches,
                 )
 
+            meta_dtype_policy = metadata.get(
+                "dtype_policy",
+                None,
+            )
+
+            if meta_dtype_policy is None:
+                backend_mismatches.append(
+                    "  dtype_policy: checkpoint metadata missing dtype_policy block"
+                )
+
+            else:
+                current_dtype_policy = (
+                    CheckpointManager._dtype_policy_metadata(
+                        config
+                    )
+                )
+
+                CheckpointManager._compare_strict(
+                    name="dtype_policy",
+                    old=meta_dtype_policy,
+                    new=current_dtype_policy,
+                    mismatches=backend_mismatches,
+                )
+
             if backend_mismatches:
                 raise ValueError(
-                    "Checkpoint backend/layout is not compatible with current config.\n"
-                    "Use a checkpoint with matching backend/layout, or create an explicit "
-                    "checkpoint migration path.\n"
+                    "Checkpoint backend/layout/dtype_policy is not compatible "
+                    "with current config.\n"
+                    "Use a checkpoint with matching backend/layout/dtype policy, "
+                    "or create an explicit checkpoint migration path.\n"
                     + "\n".join(backend_mismatches)
                 )
 
         else:
             print(
                 "[checkpoint] warning: legacy checkpoint metadata format; "
-                "backend/layout validation is unavailable",
+                "backend/layout/dtype validation is unavailable",
                 flush=True,
             )
 
@@ -1136,6 +1196,9 @@ class CheckpointManager:
         *,
         config=None,
         num_devices: int | None = None,
+        require_metadata: bool = False,
+        require_v3: bool = False,
+        purpose: str = "resume",
     ):
         latest = self.manager.latest_step()
 
@@ -1172,6 +1235,9 @@ class CheckpointManager:
                 metadata=metadata,
                 config=config,
                 num_devices=num_devices,
+                require_metadata=require_metadata,
+                require_v3=require_v3,
+                purpose=purpose,
             )
 
         try:
