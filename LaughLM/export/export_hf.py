@@ -1,325 +1,530 @@
+"""
+LaughLM/export/export_hf.py
+
+Export a LaughLM checkpoint to Hugging Face LlamaForCausalLM format.
+
+Safety policy
+-------------
+- Restore requires v3 checkpoint metadata.
+- Restore uses a real LLaMA TrainState target, not target_state=None.
+- PMAP native params can be exported directly.
+- FSDP export is intentionally blocked until canonical unshard/gather
+  support is implemented.
+"""
+
 from __future__ import annotations
 
-import math
-import argparse
-from dataclasses import replace
-
-import numpy as np
-import torch
+import gc
+import json
+import shutil
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 
-from huggingface_hub import hf_hub_download
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from safetensors.numpy import save_file
+from transformers import GenerationConfig
 
 from LaughLM.config.loader import load_config
 from LaughLM.model.llama.config_factory import build_llama_config
 from LaughLM.model.llama.model import LlamaForCausalLM
 from LaughLM.training.checkpoint import CheckpointManager
+from LaughLM.training.optimizer import build_optimizer
+from LaughLM.training.scheduler import build_scheduler
 from LaughLM.training.train_state import TrainState
-from LaughLM.export.validate_hf import unbox_logically_partitioned
+from LaughLM.utils.rng import create_rng
+
+from LaughLM.export.convert_params import (
+    convert_params_to_hf,
+    validate_exported_tensors,
+)
+
+from LaughLM.export.hf_config import build_hf_config
+from LaughLM.export.validate_hf import validate_hf_export
 
 
-def make_parity_config(llama_config):
-    """
-    Make native JAX comparable to HF for export parity.
+# ============================================================
+# Backend helpers
+# ============================================================
 
-    Do not use Splash/bf16 here. This is not a training benchmark.
-    """
-
-    return replace(
-        llama_config,
-        attention_impl="xla",
-        attention_fallback="warn",
-        param_dtype=jnp.float32,
-        compute_dtype=jnp.float32,
-        output_dtype=jnp.float32,
+def _canonical_backend(config) -> str:
+    return str(
+        getattr(
+            config.runtime,
+            "canonical_backend",
+            config.runtime.backend,
+        )
     )
 
 
-def torch_ce_loss(
-    logits: torch.Tensor,
-    input_ids: torch.Tensor,
-) -> torch.Tensor:
-    shift_logits = logits[:, :-1, :].float()
-    shift_labels = input_ids[:, 1:]
+def _metadata_num_devices(config) -> int:
+    backend = _canonical_backend(config)
 
-    return torch.nn.functional.cross_entropy(
-        shift_logits.reshape(-1, shift_logits.shape[-1]),
-        shift_labels.reshape(-1),
-        reduction="mean",
+    if backend == "pmap":
+        return int(jax.local_device_count())
+
+    if backend == "fsdp":
+        return int(
+            config.spmd.mesh.axis_sizes().get(
+                "data",
+                1,
+            )
+        )
+
+    raise ValueError(
+        "HF export only supports implemented training backends.\n"
+        f"  runtime.backend={config.runtime.backend!r}\n"
+        f"  canonical_backend={backend!r}"
     )
 
 
-def jax_ce_loss(
-    logits: jnp.ndarray,
-    input_ids: jnp.ndarray,
-) -> jnp.ndarray:
-    shift_logits = logits[:, :-1, :].astype(jnp.float32)
-    shift_labels = input_ids[:, 1:]
+def _require_supported_export_backend(config) -> None:
+    backend = _canonical_backend(config)
 
-    log_probs = jax.nn.log_softmax(
-        shift_logits,
-        axis=-1,
+    if backend == "pmap":
+        return
+
+    if backend == "fsdp":
+        raise NotImplementedError(
+            "FSDP HF export is not enabled yet. "
+            "FSDP checkpoints require canonical unshard/gather support "
+            "before convert_params_to_hf() can safely consume params."
+        )
+
+    raise NotImplementedError(
+        "Reserved backend cannot be exported to HF yet.\n"
+        f"  runtime.backend={config.runtime.backend!r}\n"
+        f"  canonical_backend={backend!r}"
     )
 
-    token_log_probs = jnp.take_along_axis(
-        log_probs,
-        shift_labels[..., None],
-        axis=-1,
-    ).squeeze(-1)
 
-    return -jnp.mean(token_log_probs)
+# ============================================================
+# Restore target
+# ============================================================
 
-
-def load_token_batch(args):
-    bin_path = hf_hub_download(
-        repo_id=args.dataset_repo,
-        filename=args.dataset_file,
-        repo_type="dataset",
-    )
-
-    data = np.memmap(
-        bin_path,
-        dtype=np.uint16,
-        mode="r",
-    )
-
-    n_tokens = args.batch_size * args.seq_len
-
-    chunk = np.asarray(
-        data[args.offset : args.offset + n_tokens],
-        dtype=np.int64,
-    )
-
-    input_ids_np = chunk.reshape(
-        args.batch_size,
-        args.seq_len,
-    )
-
-    print("\n================ DATA ================\n")
-    print("bin path:", bin_path)
-    print("data tokens:", len(data))
-    print("offset:", args.offset)
-    print("batch:", input_ids_np.shape)
-    print("min token:", int(input_ids_np.min()))
-    print("max token:", int(input_ids_np.max()))
-
-    return input_ids_np
-
-
-def restore_params(checkpoint_dir):
-    print("\n================ RESTORE JAX CHECKPOINT ================\n")
-
-    checkpoints = CheckpointManager(
-        checkpoint_dir,
-    )
-
-    restored = checkpoints.restore_latest(
-        target_state=None,
-    )
-
-    if restored is None:
-        raise RuntimeError("No checkpoint found.")
-
-    state, step = restored
-
-    print("restored step:", step)
-
-    if isinstance(state, TrainState):
-        params = state.params
-    else:
-        params = state["params"]
-
-    params = unbox_logically_partitioned(
-        params
-    )
-
-    return params, step
-
-
-def run_native(
+def _build_target_state(
+    config,
     *,
-    params,
-    llama_config,
-    input_ids_np,
-):
-    print("\n================ NATIVE JAX LOSS ================\n")
-    print("native attention_impl:", llama_config.attention_impl)
-    print("native compute_dtype:", llama_config.compute_dtype)
-    print("native output_dtype:", llama_config.output_dtype)
-
-    native_model = LlamaForCausalLM(
-        config=llama_config,
+    num_devices: int,
+) -> TrainState:
+    llama_config = build_llama_config(
+        config
     )
 
-    input_ids_jax = jnp.asarray(
-        input_ids_np,
+    model = LlamaForCausalLM(
+        config=llama_config
+    )
+
+    rng = create_rng(
+        seed=0
+    )
+
+    dummy = jnp.zeros(
+        (
+            config.runtime.micro_batch_per_device,
+            config.runtime.seq_len,
+        ),
         dtype=jnp.int32,
     )
 
-    native_logits, _ = native_model.apply(
-        {"params": params},
-        input_ids=input_ids_jax,
+    variables = model.init(
+        rng.next_key(),
+        input_ids=dummy,
         use_cache=False,
         mode="train",
+        return_hidden=bool(
+            config.architecture.weight_tying
+        ),
     )
 
-    native_loss = jax_ce_loss(
-        native_logits,
-        input_ids_jax,
+    params = variables["params"]
+
+    schedule = build_scheduler(
+        config,
+        num_devices=num_devices,
     )
 
-    native_loss_value = float(
-        jax.device_get(native_loss)
+    optimizer = build_optimizer(
+        config,
+        schedule,
     )
 
-    native_ppl = math.exp(
-        native_loss_value
+    opt_state = optimizer.init(
+        params
     )
 
-    print("native loss:", native_loss_value)
-    print("native ppl: ", native_ppl)
-
-    native_logits_np = np.asarray(
-        jax.device_get(native_logits),
-        dtype=np.float32,
+    return TrainState(
+        params=params,
+        opt_state=opt_state,
+        step=jnp.asarray(
+            0,
+            dtype=jnp.int32,
+        ),
+        tokens_processed=jnp.asarray(
+            0,
+            dtype=jnp.int64,
+        ),
+        rng_key=rng.key,
     )
 
-    return native_logits_np, native_loss_value
+
+# ============================================================
+# Tokenizer copy
+# ============================================================
+
+def copy_tokenizer_files(
+    source_dir,
+    output_dir,
+) -> None:
+    source_dir = Path(
+        source_dir
+    )
+
+    output_dir = Path(
+        output_dir
+    )
+
+    tokenizer_files = [
+        "tokenizer.json",
+        "tokenizer.model",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "added_tokens.json",
+    ]
+
+    copied = []
+
+    for filename in tokenizer_files:
+        src = source_dir / filename
+
+        if src.exists():
+            dst = output_dir / filename
+
+            shutil.copy2(
+                src,
+                dst,
+            )
+
+            copied.append(
+                filename
+            )
+
+    if not copied:
+        raise RuntimeError(
+            "No tokenizer files found.\n"
+            f"source_dir={source_dir}"
+        )
+
+    print(
+        "[export] copied tokenizer files:"
+    )
+
+    for filename in copied:
+        print(
+            f"  - {filename}"
+        )
 
 
-def run_hf(
+# ============================================================
+# Generation config
+# ============================================================
+
+def save_generation_config(
+    output_dir,
+    llama_config,
+) -> None:
+    generation_config = GenerationConfig(
+        bos_token_id=llama_config.bos_token_id,
+        eos_token_id=llama_config.eos_token_id,
+        pad_token_id=llama_config.pad_token_id,
+        max_length=llama_config.max_position_embeddings,
+        do_sample=False,
+        use_cache=True,
+    )
+
+    generation_config.save_pretrained(
+        output_dir
+    )
+
+    print(
+        "[export] saved generation config"
+    )
+
+
+# ============================================================
+# Config save
+# ============================================================
+
+def save_hf_config(
+    output_dir,
+    hf_config,
+) -> None:
+    output_dir = Path(
+        output_dir
+    )
+
+    config_path = (
+        output_dir
+        / "config.json"
+    )
+
+    with open(
+        config_path,
+        "w",
+    ) as f:
+        json.dump(
+            hf_config,
+            f,
+            indent=2,
+        )
+
+    print(
+        "[export] saved config.json"
+    )
+
+
+# ============================================================
+# Main export
+# ============================================================
+
+def export_hf_checkpoint(
     *,
-    hf_dir,
-    input_ids_np,
-):
-    print("\n================ HF LOSS ================\n")
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        hf_dir,
-        use_fast=True,
+    config_path,
+    checkpoint_dir,
+    output_dir,
+    tokenizer_dir,
+    validate=True,
+) -> None:
+    output_dir = Path(
+        output_dir
     )
 
-    tokenizer.pad_token = tokenizer.eos_token
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    print(
+        "[export] loading config..."
+    )
+
+    exp_config = load_config(
+        config_path
+    )
+
+    backend = _canonical_backend(
+        exp_config
+    )
+
+    num_devices = _metadata_num_devices(
+        exp_config
+    )
+
+    print(
+        "[export] backend:\n"
+        f"  raw={exp_config.runtime.backend}\n"
+        f"  canonical={backend}\n"
+        f"  metadata_num_devices={num_devices}"
+    )
+
+    _require_supported_export_backend(
+        exp_config
+    )
+
+    llama_config = build_llama_config(
+        exp_config
+    )
+
+    print(
+        "[export] building restore target..."
+    )
+
+    target_state = _build_target_state(
+        exp_config,
+        num_devices=num_devices,
+    )
+
+    print(
+        "[export] restoring checkpoint..."
+    )
+
+    checkpoints = CheckpointManager(
+        checkpoint_dir
+    )
 
     try:
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            hf_dir,
-            dtype=torch.float32,
-            device_map="auto",
-            attn_implementation="eager",
-            low_cpu_mem_usage=True,
-        )
-    except TypeError:
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            hf_dir,
-            torch_dtype=torch.float32,
-            device_map="auto",
-            attn_implementation="eager",
-            low_cpu_mem_usage=True,
+        restored = checkpoints.restore_latest(
+            target_state=target_state,
+            config=exp_config,
+            num_devices=num_devices,
+            require_metadata=True,
+            require_v3=True,
+            purpose="hf_export",
         )
 
-    hf_model.eval()
+        if restored is None:
+            raise RuntimeError(
+                "No checkpoint found."
+            )
 
-    hf_model.config.bos_token_id = 1
-    hf_model.config.eos_token_id = 32000
-    hf_model.config.pad_token_id = 32000
+        state, step = restored
 
-    if hasattr(hf_model, "generation_config"):
-        hf_model.generation_config.bos_token_id = 1
-        hf_model.generation_config.eos_token_id = 32000
-        hf_model.generation_config.pad_token_id = 32000
-
-    input_ids_torch = torch.tensor(
-        input_ids_np,
-        dtype=torch.long,
-        device=hf_model.device,
-    )
-
-    with torch.inference_mode():
-        hf_outputs = hf_model(
-            input_ids=input_ids_torch,
-            use_cache=False,
+        print(
+            f"[export] restored step={step:,}"
         )
 
-        hf_logits = hf_outputs.logits
-
-        hf_loss = torch_ce_loss(
-            hf_logits,
-            input_ids_torch,
+        params = jax.device_get(
+            state.params
         )
 
-    hf_loss_value = float(
-        hf_loss.detach().cpu()
-    )
+        source_metadata = checkpoints.load_metadata(
+            step
+        )
 
-    hf_ppl = math.exp(
-        hf_loss_value
-    )
+        print(
+            "[export] converting tensors..."
+        )
 
-    print("hf loss:", hf_loss_value)
-    print("hf ppl: ", hf_ppl)
+        tensors = convert_params_to_hf(
+            params=params,
+            config=llama_config,
+        )
 
-    hf_logits_np = (
-        hf_logits
-        .detach()
-        .cpu()
-        .float()
-        .numpy()
-    )
+        validate_exported_tensors(
+            tensors
+        )
 
-    return hf_logits_np, hf_loss_value
+        total_tensors = len(
+            tensors
+        )
+
+        total_params = sum(
+            tensor.size
+            for tensor in tensors.values()
+        )
+
+        print(
+            f"[export] converted {total_tensors:,} tensors"
+        )
+
+        print(
+            f"[export] total params: {total_params:,}"
+        )
+
+        del state
+        gc.collect()
+
+        print(
+            "[export] saving safetensors..."
+        )
+
+        safetensor_path = (
+            output_dir
+            / "model.safetensors"
+        )
+
+        metadata = {
+            "format": "pt",
+            "framework": "huggingface",
+            "source": "LaughLM",
+            "backend": backend,
+            "checkpoint_step": str(
+                int(step)
+            ),
+        }
+
+        save_file(
+            tensors,
+            str(safetensor_path),
+            metadata=metadata,
+        )
+
+        print(
+            "[export] saved model.safetensors"
+        )
+
+        print(
+            "[export] building HF config..."
+        )
+
+        hf_config = build_hf_config(
+            llama_config
+        )
+
+        save_hf_config(
+            output_dir,
+            hf_config,
+        )
+
+        save_generation_config(
+            output_dir,
+            llama_config,
+        )
+
+        print(
+            "[export] copying tokenizer..."
+        )
+
+        copy_tokenizer_files(
+            tokenizer_dir,
+            output_dir,
+        )
+
+        source_metadata_path = (
+            output_dir
+            / "source_checkpoint_metadata.json"
+        )
+
+        with open(
+            source_metadata_path,
+            "w",
+        ) as f:
+            json.dump(
+                source_metadata,
+                f,
+                indent=2,
+                sort_keys=True,
+            )
+
+        print(
+            "[export] saved source checkpoint metadata"
+        )
+
+        if validate:
+            print(
+                "[export] running validation..."
+            )
+
+            validate_hf_export(
+                hf_dir=output_dir,
+                config_path=config_path,
+                params=params,
+            )
+
+        print(
+            "\n[export] COMPLETE"
+        )
+
+        print(
+            f"[export] output dir:\n{output_dir}"
+        )
+
+    finally:
+        checkpoints.close()
 
 
-def report_parity(
-    *,
-    native_logits_np,
-    hf_logits_np,
-    native_loss_value,
-    hf_loss_value,
-):
-    print("\n================ LOGIT PARITY ================\n")
+# ============================================================
+# CLI
+# ============================================================
 
-    diff = np.abs(
-        native_logits_np - hf_logits_np,
-    )
+def main() -> None:
+    import argparse
 
-    print("native logits shape:", native_logits_np.shape)
-    print("hf logits shape:    ", hf_logits_np.shape)
-    print("max abs diff:", float(diff.max()))
-    print("mean abs diff:", float(diff.mean()))
-    print("p50 abs diff:", float(np.percentile(diff, 50)))
-    print("p95 abs diff:", float(np.percentile(diff, 95)))
-    print("p99 abs diff:", float(np.percentile(diff, 99)))
-
-    loss_delta = abs(
-        native_loss_value - hf_loss_value
-    )
-
-    print("\n================ DIAGNOSIS ================\n")
-    print("loss delta:", loss_delta)
-
-    if loss_delta < 0.05 and float(diff.mean()) < 0.05:
-        print("HF export matches native checkpoint closely enough for practical validation.")
-    elif native_loss_value < 4.0 and hf_loss_value > 5.0:
-        print("JAX checkpoint is good, HF export/path is still wrong.")
-        print("Because this script uses XLA fp32 native and fp32 HF, inspect RoPE/QK layout or parameter mapping.")
-    elif native_loss_value > 5.0 and hf_loss_value > 5.0:
-        print("Both JAX and HF are bad on this shard under parity config.")
-        print("Check checkpoint/config/data alignment.")
-    else:
-        print("Partial mismatch.")
-        print("Inspect mean/p99 logit diff and compare seq_len sweep.")
-
-
-def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
         "--config",
-        default="configs/v5e_pmap.yaml",
+        required=True,
     )
 
     parser.add_argument(
@@ -328,90 +533,28 @@ def main():
     )
 
     parser.add_argument(
-        "--hf_dir",
+        "--output_dir",
         required=True,
-        help="Local HF export dir or HF repo id.",
     )
 
     parser.add_argument(
-        "--dataset_repo",
-        default="LaughTaleAI/LaughLM-Tokenized-Fine",
+        "--tokenizer_dir",
+        required=True,
     )
 
     parser.add_argument(
-        "--dataset_file",
-        default="fineweb-edu/fineweb-edu_shard_00000.bin",
-    )
-
-    parser.add_argument(
-        "--offset",
-        type=int,
-        default=50_000_000,
-    )
-
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=2,
-    )
-
-    parser.add_argument(
-        "--seq_len",
-        type=int,
-        default=2048,
+        "--skip_validation",
+        action="store_true",
     )
 
     args = parser.parse_args()
 
-    exp_config = load_config(
-        args.config
-    )
-
-    train_llama_config = build_llama_config(
-        exp_config
-    )
-
-    llama_config = make_parity_config(
-        train_llama_config
-    )
-
-    print("\n================ CONFIG ================\n")
-    print("hidden_size:", llama_config.hidden_size)
-    print("layers:", llama_config.num_hidden_layers)
-    print("heads:", llama_config.num_attention_heads)
-    print("kv_heads:", llama_config.num_key_value_heads)
-    print("vocab:", llama_config.vocab_size)
-    print("bos:", llama_config.bos_token_id)
-    print("eos:", llama_config.eos_token_id)
-    print("pad:", llama_config.pad_token_id)
-    print("attention_impl:", llama_config.attention_impl)
-    print("compute_dtype:", llama_config.compute_dtype)
-    print("output_dtype:", llama_config.output_dtype)
-
-    input_ids_np = load_token_batch(
-        args
-    )
-
-    params, _ = restore_params(
-        args.checkpoint_dir
-    )
-
-    native_logits_np, native_loss_value = run_native(
-        params=params,
-        llama_config=llama_config,
-        input_ids_np=input_ids_np,
-    )
-
-    hf_logits_np, hf_loss_value = run_hf(
-        hf_dir=args.hf_dir,
-        input_ids_np=input_ids_np,
-    )
-
-    report_parity(
-        native_logits_np=native_logits_np,
-        hf_logits_np=hf_logits_np,
-        native_loss_value=native_loss_value,
-        hf_loss_value=hf_loss_value,
+    export_hf_checkpoint(
+        config_path=args.config,
+        checkpoint_dir=args.checkpoint_dir,
+        output_dir=args.output_dir,
+        tokenizer_dir=args.tokenizer_dir,
+        validate=not args.skip_validation,
     )
 
 
