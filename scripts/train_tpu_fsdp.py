@@ -33,11 +33,7 @@ def parse_args():
         "--max_steps",
         type=int,
         default=None,
-        help=(
-            "Optional short-run override. "
-            "Sets runtime.total_tokens = max_steps * tokens_per_step. "
-            "Scheduler horizon_tokens is left unchanged."
-        ),
+        help="Override runtime.total_tokens for short benchmark runs.",
     )
 
     parser.add_argument(
@@ -77,22 +73,22 @@ def _apply_max_steps_override(
         data_replicas=data_replicas,
     )
 
-    total_tokens = int(
-        max_steps
-        * tokens_per_step
-    )
-
     old_total_tokens = int(
         config.runtime.total_tokens
     )
 
-    config.runtime.total_tokens = total_tokens
+    new_total_tokens = int(
+        max_steps
+        * tokens_per_step
+    )
+
+    config.runtime.total_tokens = new_total_tokens
 
     print(
         "[train_tpu_fsdp] max_steps override:\n"
         f"  max_steps={max_steps:,}\n"
         f"  tokens_per_step={tokens_per_step:,}\n"
-        f"  runtime.total_tokens: {old_total_tokens:,} -> {total_tokens:,}\n"
+        f"  runtime.total_tokens: {old_total_tokens:,} -> {new_total_tokens:,}\n"
         f"  scheduler.horizon_tokens remains={config.scheduler.horizon_tokens:,}",
         flush=True,
     )
@@ -135,8 +131,6 @@ def main():
     repo_id = "LaughTaleAI/LaughLM-Tokenized-Fine"
     folder = "LaughLM-v0.2-cpt-smollm-edu-1B"
 
-    # Use only full 10M-token shards.
-    # Skip shard_00010 because it is the tiny final partial shard.
     files = [
         f"{folder}/LaughLM-v0.2-cpt-smollm-edu-1B_shard_{i:05d}.bin"
         for i in range(0, 10)
