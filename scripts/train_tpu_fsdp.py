@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import argparse
+
 from huggingface_hub import hf_hub_download
 import jax
 
@@ -6,7 +10,29 @@ from LaughLM.training.fsdp_trainer import FSDPTrainer
 from LaughLM.data.memmap_loader import MemmapDataset
 
 
+DEFAULT_CONFIG = (
+    "configs/v5e_fsdp_1p3b_d4_f2_mb2_ga8_lc4096_remat.yaml"
+)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train LaughLM with FSDP on TPU."
+    )
+
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=DEFAULT_CONFIG,
+        help="Path to FSDP config YAML.",
+    )
+
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     print(f"JAX devices: {jax.devices()}")
 
     repo_id = "LaughTaleAI/LaughLM-Tokenized-Fine"
@@ -32,13 +58,21 @@ def main():
         for f in files
     ]
 
-    config = load_config("configs/v5e_fsdp_1p3b_d4_f2_mb2_ga8_lc4096_remat.yaml")
+    config = load_config(args.config)
 
     data_replicas = config.spmd.mesh.axis_sizes()["data"]
 
     global_batch_size = (
         config.runtime.micro_batch_per_device
         * data_replicas
+    )
+
+    print(
+        "[train_tpu_fsdp] config:\n"
+        f"  path={args.config}\n"
+        f"  checkpoint_dir={config.runtime.checkpoint_dir}\n"
+        f"  global_batch_size={global_batch_size}\n"
+        f"  gradient_accumulation={config.runtime.gradient_accumulation}"
     )
 
     dataset = MemmapDataset(
