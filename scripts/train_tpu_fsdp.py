@@ -1,4 +1,3 @@
-%%writefile scripts/train_tpu_fsdp.py
 from __future__ import annotations
 
 import argparse

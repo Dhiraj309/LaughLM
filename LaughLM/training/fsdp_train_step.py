@@ -17,6 +17,11 @@ Phase 4 parity fix:
     z_loss
     ignore_index
 - Handle tied and untied LM heads explicitly.
+
+Phase 4F.1 optimization:
+- Keep grad-accum scan carry minimal.
+- Carry only accumulated gradients and scalar loss.
+- Do not carry debug metrics through lax.scan.
 """
 
 from __future__ import annotations
@@ -107,11 +112,13 @@ def _unbox_param_leaf(x):
     Flax logical partition wrappers may appear in params depending on
     initialization/restoration path. The training loss needs raw arrays.
     """
+
     if hasattr(x, "unbox"):
         try:
             return x.unbox(
                 apply_constraint=False,
             )
+
         except TypeError:
             return x.unbox()
 
@@ -135,6 +142,7 @@ def _get_lm_head_kernel(
     Untied path:
       params["lm_head"]["kernel"]                   # [hidden, vocab]
     """
+
     if tie_word_embeddings:
         return _unbox_param_leaf(
             params["model"]["embed_tokens"]["embedding"]
@@ -203,7 +211,7 @@ def create_fsdp_train_step(
         )
     )
 
-    def loss_fn(
+    def loss_only_fn(
         params: Params,
         micro_batch: jnp.ndarray,
     ):
@@ -233,7 +241,7 @@ def create_fsdp_train_step(
             tie_word_embeddings=tie_word_embeddings,
         )
 
-        loss, metrics = compute_lm_loss_from_hidden(
+        loss, _ = compute_lm_loss_from_hidden(
             hidden_states=hidden_states,
             targets=targets,
             lm_head_kernel=lm_head_kernel,
@@ -241,7 +249,9 @@ def create_fsdp_train_step(
             **loss_options,
         )
 
-        return loss, metrics
+        return loss.astype(
+            jnp.float32
+        )
 
     def train_step(
         state,
@@ -266,39 +276,14 @@ def create_fsdp_train_step(
             dtype=jnp.float32,
         )
 
-        init_z_loss_sum = jnp.asarray(
-            0.0,
-            dtype=jnp.float32,
-        )
-
-        init_valid_tokens = jnp.asarray(
-            0.0,
-            dtype=jnp.float32,
-        )
-
-        init_bad_label_count = jnp.asarray(
-            0.0,
-            dtype=jnp.float32,
-        )
-
         def scan_fn(
             carry,
             micro_batch,
         ):
-            (
-                grads_accum,
-                loss_sum,
-                z_loss_sum,
-                valid_tokens_sum,
-                bad_label_count_sum,
-            ) = carry
+            grads_accum, loss_sum = carry
 
-            (
-                (loss, aux_metrics),
-                grads,
-            ) = jax.value_and_grad(
-                loss_fn,
-                has_aux=True,
+            loss, grads = jax.value_and_grad(
+                loss_only_fn
             )(
                 params,
                 micro_batch,
@@ -315,43 +300,19 @@ def create_fsdp_train_step(
                 + loss.astype(jnp.float32)
             )
 
-            z_loss_sum = (
-                z_loss_sum
-                + aux_metrics["z_loss"].astype(jnp.float32)
-            )
-
-            valid_tokens_sum = (
-                valid_tokens_sum
-                + aux_metrics["valid_tokens"].astype(jnp.float32)
-            )
-
-            bad_label_count_sum = (
-                bad_label_count_sum
-                + aux_metrics["bad_label_count"].astype(jnp.float32)
-            )
-
             return (
                 grads_accum,
                 loss_sum,
-                z_loss_sum,
-                valid_tokens_sum,
-                bad_label_count_sum,
             ), None
 
         (
             grads_accum,
             loss_sum,
-            z_loss_sum,
-            valid_tokens,
-            bad_label_count,
         ), _ = jax.lax.scan(
             scan_fn,
             (
                 grads_accum,
                 init_loss_sum,
-                init_z_loss_sum,
-                init_valid_tokens,
-                init_bad_label_count,
             ),
             batch,
         )
@@ -368,11 +329,6 @@ def create_fsdp_train_step(
 
         loss = (
             loss_sum
-            / grad_accum_f32
-        ).astype(jnp.float32)
-
-        z_loss = (
-            z_loss_sum
             / grad_accum_f32
         ).astype(jnp.float32)
 
@@ -418,12 +374,9 @@ def create_fsdp_train_step(
             tokens_in_step=tokens_in_step,
         )
 
-        metrics = {
+        metrics: Metrics = {
             "loss": loss.astype(jnp.float32),
             "grad_norm": grad_norm.astype(jnp.float32),
-            "z_loss": z_loss.astype(jnp.float32),
-            "valid_tokens": valid_tokens.astype(jnp.float32),
-            "bad_label_count": bad_label_count.astype(jnp.float32),
         }
 
         return new_state, metrics
@@ -432,5 +385,11 @@ def create_fsdp_train_step(
         train_step,
         in_shardings=(state_sharding, batch_sharding),
         out_shardings=(state_sharding, metrics_sharding),
-        donate_argnums=(0,),
+
+        # Donate both state and stacked GA batch.
+        #
+        # state is replaced every step.
+        # batch is consumed once by the compiled train step and is not
+        # reused by FSDPTrainer after the call.
+        donate_argnums=(0, 1),
     )
