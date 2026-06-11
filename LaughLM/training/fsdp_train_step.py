@@ -34,7 +34,7 @@ import optax
 
 from LaughLM.training.loss import (
     shift_tokens,
-    compute_lm_loss_only_from_hidden,
+    compute_lm_loss_from_hidden,
 )
 from LaughLM.distributed.sharding import (
     constrain_batch,
@@ -241,7 +241,7 @@ def create_fsdp_train_step(
             tie_word_embeddings=tie_word_embeddings,
         )
 
-        loss = compute_lm_loss_only_from_hidden(
+        loss, _ = compute_lm_loss_from_hidden(
             hidden_states=hidden_states,
             targets=targets,
             lm_head_kernel=lm_head_kernel,
