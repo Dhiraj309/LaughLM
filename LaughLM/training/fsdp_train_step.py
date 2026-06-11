@@ -18,10 +18,10 @@ Phase 4 parity fix:
     ignore_index
 - Handle tied and untied LM heads explicitly.
 
-Phase 4F.1 optimization:
+Phase 4F optimization:
 - Keep grad-accum scan carry minimal.
 - Carry only accumulated gradients and scalar loss.
-- Do not carry debug metrics through lax.scan.
+- Use loss-only hidden-state LM path in FSDP hot step.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ import optax
 
 from LaughLM.training.loss import (
     shift_tokens,
-    compute_lm_loss_from_hidden,
+    compute_lm_loss_only_from_hidden,
 )
 from LaughLM.distributed.sharding import (
     constrain_batch,
@@ -241,7 +241,7 @@ def create_fsdp_train_step(
             tie_word_embeddings=tie_word_embeddings,
         )
 
-        loss, _ = compute_lm_loss_from_hidden(
+        loss = compute_lm_loss_only_from_hidden(
             hidden_states=hidden_states,
             targets=targets,
             lm_head_kernel=lm_head_kernel,
@@ -385,11 +385,5 @@ def create_fsdp_train_step(
         train_step,
         in_shardings=(state_sharding, batch_sharding),
         out_shardings=(state_sharding, metrics_sharding),
-
-        # Donate both state and stacked GA batch.
-        #
-        # state is replaced every step.
-        # batch is consumed once by the compiled train step and is not
-        # reused by FSDPTrainer after the call.
-        donate_argnums=(0, 1),
+        donate_argnums=(0,),
     )
