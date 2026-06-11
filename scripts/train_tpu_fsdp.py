@@ -13,7 +13,7 @@ from LaughLM.data.memmap_loader import MemmapDataset
 
 
 DEFAULT_CONFIG = (
-    "configs/v5e_fsdp_proxy_d4_f2_fusedqkv_benchmark.yaml"
+    "configs/v5e_fsdp_proxy_d4_f2_fusedqkv_s1024_ga16_benchmark.yaml"
 )
 
 
