@@ -214,20 +214,30 @@ def shard_data(data: Any, sharding=None):
 def device_put_replicated(x: Any, devices: list[Any]) -> Any:
     """
     Replicate a PyTree across specified devices for PMAP.
-    Compatible with legacy JAX and modern JAX (where jax.device_put_replicated is deprecated/removed).
+    Compatible across all JAX and Flax versions.
     """
     import jax
     import jax.numpy as jnp
 
+    # 1. Standard Flax pmap replication helper
+    try:
+        import flax.jax_utils as jax_utils
+        return jax_utils.replicate(x, devices=devices)
+    except (ImportError, AttributeError, Exception):
+        pass
+
+    # 2. Legacy JAX device_put_replicated (if present and not deprecated)
     try:
         return jax.device_put_replicated(x, devices)
     except (AttributeError, Exception):
-        sharding = jax.sharding.PositionalSharding(devices)
-        return jax.tree_util.tree_map(
-            lambda leaf: jax.device_put(jnp.stack([leaf] * len(devices)), sharding) if leaf is not None else None,
-            x,
-            is_leaf=lambda leaf: leaf is None,
-        )
+        pass
+
+    # 3. Pure JAX stacked leaf replication (works with pmap across all JAX versions)
+    return jax.tree_util.tree_map(
+        lambda leaf: jnp.stack([leaf] * len(devices)) if leaf is not None else None,
+        x,
+        is_leaf=lambda leaf: leaf is None,
+    )
 
 
 # ============================================================
