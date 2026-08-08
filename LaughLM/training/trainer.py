@@ -45,6 +45,7 @@ from LaughLM.training.logger import TrainingLogger
 from LaughLM.training.checkpoint import CheckpointManager
 from LaughLM.training.train_state import TrainState
 
+from LaughLM.profiling.core.profiler import Profiler
 from LaughLM.utils.rng import create_rng
 from LaughLM.utils.prefetch import prefetch_to_device
 
@@ -68,8 +69,10 @@ class Trainer:
         self,
         config: LaughLMConfig,
         resume_dir: str | None = None,
+        profiler: Profiler | None = None,
     ):
         self.config = config
+        self.profiler = profiler or Profiler.from_config(config)
 
         self.num_devices = jax.local_device_count()
         self.devices = jax.local_devices()
@@ -396,119 +399,117 @@ class Trainer:
                 if current_step >= total_steps:
                     break
 
-                step_start = time.perf_counter()
+                with self.profiler.section("step", category="step", metadata={"step": current_step}):
 
-                micro_batches = []
+                    step_start = time.perf_counter()
 
-                # ============================================
-                # Data loading
-                # ============================================
+                    micro_batches = []
 
-                for _ in range(self.grad_accum):
+                    # ============================================
+                    # Data loading
+                    # ============================================
 
-                    batch = next(
-                        data_iter
-                    )
+                    with self.profiler.section("data_wait", category="data"):
+                        for _ in range(self.grad_accum):
 
-                    if not isinstance(
-                        batch,
-                        np.ndarray,
-                    ):
-                        batch = np.asarray(
-                            batch
+                            batch = next(
+                                data_iter
+                            )
+
+                            if not isinstance(
+                                batch,
+                                np.ndarray,
+                            ):
+                                batch = np.asarray(
+                                    batch
+                                )
+
+                            if batch.dtype != np.int32:
+                                batch = batch.astype(
+                                    np.int32
+                                )
+
+                            expected_shape = (
+                                global_batch_size,
+                                cfg.runtime.seq_len,
+                            )
+
+                            if batch.shape != expected_shape:
+                                raise ValueError(
+                                    f"Batch shape mismatch: got {batch.shape}, "
+                                    f"expected {expected_shape}"
+                                )
+
+                            micro_batches.append(
+                                batch
+                            )
+
+                    with self.profiler.section("host_prepare", category="host_prepare"):
+                        batch = np.stack(
+                            micro_batches,
+                            axis=0,
                         )
 
-                    if batch.dtype != np.int32:
-                        batch = batch.astype(
-                            np.int32
+                        batch = batch.reshape(
+                            self.grad_accum,
+                            self.num_devices,
+                            cfg.runtime.micro_batch_per_device,
+                            cfg.runtime.seq_len,
                         )
 
-                    expected_shape = (
-                        global_batch_size,
-                        cfg.runtime.seq_len,
-                    )
-
-                    if batch.shape != expected_shape:
-                        raise ValueError(
-                            f"Batch shape mismatch: got {batch.shape}, "
-                            f"expected {expected_shape}"
+                        batch = np.swapaxes(
+                            batch,
+                            0,
+                            1,
                         )
 
-                    micro_batches.append(
-                        batch
+                    # ============================================
+                    # Device step
+                    # ============================================
+
+                    with self.profiler.section("device_put", category="device_transfer"):
+                        batch_device = jnp.asarray(batch)
+
+                    with self.profiler.section("device_step", category="compute"):
+                        self.state, metrics = self.train_step(
+                            self.state,
+                            batch_device,
+                        )
+
+                        metrics = jax.tree_util.tree_map(
+                            lambda x: x.block_until_ready(),
+                            metrics,
+                        )
+
+                        self.state.step.block_until_ready()
+
+                    step_time = (
+                        time.perf_counter()
+                        - step_start
                     )
 
-                batch = np.stack(
-                    micro_batches,
-                    axis=0,
-                )
+                    metrics_host = jax.tree_util.tree_map(
+                        lambda x: float(
+                            jax.device_get(x[0])
+                        ),
+                        metrics,
+                    )
 
-                batch = batch.reshape(
-                    self.grad_accum,
-                    self.num_devices,
-                    cfg.runtime.micro_batch_per_device,
-                    cfg.runtime.seq_len,
-                )
+                    current_step += 1
+                    host_tokens_seen += tokens_per_step
 
-                batch = np.swapaxes(
-                    batch,
-                    0,
-                    1,
-                )
+                    if self.profiler.should_profile_step(current_step):
+                        self.profiler.record_step(
+                            step=current_step,
+                            duration=step_time,
+                            tokens=tokens_per_step,
+                        )
 
-                # ============================================
-                # Device step
-                # ============================================
+                    lr = _scalar(
+                        self.schedule(current_step)
+                    )
 
-                self.state, metrics = self.train_step(
-                    self.state,
-                    jnp.asarray(batch),
-                )
-
-                metrics = jax.tree_util.tree_map(
-                    lambda x: x.block_until_ready(),
-                    metrics,
-                )
-
-                self.state.step.block_until_ready()
-
-                step_time = (
-                    time.perf_counter()
-                    - step_start
-                )
-
-                metrics_host = jax.tree_util.tree_map(
-                    lambda x: float(
-                        jax.device_get(x[0])
-                    ),
-                    metrics,
-                )
-
-                current_step += 1
-                host_tokens_seen += tokens_per_step
-
-                lr = _scalar(
-                    self.schedule(current_step)
-                )
-
-                self.logger.log_metrics(
-                    step=current_step,
-                    metrics=metrics_host,
-                    lr=lr,
-                    grad_norm=metrics_host.get(
-                        "grad_norm"
-                    ),
-                    tokens_seen=host_tokens_seen,
-                    tokens_in_step=tokens_per_step,
-                    step_time=step_time,
-                )
-
-                if (
-                    current_step
-                    % cfg.runtime.log_interval
-                    == 0
-                ):
-                    self.logger.log_step(
+                    self.logger.log_metrics(
                         step=current_step,
                         metrics=metrics_host,
                         lr=lr,
@@ -520,43 +521,61 @@ class Trainer:
                         step_time=step_time,
                     )
 
-                # ============================================
-                # Checkpoint
-                # ============================================
-
-                if (
-                    current_step > 0
-                    and current_step
-                    % self.checkpoint_interval
-                    == 0
-                ):
-                    self.logger.flush()
-
-                    state_to_save = _unreplicate(
-                        self.state
-                    )
-
-                    metadata = (
-                        self.checkpoints.build_metadata_from_config(
-                            config=self.config,
+                    if (
+                        current_step
+                        % cfg.runtime.log_interval
+                        == 0
+                    ):
+                        self.logger.log_step(
                             step=current_step,
-                            tokens_processed=host_tokens_seen,
-                            num_devices=self.num_devices,
+                            metrics=metrics_host,
+                            lr=lr,
+                            grad_norm=metrics_host.get(
+                                "grad_norm"
+                            ),
+                            tokens_seen=host_tokens_seen,
+                            tokens_in_step=tokens_per_step,
+                            step_time=step_time,
                         )
-                    )
 
-                    self.checkpoints.save(
-                        step=current_step,
-                        state=state_to_save,
-                        metadata=metadata,
-                    )
+                    # ============================================
+                    # Checkpoint
+                    # ============================================
 
-                    print(
-                        f"[trainer] checkpoint saved "
-                        f"step={current_step:,} "
-                        f"tokens={host_tokens_seen:,}",
-                        flush=True,
-                    )
+                    if (
+                        current_step > 0
+                        and current_step
+                        % self.checkpoint_interval
+                        == 0
+                    ):
+                        with self.profiler.section("checkpoint", category="checkpoint"):
+                            self.logger.flush()
+
+                            state_to_save = _unreplicate(
+                                self.state
+                            )
+
+                            metadata = (
+                                self.checkpoints.build_metadata_from_config(
+                                    config=self.config,
+                                    step=current_step,
+                                    tokens_processed=host_tokens_seen,
+                                    num_devices=self.num_devices,
+                                )
+                            )
+
+                            self.checkpoints.save(
+                                step=current_step,
+                                state=state_to_save,
+                                metadata=metadata,
+                            )
+
+                            print(
+                                f"[trainer] checkpoint saved "
+                                f"step={current_step:,} "
+                                f"tokens={host_tokens_seen:,}",
+                                flush=True,
+                            )
 
             # ====================================================
             # Final checkpoint
@@ -599,6 +618,9 @@ class Trainer:
             )
 
         finally:
+            if self.profiler.enabled:
+                self.profiler.finish()
+
             self.logger.close()
 
             if hasattr(self.checkpoints, "close"):
