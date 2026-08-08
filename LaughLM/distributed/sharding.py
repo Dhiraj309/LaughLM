@@ -211,6 +211,25 @@ def shard_data(data: Any, sharding=None):
     )
 
 
+def device_put_replicated(x: Any, devices: list[Any]) -> Any:
+    """
+    Replicate a PyTree across specified devices for PMAP.
+    Compatible with legacy JAX and modern JAX (where jax.device_put_replicated is deprecated/removed).
+    """
+    import jax
+    import jax.numpy as jnp
+
+    try:
+        return jax.device_put_replicated(x, devices)
+    except (AttributeError, Exception):
+        sharding = jax.sharding.PositionalSharding(devices)
+        return jax.tree_util.tree_map(
+            lambda leaf: jax.device_put(jnp.stack([leaf] * len(devices)), sharding) if leaf is not None else None,
+            x,
+            is_leaf=lambda leaf: leaf is None,
+        )
+
+
 # ============================================================
 # Logical axis helpers
 # ============================================================
