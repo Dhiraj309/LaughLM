@@ -39,6 +39,7 @@ from LaughLM.training.scheduler import build_scheduler, compute_total_steps
 from LaughLM.training.fsdp_train_step import create_fsdp_train_step
 from LaughLM.training.logger import TrainingLogger
 from LaughLM.training.checkpoint import CheckpointManager
+from LaughLM.profiling.core.profiler import Profiler
 from LaughLM.utils.rng import create_rng
 from LaughLM.utils.prefetch import prefetch_to_device
 
@@ -64,7 +65,10 @@ class FSDPTrainer:
         self,
         config: LaughLMConfig,
         resume_dir: str | None = None,
+        profiler: Profiler | None = None,
     ):
+        self.config = config
+        self.profiler = profiler or Profiler.from_config(config)
         backend = getattr(
             config.runtime,
             "canonical_backend",
@@ -449,164 +453,148 @@ class FSDPTrainer:
 
         try:
             while host_step < total_steps:
-                total_step_start = time.perf_counter()
+                with self.profiler.section("step", category="step", metadata={"step": host_step}):
+                    total_step_start = time.perf_counter()
 
-                data_wait_time = 0.0
-                host_batch_prepare_time = 0.0
+                    data_wait_time = 0.0
+                    host_batch_prepare_time = 0.0
 
-                micro_batches = []
+                    micro_batches = []
 
-                for _ in range(
-                    self.grad_accum
-                ):
-                    data_wait_start = time.perf_counter()
+                    with self.profiler.section("data_wait", category="data"):
+                        for _ in range(
+                            self.grad_accum
+                        ):
+                            data_wait_start = time.perf_counter()
 
-                    batch = next(
-                        data_iter
-                    )
+                            batch = next(
+                                data_iter
+                            )
 
-                    data_wait_time += (
-                        time.perf_counter()
-                        - data_wait_start
-                    )
+                            data_wait_time += (
+                                time.perf_counter()
+                                - data_wait_start
+                            )
 
-                    host_prepare_start = time.perf_counter()
+                            host_prepare_start = time.perf_counter()
 
-                    if not isinstance(
-                        batch,
-                        np.ndarray,
-                    ):
-                        batch = np.asarray(
-                            batch
+                            if not isinstance(
+                                batch,
+                                np.ndarray,
+                            ):
+                                batch = np.asarray(
+                                    batch
+                                )
+
+                            if batch.dtype != np.int32:
+                                batch = batch.astype(
+                                    np.int32
+                                )
+
+                            expected_shape = (
+                                self.global_batch_size,
+                                cfg.runtime.seq_len,
+                            )
+
+                            if batch.shape != expected_shape:
+                                raise ValueError(
+                                    f"Batch shape mismatch: got {batch.shape}, "
+                                    f"expected {expected_shape}"
+                                )
+
+                            micro_batches.append(
+                                batch
+                            )
+
+                            host_batch_prepare_time += (
+                                time.perf_counter()
+                                - host_prepare_start
+                            )
+
+                    with self.profiler.section("host_prepare", category="host_prepare"):
+                        stack_start = time.perf_counter()
+
+                        batch = np.stack(
+                            micro_batches,
+                            axis=0,
                         )
 
-                    if batch.dtype != np.int32:
-                        batch = batch.astype(
-                            np.int32
+                        host_batch_prepare_time += (
+                            time.perf_counter()
+                            - stack_start
                         )
 
-                    expected_shape = (
-                        self.global_batch_size,
-                        cfg.runtime.seq_len,
-                    )
+                    with self.profiler.section("device_put", category="device_transfer"):
+                        device_put_start = time.perf_counter()
 
-                    if batch.shape != expected_shape:
-                        raise ValueError(
-                            f"Batch shape mismatch: got {batch.shape}, "
-                            f"expected {expected_shape}"
+                        batch = jax.device_put(
+                            batch,
+                            self.input_sharding,
                         )
 
-                    micro_batches.append(
-                        batch
+                        if self.benchmark_mode:
+                            batch.block_until_ready()
+
+                        device_put_time = (
+                            time.perf_counter()
+                            - device_put_start
+                        )
+
+                    with self.profiler.section("device_step", category="compute"):
+                        device_step_start = time.perf_counter()
+
+                        self.state, metrics = self.train_step(
+                            self.state,
+                            batch,
+                        )
+
+                    next_host_step = (
+                        host_step
+                        + 1
                     )
 
-                    host_batch_prepare_time += (
-                        time.perf_counter()
-                        - host_prepare_start
+                    next_host_tokens_seen = (
+                        host_tokens_seen
+                        + tokens_per_step
                     )
 
-                stack_start = time.perf_counter()
+                    should_console_log = (
+                        next_host_step
+                        % cfg.runtime.log_interval
+                        == 0
+                    )
 
-                batch = np.stack(
-                    micro_batches,
-                    axis=0,
-                )
+                    should_metrics_log = (
+                        next_host_step
+                        % self.effective_metrics_interval
+                        == 0
+                    )
 
-                host_batch_prepare_time += (
-                    time.perf_counter()
-                    - stack_start
-                )
+                    should_checkpoint = (
+                        next_host_step > 0
+                        and next_host_step % self.checkpoint_interval == 0
+                    )
 
-                device_put_start = time.perf_counter()
+                    should_final = (
+                        next_host_step
+                        >= total_steps
+                    )
 
-                batch = jax.device_put(
-                    batch,
-                    self.input_sharding,
-                )
+                    should_sync = (
+                        self.benchmark_mode
+                        or should_console_log
+                        or should_metrics_log
+                        or should_checkpoint
+                        or should_final
+                    )
 
-                if self.benchmark_mode:
-                    batch.block_until_ready()
-
-                device_put_time = (
-                    time.perf_counter()
-                    - device_put_start
-                )
-
-                device_step_start = time.perf_counter()
-
-                self.state, metrics = self.train_step(
-                    self.state,
-                    batch,
-                )
-
-                next_host_step = (
-                    host_step
-                    + 1
-                )
-
-                next_host_tokens_seen = (
-                    host_tokens_seen
-                    + tokens_per_step
-                )
-
-                should_console_log = (
-                    next_host_step
-                    % cfg.runtime.log_interval
-                    == 0
-                )
-
-                should_metrics_log = (
-                    next_host_step
-                    % self.effective_metrics_interval
-                    == 0
-                )
-
-                should_checkpoint = (
-                    next_host_step > 0
-                    and next_host_step % self.checkpoint_interval == 0
-                )
-
-                should_final = (
-                    next_host_step
-                    >= total_steps
-                )
-
-                should_sync = (
-                    self.benchmark_mode
-                    or should_console_log
-                    or should_metrics_log
-                    or should_checkpoint
-                    or should_final
-                )
-
-                if should_sync:
-                    if self.benchmark_mode:
+                    if should_sync:
                         metrics = jax.tree_util.tree_map(
                             lambda x: x.block_until_ready(),
                             metrics,
                         )
-
                         self.state.step.block_until_ready()
 
-                    metrics_host = jax.tree_util.tree_map(
-                        lambda x: float(
-                            jax.device_get(
-                                x
-                            )
-                        ),
-                        metrics,
-                    )
-
-                    current_step = _device_scalar_int(
-                        self.state.step
-                    )
-
-                    tokens_seen = _device_scalar_int(
-                        self.state.tokens_processed
-                    )
-
-                    expected_tokens_seen = (
-                        current_step
                         * tokens_per_step
                     )
 

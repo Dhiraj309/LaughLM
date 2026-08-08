@@ -708,6 +708,53 @@ class ParallelismConfig(BaseModel):
 
 
 # ═══════════════════════════════════════════════════════
+# Profiling
+# ═══════════════════════════════════════════════════════
+
+class ProfilingConfig(BaseModel):
+    """
+    Performance profiler configuration.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Whether to enable performance profiling.",
+    )
+
+    level: Literal["off", "summary", "detailed", "developer"] = Field(
+        default="summary",
+        description="Profiling level depth (off, summary, detailed, developer).",
+    )
+
+    output_dir: str = Field(
+        default="profiles",
+        description="Root directory for profile run artifacts.",
+    )
+
+    xprof: bool = Field(
+        default=False,
+        description="Whether to trigger optional XProf / JAX trace collection.",
+    )
+
+    layer_profiling: bool = Field(
+        default=False,
+        description="Whether to profile individual transformer layers.",
+    )
+
+    warmup_steps: int = Field(
+        default=5,
+        ge=0,
+        description="Number of initial warmup steps before profiling active window.",
+    )
+
+    active_steps: int = Field(
+        default=100,
+        ge=1,
+        description="Number of steps to profile after warmup.",
+    )
+
+
+# ═══════════════════════════════════════════════════════
 # Root Config
 # ═══════════════════════════════════════════════════════
 
@@ -744,3 +791,10 @@ class LaughLMConfig(BaseModel):
             "Defaults are safe for single-device and PMAP training."
         ),
     )
+
+    profiling: ProfilingConfig = Field(
+        default_factory=ProfilingConfig,
+        description="Performance profiler configuration.",
+    )
+
+
