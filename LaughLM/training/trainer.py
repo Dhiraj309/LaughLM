@@ -45,6 +45,7 @@ from LaughLM.training.logger import TrainingLogger
 from LaughLM.training.checkpoint import CheckpointManager
 from LaughLM.training.train_state import TrainState
 
+from LaughLM.distributed.sharding import device_put_replicated
 from LaughLM.profiling.core.profiler import Profiler
 from LaughLM.utils.rng import create_rng
 from LaughLM.utils.prefetch import prefetch_to_device
@@ -285,7 +286,7 @@ class Trainer:
         # Replicate state
         # ====================================================
 
-        self.state = jax.device_put_replicated(
+        self.state = device_put_replicated(
             state,
             self.devices,
         )

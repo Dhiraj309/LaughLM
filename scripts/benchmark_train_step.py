@@ -130,7 +130,8 @@ def benchmark(config_path: str, steps: int = 200, warmup: int = 20):
         rng_key=rng.key,
     )
 
-    state = jax.device_put_replicated(state, jax.devices())
+    from LaughLM.distributed.sharding import device_put_replicated
+    state = device_put_replicated(state, jax.devices())
 
     # Build batch in pmap shape: (devices, grad_accum, micro_batch, seq)
     dummy_pmap_batch = jnp.zeros(
