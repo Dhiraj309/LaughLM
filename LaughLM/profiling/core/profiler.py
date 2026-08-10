@@ -222,7 +222,7 @@ class Profiler:
             **extra,
         )
 
-    def _start_xprof_if_requested() -> None:
+    def _start_xprof_if_requested(self) -> None:
         from LaughLM.profiling.integrations.jax import start_jax_trace
         traces_dir = self.session.ensure_output_dirs() / "traces"
         self._jax_trace_active = start_jax_trace(str(traces_dir))
