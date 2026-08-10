@@ -1,0 +1,16 @@
+{
+  "primary_bottleneck": "compute-bound",
+  "confidence": "high",
+  "evidence": "Device step execution consumed 129.2% of step time (2606.18 ms), indicating compute saturation.",
+  "findings": [
+    {
+      "bottleneck": "compute-bound",
+      "category": "device compute",
+      "confidence": "high",
+      "evidence": "Device step execution consumed 129.2% of step time (2606.18 ms), indicating compute saturation.",
+      "pct_of_step": 129.1784417610756,
+      "mean_ms": 2606.1794760947255
+    }
+  ],
+  "total_steps_analyzed": 86
+}

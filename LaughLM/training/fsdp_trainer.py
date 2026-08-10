@@ -32,10 +32,16 @@ from LaughLM.distributed.sharding import (
 )
 from LaughLM.model.llama.model import LlamaForCausalLM
 from LaughLM.model.llama.config_factory import build_llama_config
-from LaughLM.model.parameter_utils import generate_preflight_report, estimate_parameters
+from LaughLM.model.parameter_utils import (
+    generate_preflight_report,
+    estimate_parameters,
+)
 from LaughLM.training.train_state import TrainState
 from LaughLM.training.optimizer import build_optimizer
-from LaughLM.training.scheduler import build_scheduler, compute_total_steps
+from LaughLM.training.scheduler import (
+    build_scheduler,
+    compute_total_steps,
+)
 from LaughLM.training.fsdp_train_step import create_fsdp_train_step
 from LaughLM.training.logger import TrainingLogger
 from LaughLM.training.checkpoint import CheckpointManager
@@ -46,17 +52,13 @@ from LaughLM.utils.prefetch import prefetch_to_device
 
 def _scalar(x):
     return float(
-        jax.device_get(
-            x
-        )
+        jax.device_get(x)
     )
 
 
 def _device_scalar_int(x):
     return int(
-        jax.device_get(
-            x
-        )
+        jax.device_get(x)
     )
 
 
@@ -69,6 +71,7 @@ class FSDPTrainer:
     ):
         self.config = config
         self.profiler = profiler or Profiler.from_config(config)
+
         backend = getattr(
             config.runtime,
             "canonical_backend",
@@ -118,13 +121,9 @@ class FSDPTrainer:
         else:
             self.effective_metrics_interval = self.metrics_interval
 
-        self.mesh = create_mesh(
-            config
-        )
+        self.mesh = create_mesh(config)
 
-        set_current_mesh(
-            self.mesh
-        )
+        set_current_mesh(self.mesh)
 
         self.mesh_axis_sizes = (
             config.spmd.mesh.axis_sizes()
@@ -145,13 +144,9 @@ class FSDPTrainer:
                 "FSDPTrainer requires spmd.mesh fsdp axis > 1."
             )
 
-        enable_gspmd_constraints(
-            True
-        )
+        enable_gspmd_constraints(True)
 
-        self.rng = create_rng(
-            seed=42
-        )
+        self.rng = create_rng(seed=42)
 
         print(
             "[fsdp] runtime:\n"
@@ -213,9 +208,7 @@ class FSDPTrainer:
                     indent=2,
                 )
 
-        llama_config = build_llama_config(
-            config
-        )
+        llama_config = build_llama_config(config)
 
         self.model = LlamaForCausalLM(
             config=llama_config
@@ -262,9 +255,7 @@ class FSDPTrainer:
             loss_config=config.loss,
         )
 
-        param_info = estimate_parameters(
-            config
-        )
+        param_info = estimate_parameters(config)
 
         self.logger = TrainingLogger(
             config,
@@ -315,9 +306,7 @@ class FSDPTrainer:
 
             params = variables["params"]
 
-            opt_state = self.optimizer.init(
-                params
-            )
+            opt_state = self.optimizer.init(params)
 
             return TrainState(
                 params=params,
@@ -362,9 +351,7 @@ class FSDPTrainer:
                 out_shardings=self.state_sharding,
             )
 
-            state = init_jit(
-                self.rng.key
-            )
+            state = init_jit(self.rng.key)
 
         restored = self.checkpoints.restore_latest(
             target_state=state,
@@ -379,8 +366,10 @@ class FSDPTrainer:
             state, restored_step = restored
 
             print(
-                f"[fsdp] resumed from step={_device_scalar_int(state.step):,} "
-                f"tokens={_device_scalar_int(state.tokens_processed):,}",
+                f"[fsdp] resumed from step="
+                f"{_device_scalar_int(state.step):,} "
+                f"tokens="
+                f"{_device_scalar_int(state.tokens_processed):,}",
                 flush=True,
             )
 
@@ -415,7 +404,8 @@ class FSDPTrainer:
         )
 
         print(
-            f"\nTraining for {total_steps:,} optimizer steps with GSPMD/FSDP\n",
+            f"\nTraining for {total_steps:,} optimizer steps "
+            "with GSPMD/FSDP\n",
             flush=True,
         )
 
@@ -444,7 +434,8 @@ class FSDPTrainer:
                 "FSDP token accounting mismatch before training loop.\n"
                 f"  step:                 {host_step:,}\n"
                 f"  tokens_seen:          {host_tokens_seen:,}\n"
-                f"  expected_tokens_seen: {expected_start_tokens:,}\n"
+                f"  expected_tokens_seen: "
+                f"{expected_start_tokens:,}\n"
                 f"  tokens_per_step:      {tokens_per_step:,}"
             )
 
@@ -453,7 +444,11 @@ class FSDPTrainer:
 
         try:
             while host_step < total_steps:
-                with self.profiler.section("step", category="step", metadata={"step": host_step}):
+                with self.profiler.section(
+                    "step",
+                    category="step",
+                    metadata={"step": host_step},
+                ):
                     total_step_start = time.perf_counter()
 
                     data_wait_time = 0.0
@@ -461,35 +456,32 @@ class FSDPTrainer:
 
                     micro_batches = []
 
-                    with self.profiler.section("data_wait", category="data"):
-                        for _ in range(
-                            self.grad_accum
-                        ):
+                    with self.profiler.section(
+                        "data_wait",
+                        category="data",
+                    ):
+                        for _ in range(self.grad_accum):
                             data_wait_start = time.perf_counter()
 
-                            batch = next(
-                                data_iter
-                            )
+                            batch = next(data_iter)
 
                             data_wait_time += (
                                 time.perf_counter()
                                 - data_wait_start
                             )
 
-                            host_prepare_start = time.perf_counter()
+                            host_prepare_start = (
+                                time.perf_counter()
+                            )
 
                             if not isinstance(
                                 batch,
                                 np.ndarray,
                             ):
-                                batch = np.asarray(
-                                    batch
-                                )
+                                batch = np.asarray(batch)
 
                             if batch.dtype != np.int32:
-                                batch = batch.astype(
-                                    np.int32
-                                )
+                                batch = batch.astype(np.int32)
 
                             expected_shape = (
                                 self.global_batch_size,
@@ -498,20 +490,22 @@ class FSDPTrainer:
 
                             if batch.shape != expected_shape:
                                 raise ValueError(
-                                    f"Batch shape mismatch: got {batch.shape}, "
+                                    f"Batch shape mismatch: "
+                                    f"got {batch.shape}, "
                                     f"expected {expected_shape}"
                                 )
 
-                            micro_batches.append(
-                                batch
-                            )
+                            micro_batches.append(batch)
 
                             host_batch_prepare_time += (
                                 time.perf_counter()
                                 - host_prepare_start
                             )
 
-                    with self.profiler.section("host_prepare", category="host_prepare"):
+                    with self.profiler.section(
+                        "host_prepare",
+                        category="host_prepare",
+                    ):
                         stack_start = time.perf_counter()
 
                         batch = np.stack(
@@ -524,7 +518,10 @@ class FSDPTrainer:
                             - stack_start
                         )
 
-                    with self.profiler.section("device_put", category="device_transfer"):
+                    with self.profiler.section(
+                        "device_put",
+                        category="device_transfer",
+                    ):
                         device_put_start = time.perf_counter()
 
                         batch = jax.device_put(
@@ -540,7 +537,10 @@ class FSDPTrainer:
                             - device_put_start
                         )
 
-                    with self.profiler.section("device_step", category="compute"):
+                    with self.profiler.section(
+                        "device_step",
+                        category="compute",
+                    ):
                         device_step_start = time.perf_counter()
 
                         self.state, metrics = self.train_step(
@@ -572,7 +572,9 @@ class FSDPTrainer:
 
                     should_checkpoint = (
                         next_host_step > 0
-                        and next_host_step % self.checkpoint_interval == 0
+                        and next_host_step
+                        % self.checkpoint_interval
+                        == 0
                     )
 
                     should_final = (
@@ -589,172 +591,195 @@ class FSDPTrainer:
                     )
 
                     if should_sync:
+                        # Synchronize metrics and state with the host.
                         metrics = jax.tree_util.tree_map(
                             lambda x: x.block_until_ready(),
                             metrics,
                         )
+
                         self.state.step.block_until_ready()
+                        self.state.tokens_processed.block_until_ready()
 
-                        * tokens_per_step
-                    )
-
-                    if current_step != next_host_step:
-                        raise ValueError(
-                            "FSDP step accounting mismatch.\n"
-                            f"  host expected step: {next_host_step:,}\n"
-                            f"  device step:        {current_step:,}"
+                        current_step = _device_scalar_int(
+                            self.state.step
                         )
 
-                    if tokens_seen != expected_tokens_seen:
-                        raise ValueError(
-                            "FSDP token accounting mismatch.\n"
-                            f"  step:                 {current_step:,}\n"
-                            f"  tokens_seen:          {tokens_seen:,}\n"
-                            f"  expected_tokens_seen: {expected_tokens_seen:,}\n"
-                            f"  tokens_per_step:      {tokens_per_step:,}"
+                        tokens_seen = _device_scalar_int(
+                            self.state.tokens_processed
                         )
 
-                    now = time.perf_counter()
-
-                    interval_steps = max(
-                        1,
-                        current_step - timing_interval_step,
-                    )
-
-                    interval_wall_time = (
-                        now
-                        - timing_interval_start
-                    )
-
-                    avg_step_time = (
-                        interval_wall_time
-                        / interval_steps
-                    )
-
-                    raw_sync_step_time = (
-                        now
-                        - total_step_start
-                    )
-
-                    raw_device_step_time = (
-                        now
-                        - device_step_start
-                    )
-
-                    # ------------------------------------------------
-                    # Important:
-                    #
-                    # Logger computes TOK/S from total_step_time.
-                    # Logger computes main MFU from device_step_time.
-                    #
-                    # In fast mode, sync happens every N steps, so both
-                    # fields must be average per-step times.
-                    #
-                    # Raw sync timings are still persisted separately.
-                    # ------------------------------------------------
-
-                    step_time_for_logger = avg_step_time
-                    device_step_time_for_logger = avg_step_time
-
-                    lr = _scalar(
-                        self.schedule(
+                        expected_tokens_seen = (
                             current_step
+                            * tokens_per_step
                         )
-                    )
 
-                    timing_breakdown = {
-                        "data_wait_time": float(
-                            data_wait_time
-                        ),
-                        "host_batch_prepare_time": float(
-                            host_batch_prepare_time
-                        ),
-                        "device_put_time": float(
-                            device_put_time
-                        ),
+                        metrics_host = jax.tree_util.tree_map(
+                            _scalar,
+                            metrics,
+                        )
 
-                        # Used by logger MFU calculation.
-                        "device_step_time": float(
-                            device_step_time_for_logger
-                        ),
+                        if current_step != next_host_step:
+                            raise ValueError(
+                                "FSDP step accounting mismatch.\n"
+                                f"  host expected step: "
+                                f"{next_host_step:,}\n"
+                                f"  device step:        "
+                                f"{current_step:,}"
+                            )
 
-                        # Used by logger TOK/S calculation.
-                        "total_step_time": float(
-                            step_time_for_logger
-                        ),
+                        if tokens_seen != expected_tokens_seen:
+                            raise ValueError(
+                                "FSDP token accounting mismatch.\n"
+                                f"  step:                 "
+                                f"{current_step:,}\n"
+                                f"  tokens_seen:          "
+                                f"{tokens_seen:,}\n"
+                                f"  expected_tokens_seen: "
+                                f"{expected_tokens_seen:,}\n"
+                                f"  tokens_per_step:      "
+                                f"{tokens_per_step:,}"
+                            )
 
-                        # Debug-only raw sync timings.
-                        "raw_sync_step_time": float(
-                            raw_sync_step_time
-                        ),
-                        "raw_device_step_time": float(
-                            raw_device_step_time
-                        ),
-                        "interval_steps": float(
-                            interval_steps
-                        ),
-                        "interval_wall_time": float(
+                        now = time.perf_counter()
+
+                        interval_steps = max(
+                            1,
+                            current_step
+                            - timing_interval_step,
+                        )
+
+                        interval_wall_time = (
+                            now
+                            - timing_interval_start
+                        )
+
+                        avg_step_time = (
                             interval_wall_time
-                        ),
-                        "micro_global_batch": float(
-                            self.global_batch_size
-                        ),
-                        "effective_global_batch": float(
-                            effective_global_batch
-                        ),
-                    }
-
-                    if (
-                        should_metrics_log
-                        or should_console_log
-                        or should_checkpoint
-                        or should_final
-                    ):
-                        self.logger.log_metrics(
-                            step=current_step,
-                            metrics=metrics_host,
-                            lr=lr,
-                            grad_norm=metrics_host.get(
-                                "grad_norm"
-                            ),
-                            tokens_seen=tokens_seen,
-                            tokens_in_step=tokens_per_step,
-                            step_time=step_time_for_logger,
-                            timing_breakdown=timing_breakdown,
+                            / interval_steps
                         )
 
-                    if should_console_log:
-                        self.logger.log_step(
-                            step=current_step,
-                            metrics=metrics_host,
-                            lr=lr,
-                            grad_norm=metrics_host.get(
-                                "grad_norm"
-                            ),
-                            tokens_seen=tokens_seen,
-                            tokens_in_step=tokens_per_step,
-                            step_time=step_time_for_logger,
-                            timing_breakdown=timing_breakdown,
+                        raw_sync_step_time = (
+                            now
+                            - total_step_start
                         )
 
-                    host_step = current_step
-                    host_tokens_seen = tokens_seen
+                        raw_device_step_time = (
+                            now
+                            - device_step_start
+                        )
 
-                    timing_interval_start = now
-                    timing_interval_step = current_step
+                        # ------------------------------------------------
+                        # Important:
+                        #
+                        # Logger computes TOK/S from total_step_time.
+                        # Logger computes main MFU from device_step_time.
+                        #
+                        # In fast mode, sync happens every N steps, so both
+                        # fields must be average per-step times.
+                        #
+                        # Raw sync timings are still persisted separately.
+                        # ------------------------------------------------
 
-                else:
-                    host_step = next_host_step
-                    host_tokens_seen = next_host_tokens_seen
+                        step_time_for_logger = avg_step_time
+                        device_step_time_for_logger = avg_step_time
+
+                        lr = _scalar(
+                            self.schedule(
+                                current_step
+                            )
+                        )
+
+                        timing_breakdown = {
+                            "data_wait_time": float(
+                                data_wait_time
+                            ),
+                            "host_batch_prepare_time": float(
+                                host_batch_prepare_time
+                            ),
+                            "device_put_time": float(
+                                device_put_time
+                            ),
+                            "device_step_time": float(
+                                device_step_time_for_logger
+                            ),
+                            "total_step_time": float(
+                                step_time_for_logger
+                            ),
+                            "raw_sync_step_time": float(
+                                raw_sync_step_time
+                            ),
+                            "raw_device_step_time": float(
+                                raw_device_step_time
+                            ),
+                            "interval_steps": float(
+                                interval_steps
+                            ),
+                            "interval_wall_time": float(
+                                interval_wall_time
+                            ),
+                            "micro_global_batch": float(
+                                self.global_batch_size
+                            ),
+                            "effective_global_batch": float(
+                                effective_global_batch
+                            ),
+                        }
+
+                        if (
+                            should_metrics_log
+                            or should_console_log
+                            or should_checkpoint
+                            or should_final
+                        ):
+                            self.logger.log_metrics(
+                                step=current_step,
+                                metrics=metrics_host,
+                                lr=lr,
+                                grad_norm=metrics_host.get(
+                                    "grad_norm"
+                                ),
+                                tokens_seen=tokens_seen,
+                                tokens_in_step=tokens_per_step,
+                                step_time=step_time_for_logger,
+                                timing_breakdown=timing_breakdown,
+                            )
+
+                        if should_console_log:
+                            self.logger.log_step(
+                                step=current_step,
+                                metrics=metrics_host,
+                                lr=lr,
+                                grad_norm=metrics_host.get(
+                                    "grad_norm"
+                                ),
+                                tokens_seen=tokens_seen,
+                                tokens_in_step=tokens_per_step,
+                                step_time=step_time_for_logger,
+                                timing_breakdown=timing_breakdown,
+                            )
+
+                        host_step = current_step
+                        host_tokens_seen = tokens_seen
+
+                        timing_interval_start = now
+                        timing_interval_step = current_step
+
+                    else:
+                        # No synchronization this step. We already know
+                        # the expected host-side state transition.
+                        host_step = next_host_step
+                        host_tokens_seen = next_host_tokens_seen
 
                 if should_checkpoint:
                     self.logger.flush()
 
-                    metadata = self.checkpoints.build_metadata_from_config(
-                        config=cfg,
-                        step=host_step,
-                        tokens_processed=host_tokens_seen,
-                        num_devices=self.data_replicas,
+                    metadata = (
+                        self.checkpoints.build_metadata_from_config(
+                            config=cfg,
+                            step=host_step,
+                            tokens_processed=host_tokens_seen,
+                            num_devices=self.data_replicas,
+                        )
                     )
 
                     self.checkpoints.save(
@@ -764,7 +789,8 @@ class FSDPTrainer:
                     )
 
                     print(
-                        f"[fsdp] checkpoint saved step={host_step:,}",
+                        f"[fsdp] checkpoint saved "
+                        f"step={host_step:,}",
                         flush=True,
                     )
 
@@ -775,11 +801,13 @@ class FSDPTrainer:
 
             self.logger.flush()
 
-            metadata = self.checkpoints.build_metadata_from_config(
-                config=cfg,
-                step=host_step,
-                tokens_processed=host_tokens_seen,
-                num_devices=self.data_replicas,
+            metadata = (
+                self.checkpoints.build_metadata_from_config(
+                    config=cfg,
+                    step=host_step,
+                    tokens_processed=host_tokens_seen,
+                    num_devices=self.data_replicas,
+                )
             )
 
             self.checkpoints.save(
@@ -803,6 +831,5 @@ class FSDPTrainer:
                 "close",
             ):
                 self.checkpoints.close()
-
             else:
                 self.checkpoints.wait()

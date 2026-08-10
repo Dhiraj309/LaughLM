@@ -33,20 +33,13 @@ def tpu_profile(enabled=True, trace_dir="tpu_traces", steps_hint=20):
     """
     Lightweight TPU/GPU profiler.
 
-    Usage:
-        with tpu_profile(enabled=True, steps_hint=20):
-            for step in range(20):
-                train_step(...)
+    Native JAX/XProf tracing is disabled because the current TPU
+    runtime reports an incompatible profiler plugin ABI:
 
-    The trace captures XLA compilation, memory allocation, collective
-    operations, and kernel execution. Download and view in TensorBoard
-    or Chrome trace viewer (chrome://tracing).
+        PLUGIN_Profiler_Api size: expected 80, got 104
 
-    Parameters
-    ----------
-    enabled    : bool — skip profiling if False (zero overhead)
-    trace_dir  : str — base directory for trace output
-    steps_hint : int — expected number of profiled steps (for logging)
+    The context manager remains available so existing callers do not
+    break, but it does not invoke jax.profiler.start_trace().
     """
 
     if not enabled:
@@ -55,14 +48,19 @@ def tpu_profile(enabled=True, trace_dir="tpu_traces", steps_hint=20):
 
     path = _trace_dir(trace_dir)
 
-    # Save metadata for later analysis
     metadata = {
         "backend": jax.default_backend(),
         "devices": len(jax.devices()),
-        "device_type": str(jax.devices()[0].device_kind) if jax.devices() else "unknown",
+        "device_type": (
+            str(jax.devices()[0].device_kind)
+            if jax.devices()
+            else "unknown"
+        ),
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "steps_hint": steps_hint,
+        "xprof_enabled": False,
     }
+
     with open(path / "profile_metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
@@ -71,21 +69,18 @@ def tpu_profile(enabled=True, trace_dir="tpu_traces", steps_hint=20):
     print(f"  Devices: {metadata['devices']} × {metadata['device_type']}")
     print(f"  Trace directory: {path}")
     print(f"  Profiling window: ~{steps_hint} steps")
+    print("  XProf/JAX trace: DISABLED")
 
     try:
-        jax.profiler.start_trace(str(path))
         yield
     finally:
-        jax.profiler.stop_trace()
-
-        print(f"\n[Profiler] Trace saved → {path}")
-        print("  View with: tensorboard --logdir", path)
+        print("\n[Profiler] XProf trace disabled")
 
 
 @contextmanager
 def measure_compile_time(label=""):
     """Measure XLA compilation time for a code block.
-    
+
     Usage:
         with measure_compile_time("first train step"):
             train_step(state, batch)  # triggers compilation

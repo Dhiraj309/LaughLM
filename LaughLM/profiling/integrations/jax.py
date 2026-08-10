@@ -13,29 +13,29 @@ from typing import Optional
 
 def start_jax_trace(log_dir: str) -> bool:
     """
-    Start JAX profiler trace collection (XProf / Perfetto).
-    Returns True if trace started successfully, False otherwise.
+    Start JAX profiler trace collection.
+
+    Temporarily disabled because the current TPU runtime has an
+    incompatible native profiler plugin:
+
+        PLUGIN_Profiler_Api size: expected 80, got 104
+
+    Returns False without touching the native profiler runtime.
     """
-    try:
-        import jax
-        jax.profiler.start_trace(log_dir)
-        return True
-    except Exception as e:
-        print(f"[profiler] Info: JAX trace start bypassed ({e})", flush=True)
-        return False
+    print(
+        "[profiler] JAX/XProf trace disabled for this TPU runtime",
+        flush=True,
+    )
+    return False
 
 
 def stop_jax_trace() -> bool:
     """
-    Stop active JAX profiler trace collection.
+    Stop JAX profiler trace collection.
+
+    No-op while JAX/XProf tracing is disabled.
     """
-    try:
-        import jax
-        jax.profiler.stop_trace()
-        return True
-    except Exception as e:
-        print(f"[profiler] Info: JAX trace stop bypassed ({e})", flush=True)
-        return False
+    return False
 
 
 @contextlib.contextmanager

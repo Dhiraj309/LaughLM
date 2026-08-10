@@ -1,0 +1,12 @@
+{
+  "run_id": "run_20260810_033644",
+  "primary_bottleneck": "compute-bound",
+  "confidence": "high",
+  "recommendations": [
+    {
+      "bottleneck": "compute-bound",
+      "recommendation": "Workload is GPU/TPU compute bound. Consider tuning rematerialization policy (e.g. dots_saveable), leveraging bfloat16/float16 compute precision, or enabling fused QKV / SwiGLU operations.",
+      "rationale": "Device step execution consumed 129.2% of step time (2606.18 ms), indicating compute saturation."
+    }
+  ]
+}
