@@ -64,7 +64,12 @@ from LaughLM.utils.sharding_factory import apply_rematerialization, get_remat_po
 class ScannedDecoderLayer(nn.Module):
     config: LlamaConfig
 
-    @nn.compact
+    def setup(self):
+        self.layer = LlamaDecoderLayer(
+            config=self.config,
+            name="block",
+        )
+
     def __call__(
         self,
         hidden_states,
@@ -73,20 +78,7 @@ class ScannedDecoderLayer(nn.Module):
         kv_cache,
         mode,
     ):
-        layer = LlamaDecoderLayer(
-            config=self.config,
-            name="block",
-        )
-        
-        # Apply rematerialization if configured
-        if getattr(self.config.optimizations, "remat_enabled", False):
-            policy = get_remat_policy(self.config) # Note: needs LaughLMConfig, but we only have LlamaConfig. 
-            # This is a problem. LlamaConfig doesn't have the full LaughLMConfig.
-            # I must ensure LlamaConfig has what it needs.
-            # Wait, `LlamaConfig` only has `optimizations`.
-            pass
-
-        return layer(
+        return self.layer(
             hidden_states=hidden_states,
             positions=positions,
             attention_mask=attention_mask,
@@ -138,8 +130,14 @@ class LlamaModel(nn.Module):
                     "params": True,
                     "dropout": True,
                 },
-                in_axes=nn.broadcast,
-                out_axes=nn.broadcast,
+                in_axes=(
+                    0,  # hidden_states
+                    0,  # positions
+                    0,  # attention_mask
+                    0,  # kv_cache
+                    0,  # mode
+                ),
+                out_axes=0,
                 length=config.num_hidden_layers,
                 metadata_params={
                     "partition_name": "layers",
@@ -179,13 +177,7 @@ class LlamaModel(nn.Module):
         mode: str = "train",
     ) -> tuple[jnp.ndarray, Optional[list[KVCache]]]:
 
-        if getattr(
-            self.config,
-            "scan_layers",
-            False,
-        )
-        and use_cache
-        ):
+        if self.config.scan_layers and use_cache:
             raise ValueError(
                 "scan_layers with KV cache is not yet supported"
             )
@@ -267,11 +259,11 @@ class LlamaModel(nn.Module):
             False,
         ):
             hidden_states, _ = self.layers(
-                hidden_states=hidden_states,
-                positions=position_ids,
-                attention_mask=attention_mask,
-                kv_cache=None,
-                mode=mode,
+                hidden_states,
+                position_ids,
+                attention_mask,
+                None,
+                mode,
             )
 
             hidden_states = constrain_hidden_states(
