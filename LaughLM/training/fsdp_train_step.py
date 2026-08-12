@@ -305,6 +305,9 @@ def create_fsdp_train_step(
                 loss_sum,
             ), None
 
+        # ------------------------------------------------
+        # 1. Gradient Accumulation
+        # ------------------------------------------------
         (
             grads_accum,
             loss_sum,
@@ -326,6 +329,15 @@ def create_fsdp_train_step(
             lambda g: g / grad_accum_f32,
             grads_accum,
         )
+
+        # ------------------------------------------------
+        # 2. Collective Reduction (Implicit in JAX array operations)
+        # ------------------------------------------------
+
+        # ------------------------------------------------
+        # 3. Gradient Clipping
+        #    Applied post-reduction, pre-optimizer update.
+        # ------------------------------------------------
 
         loss = (
             loss_sum
@@ -350,6 +362,9 @@ def create_fsdp_train_step(
             grads,
         )
 
+        # ------------------------------------------------
+        # 4. Optimizer Update
+        # ------------------------------------------------
         updates, new_opt_state = optimizer.update(
             grads,
             state.opt_state,

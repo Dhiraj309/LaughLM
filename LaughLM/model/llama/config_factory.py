@@ -126,4 +126,6 @@ def build_llama_config(config: LaughLMConfig) -> LlamaConfig:
         param_dtype=param_dtype,
         compute_dtype=compute_dtype,
         output_dtype=output_dtype,
+        
+        optimizations=config.optimizations,
     )

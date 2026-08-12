@@ -1373,12 +1373,26 @@ def compute_lm_loss_only_from_hidden(
     z_loss: float = 1e-4,
     ignore_index: int = -100,
     remat_logits_chunks: bool = True,
+    kernel_backend: str = "native",
 ) -> jnp.ndarray:
     """
     Loss-only LM training entrypoint.
 
     Use this in hot training paths that only need scalar loss for gradients.
     """
+
+    if kernel_backend == "tokamax":
+        from LaughLM.utils.fused_ops import fused_linear_softmax_cross_entropy
+        loss, _ = fused_linear_softmax_cross_entropy(
+            hidden_states=hidden_states,
+            targets=targets,
+            weight=lm_head_kernel,
+            bias=lm_head_bias,
+            z_loss=z_loss,
+            ignore_index=ignore_index,
+            kernel_backend="tokamax",
+        )
+        return loss
 
     if chunked_logits:
         return chunked_lm_loss_only_from_hidden(
@@ -1420,10 +1434,28 @@ def compute_lm_loss_from_hidden(
     z_loss: float = 1e-4,
     ignore_index: int = -100,
     remat_logits_chunks: bool = True,
+    kernel_backend: str = "native",
 ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
     """
     Main LM loss entrypoint for full-metrics training/debug paths.
     """
+
+    if kernel_backend == "tokamax":
+        from LaughLM.utils.fused_ops import fused_linear_softmax_cross_entropy
+        loss, z_loss_val = fused_linear_softmax_cross_entropy(
+            hidden_states=hidden_states,
+            targets=targets,
+            weight=lm_head_kernel,
+            bias=lm_head_bias,
+            z_loss=z_loss,
+            ignore_index=ignore_index,
+            kernel_backend="tokamax",
+        )
+        metrics = {
+            "loss": loss,
+            "z_loss": z_loss_val,
+        }
+        return loss, metrics
 
     if chunked_logits:
         return chunked_lm_loss_from_hidden(

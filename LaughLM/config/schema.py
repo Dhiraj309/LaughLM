@@ -755,6 +755,51 @@ class ProfilingConfig(BaseModel):
 
 
 # ═══════════════════════════════════════════════════════
+# Optimizations
+# ═══════════════════════════════════════════════════════
+
+class OptimizationsConfig(BaseModel):
+    """
+    Experimental & TPU v5e optimization blueprint flags.
+    Defaults preserve baseline native paths.
+    """
+
+    kernel_backend: Literal[
+        "native",
+        "tokamax",
+    ] = Field(
+        default="native",
+        description="Kernel fusion engine. 'native' uses standard JAX, 'tokamax' uses Tokamax fused kernels.",
+    )
+
+    data_backend: Literal[
+        "native",
+        "grain",
+    ] = Field(
+        default="native",
+        description="Data loader engine. 'native' uses MemmapDataset, 'grain' uses Grain DataLoader.",
+    )
+
+    sharding_strategy: Literal[
+        "fsdp",
+        "maxtext_3d",
+    ] = Field(
+        default="fsdp",
+        description="Sharding & mesh layout. 'fsdp' uses standard FSDP, 'maxtext_3d' uses MaxText 3D & Sequence Parallelism.",
+    )
+
+    optimizer_mu_bf16: bool = Field(
+        default=False,
+        description="When True, stores Adam first moment (mu) in bfloat16 to save ~33% optimizer memory.",
+    )
+
+    async_checkpointing: bool = Field(
+        default=False,
+        description="When True, enables Orbax async checkpointing on background host threads.",
+    )
+
+
+# ═══════════════════════════════════════════════════════
 # Root Config
 # ═══════════════════════════════════════════════════════
 
@@ -796,5 +841,11 @@ class LaughLMConfig(BaseModel):
         default_factory=ProfilingConfig,
         description="Performance profiler configuration.",
     )
+
+    optimizations: OptimizationsConfig = Field(
+        default_factory=OptimizationsConfig,
+        description="TPU v5e optimization blueprint options.",
+    )
+
 
 

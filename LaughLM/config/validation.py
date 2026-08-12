@@ -25,6 +25,39 @@ def validate_config(config: LaughLMConfig) -> None:
     _validate_moe_requirements(config)
     _validate_scheduler_horizon(config)
     _validate_wsd_scheduler(config)
+    _validate_optimizations(config)
+
+# ------------------------------------------------------------
+# Shared helpers
+# ------------------------------------------------------------
+
+def _validate_optimizations(config: LaughLMConfig) -> None:
+    """Validate optimization options."""
+    opts = getattr(config, "optimizations", None)
+    if opts is None:
+        return
+
+    valid_kernels = {"native", "tokamax"}
+    if opts.kernel_backend not in valid_kernels:
+        raise ValueError(
+            f"Invalid optimizations.kernel_backend: {opts.kernel_backend!r}. "
+            f"Expected one of {sorted(valid_kernels)}"
+        )
+
+    valid_data = {"native", "grain"}
+    if opts.data_backend not in valid_data:
+        raise ValueError(
+            f"Invalid optimizations.data_backend: {opts.data_backend!r}. "
+            f"Expected one of {sorted(valid_data)}"
+        )
+
+    valid_sharding = {"fsdp", "maxtext_3d"}
+    if opts.sharding_strategy not in valid_sharding:
+        raise ValueError(
+            f"Invalid optimizations.sharding_strategy: {opts.sharding_strategy!r}. "
+            f"Expected one of {sorted(valid_sharding)}"
+        )
+
 
 # ------------------------------------------------------------
 # Shared helpers

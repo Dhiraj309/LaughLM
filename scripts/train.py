@@ -4,6 +4,7 @@ from huggingface_hub import hf_hub_download
 import jax
 
 from LaughLM.config.loader import load_config
+from LaughLM.utils.data_factory import create_dataloader
 from LaughLM.data.memmap_loader import MemmapDataset
 from LaughLM.training.trainer import Trainer
 from LaughLM.training.fsdp_trainer import FSDPTrainer
@@ -141,9 +142,9 @@ def main():
         for f in files
     ]
 
-    dataset = MemmapDataset(
+    dataset = create_dataloader(
+        config=config,
         paths=paths,
-        seq_len=config.runtime.seq_len,
         global_batch_size=(
             config.runtime.micro_batch_per_device
             * data_replicas

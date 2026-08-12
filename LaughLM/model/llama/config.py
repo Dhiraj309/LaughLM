@@ -115,6 +115,9 @@ class LlamaConfig:
     compute_dtype: jnp.dtype = jnp.bfloat16
 
     output_dtype: jnp.dtype = jnp.float32
+    
+    optimizations: Optional[object] = None
+
 
     # =========================================================
     # Validation

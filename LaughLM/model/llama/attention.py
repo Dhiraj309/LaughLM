@@ -544,6 +544,8 @@ def _xla_sdpa(
     )
 
 
+from LaughLM.utils.fused_ops import fused_attention
+
 def _attention(
     query_states: jnp.ndarray,
     key_states: jnp.ndarray,
@@ -552,6 +554,17 @@ def _attention(
     config: LlamaConfig,
     mode: str,
 ) -> jnp.ndarray:
+    kernel_backend = getattr(config.optimizations, "kernel_backend", "native") if config.optimizations else "native"
+    if kernel_backend == "tokamax":
+        return fused_attention(
+            query_states,
+            key_states,
+            value_states,
+            mask=attention_mask,
+            scale=config.head_dim ** -0.5,
+            kernel_backend="tokamax",
+        )
+
     backend = _attention_impl_from_config(
         config=config,
         mode=mode,
