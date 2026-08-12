@@ -120,13 +120,11 @@ spmd:
     vocab: null
     sequence: null
     layers: null
-
-
-remat:
-  policy: dots_saveable
-  granularity: block
-  scan_layers: false
-  prevent_cse: false
+  remat:
+    policy: dots_saveable
+    granularity: block
+    scan_layers: true
+    prevent_cse: false
 
 
 dtype:
