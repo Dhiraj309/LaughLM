@@ -42,7 +42,7 @@ from LaughLM.training.train_step import (
 )
 
 from LaughLM.training.logger import TrainingLogger
-from LaughLM.training.checkpoint import CheckpointManager
+from LaughLM.utils.checkpoint_factory import create_checkpoint_manager
 from LaughLM.training.train_state import TrainState
 
 from LaughLM.distributed.sharding import device_put_replicated
@@ -143,7 +143,8 @@ class Trainer:
             or config.runtime.checkpoint_dir
         )
 
-        self.checkpoints = CheckpointManager(
+        self.checkpoints = create_checkpoint_manager(
+            config,
             ckpt_dir,
             max_to_keep=config.runtime.checkpoint_max_to_keep,
         )
