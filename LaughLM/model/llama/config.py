@@ -107,6 +107,16 @@ class LlamaConfig:
     use_cache: bool = True
 
     # =========================================================
+    # Rematerialization
+    # =========================================================
+
+    scan_layers: bool = False
+
+    remat_policy: Optional[str] = None
+
+    prevent_cse: bool = False
+
+    # =========================================================
     # DTypes
     # =========================================================
 

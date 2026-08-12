@@ -120,6 +120,14 @@ def build_llama_config(config: LaughLMConfig) -> LlamaConfig:
         pad_token_id=PHI35_PAD_TOKEN_ID,
 
         # ====================================================
+        # Rematerialization
+        # ====================================================
+        
+        scan_layers=config.spmd.remat.scan_layers,
+        remat_policy=config.spmd.remat.policy,
+        prevent_cse=config.spmd.remat.prevent_cse,
+
+        # ====================================================
         # DTypes
         # ====================================================
 

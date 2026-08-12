@@ -179,13 +179,12 @@ class LlamaModel(nn.Module):
         mode: str = "train",
     ) -> tuple[jnp.ndarray, Optional[list[KVCache]]]:
 
-        if (
-            getattr(
-                self.config,
-                "scan_layers",
-                False,
-            )
-            and use_cache
+        if getattr(
+            self.config,
+            "scan_layers",
+            False,
+        )
+        and use_cache
         ):
             raise ValueError(
                 "scan_layers with KV cache is not yet supported"
