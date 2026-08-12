@@ -34,6 +34,11 @@ except ImportError:
     _TOKAMAX_AVAILABLE = False
 
 
+_TOKAMAX_SWIGLU_FAILED = False
+_TOKAMAX_CROSS_ENTROPY_FAILED = False
+_TOKAMAX_ATTENTION_FAILED = False
+
+
 def is_tokamax_available() -> bool:
     """Return whether Tokamax is installed and importable."""
     return _TOKAMAX_AVAILABLE
@@ -62,7 +67,8 @@ def fused_linear_softmax_cross_entropy(
     Returns:
         (loss, z_loss_value)
     """
-    if kernel_backend == "tokamax":
+    global _TOKAMAX_CROSS_ENTROPY_FAILED
+    if kernel_backend == "tokamax" and not _TOKAMAX_CROSS_ENTROPY_FAILED:
         if not _TOKAMAX_AVAILABLE:
             logger.warning(
                 "[fused_ops] kernel_backend='tokamax' requested, but Tokamax is not installed. "
@@ -86,9 +92,10 @@ def fused_linear_softmax_cross_entropy(
                     )
                     return loss, jnp.array(0.0, dtype=loss.dtype)
             except Exception as e:
+                _TOKAMAX_CROSS_ENTROPY_FAILED = True
                 logger.warning(
                     f"[fused_ops] Tokamax fused cross-entropy execution failed ({e}). "
-                    "Falling back to native implementation."
+                    "Falling back to native implementation. (Will not attempt again.)"
                 )
 
     # ------------------------------------------------------------
@@ -137,7 +144,8 @@ def fused_swiglu(
 
     Computes silu(gate) * up in a single MXU pass when kernel_backend == "tokamax".
     """
-    if kernel_backend == "tokamax":
+    global _TOKAMAX_SWIGLU_FAILED
+    if kernel_backend == "tokamax" and not _TOKAMAX_SWIGLU_FAILED:
         if not _TOKAMAX_AVAILABLE:
             logger.warning(
                 "[fused_ops] kernel_backend='tokamax' requested, but Tokamax is not installed. "
@@ -150,9 +158,10 @@ def fused_swiglu(
                 elif hasattr(tokamax, "swiglu"):
                     return tokamax.swiglu(gate, up)
             except Exception as e:
+                _TOKAMAX_SWIGLU_FAILED = True
                 logger.warning(
                     f"[fused_ops] Tokamax fused SwiGLU execution failed ({e}). "
-                    "Falling back to native SwiGLU."
+                    "Falling back to native SwiGLU. (Will not attempt again.)"
                 )
 
     # ------------------------------------------------------------
@@ -180,7 +189,8 @@ def fused_attention(
     Uses tokamax.ops.attention (Pallas Mosaic backend) when kernel_backend == "tokamax"
     for long sequences (T >= 8192).
     """
-    if kernel_backend == "tokamax":
+    global _TOKAMAX_ATTENTION_FAILED
+    if kernel_backend == "tokamax" and not _TOKAMAX_ATTENTION_FAILED:
         if not _TOKAMAX_AVAILABLE:
             logger.warning(
                 "[fused_ops] kernel_backend='tokamax' requested, but Tokamax is not installed. "
@@ -197,9 +207,10 @@ def fused_attention(
                         query, key, value, mask=mask, bias=bias, scale=scale
                     )
             except Exception as e:
+                _TOKAMAX_ATTENTION_FAILED = True
                 logger.warning(
                     f"[fused_ops] Tokamax fused attention execution failed ({e}). "
-                    "Falling back to native dot_product_attention."
+                    "Falling back to native dot_product_attention. (Will not attempt again.)"
                 )
 
     # ------------------------------------------------------------

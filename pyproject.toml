@@ -26,6 +26,8 @@ dependencies = [
     "orbax-checkpoint>=0.4.0",
     "huggingface_hub>=0.16",
     "transformers>=4.30",
+    "tokamax",
+    "grain-ml",
 ]
 
 [project.optional-dependencies]
