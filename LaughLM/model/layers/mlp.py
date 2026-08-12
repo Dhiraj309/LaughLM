@@ -76,7 +76,18 @@ class SwiGLU(nn.Module):
         proj = nn.Dense(2 * self.ffn_dim, use_bias=self.use_bias,
                         dtype=compute_dtype, param_dtype=param_dtype)(x)
         gate, value = jnp.split(proj, 2, axis=-1)
-        x = swish(gate) * value
+
+        kernel_backend = getattr(
+            getattr(self.config, "optimizations", None),
+            "kernel_backend",
+            "native",
+        )
+        if kernel_backend == "tokamax":
+            from LaughLM.utils.fused_ops import fused_swiglu
+            x = fused_swiglu(gate, value, kernel_backend="tokamax")
+        else:
+            x = swish(gate) * value
+
         x = nn.Dense(self.d_model, use_bias=self.use_bias,
                      dtype=compute_dtype, param_dtype=param_dtype)(x)
         return x

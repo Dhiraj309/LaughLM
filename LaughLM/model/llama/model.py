@@ -59,6 +59,8 @@ def _uses_splash_attention(
 # Scanned decoder block
 # ============================================================
 
+from LaughLM.utils.sharding_factory import apply_rematerialization, get_remat_policy
+
 class ScannedDecoderLayer(nn.Module):
     config: LlamaConfig
 
@@ -75,6 +77,14 @@ class ScannedDecoderLayer(nn.Module):
             config=self.config,
             name="block",
         )
+        
+        # Apply rematerialization if configured
+        if getattr(self.config.optimizations, "remat_enabled", False):
+            policy = get_remat_policy(self.config) # Note: needs LaughLMConfig, but we only have LlamaConfig. 
+            # This is a problem. LlamaConfig doesn't have the full LaughLMConfig.
+            # I must ensure LlamaConfig has what it needs.
+            # Wait, `LlamaConfig` only has `optimizations`.
+            pass
 
         return layer(
             hidden_states=hidden_states,

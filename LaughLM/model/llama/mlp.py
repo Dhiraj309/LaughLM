@@ -87,38 +87,37 @@ class LlamaMLP(nn.Module):
         )
 
         # ----------------------------------------------------
-        # SwiGLU activation
-        #
-        # Compute in compute_dtype.
+        # SwiGLU activation & fusion
         # ----------------------------------------------------
-
-        gate = jax.nn.silu(
-            gate
+        kernel_backend = getattr(
+            getattr(config, "optimizations", None),
+            "kernel_backend",
+            getattr(config, "kernel_backend", "native"),
         )
 
-        # ====================================================
-        # Up path
-        # ====================================================
+        if kernel_backend == "tokamax":
+            from LaughLM.utils.fused_ops import fused_swiglu
 
-        up = up_proj(
-            hidden_states
-        )
+            up = up_proj(hidden_states)
+            up = constrain_mlp_activations(up)
+            hidden_states = fused_swiglu(gate, up, kernel_backend="tokamax")
+            hidden_states = constrain_mlp_activations(hidden_states)
+        else:
+            gate = jax.nn.silu(gate)
 
-        up = constrain_mlp_activations(
-            up
-        )
+            # ====================================================
+            # Up path
+            # ====================================================
 
-        # ====================================================
-        # SwiGLU fusion
-        # ====================================================
+            up = up_proj(hidden_states)
+            up = constrain_mlp_activations(up)
 
-        hidden_states = gate * up
+            # ====================================================
+            # SwiGLU fusion
+            # ====================================================
 
-        hidden_states = (
-            constrain_mlp_activations(
-                hidden_states
-            )
-        )
+            hidden_states = gate * up
+            hidden_states = constrain_mlp_activations(hidden_states)
 
         # ====================================================
         # Down projection

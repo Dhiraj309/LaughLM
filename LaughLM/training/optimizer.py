@@ -98,6 +98,9 @@ def get_weight_decay_mask(params: Any) -> Any:
 # ────────────────────────────────────────────────────────────────
 
 def build_adamw(config, schedule):
+    # Determine mu_dtype based on config
+    mu_bf16 = getattr(config.optimizations, "optimizer_mu_bf16", False)
+    mu_dtype = jnp.bfloat16 if mu_bf16 else jnp.float32
 
     return optax.chain(
 
@@ -114,9 +117,7 @@ def build_adamw(config, schedule):
             # Prevents bf16→fp32 dtype mutation
             # after first optimizer step.
             #
-            mu_dtype=_resolve_optimizer_dtype(
-                getattr(config.optimizer, "mu_dtype", "float32")
-            ),
+            mu_dtype=mu_dtype,
         ),
 
         optax.add_decayed_weights(

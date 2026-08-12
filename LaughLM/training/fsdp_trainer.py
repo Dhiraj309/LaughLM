@@ -21,7 +21,7 @@ import flax.linen as nn
 from flax.linen import partitioning as nn_partitioning
 
 from LaughLM.config.schema import LaughLMConfig
-from LaughLM.distributed.mesh import create_mesh
+from LaughLM.utils.sharding_factory import build_mesh
 from LaughLM.distributed.sharding import (
     enable_gspmd_constraints,
     set_current_mesh,
@@ -44,7 +44,7 @@ from LaughLM.training.scheduler import (
 )
 from LaughLM.training.fsdp_train_step import create_fsdp_train_step
 from LaughLM.training.logger import TrainingLogger
-from LaughLM.training.checkpoint import CheckpointManager
+from LaughLM.utils.checkpoint_factory import create_checkpoint_manager
 from LaughLM.profiling.core.profiler import Profiler
 from LaughLM.utils.rng import create_rng
 from LaughLM.utils.prefetch import prefetch_to_device
@@ -121,7 +121,7 @@ class FSDPTrainer:
         else:
             self.effective_metrics_interval = self.metrics_interval
 
-        self.mesh = create_mesh(config)
+        self.mesh = build_mesh(config)
 
         set_current_mesh(self.mesh)
 
@@ -175,7 +175,8 @@ class FSDPTrainer:
             or config.runtime.checkpoint_dir
         )
 
-        self.checkpoints = CheckpointManager(
+        self.checkpoints = create_checkpoint_manager(
+            config,
             ckpt_dir,
             max_to_keep=config.runtime.checkpoint_max_to_keep,
         )
