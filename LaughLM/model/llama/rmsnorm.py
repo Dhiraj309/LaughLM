@@ -87,24 +87,9 @@ class RMSNorm(nn.Module):
             )
         )
 
-        # --------------------------------------------------
-        # TPU-native compute dtype
-        # --------------------------------------------------
-
-        hidden_states_normed = (
-            hidden_states_normed.astype(
-                self.dtype
-            )
-        )
-
-        # Match the actual normalized activation dtype rather than relying on
-        # a module-level dtype annotation. This keeps strict JAX primitives
-        # valid when a custom TPU VJP is present in the same traced step.
-        weight = jnp.asarray(
-            weight,
-            dtype=hidden_states_normed.dtype,
-        )
-
-        return (
-            hidden_states_normed * weight
-        )
+        # Keep the scale multiply in float32 because parameters are stored in
+        # float32. Cast only the completed normalized output to the model's
+        # compute dtype. This avoids bf16/fp32 mixed lax.mul operations in
+        # strict custom-VJP traces while preserving bf16 activations downstream.
+        scaled_hidden_states = hidden_states_normed * weight
+        return scaled_hidden_states.astype(self.dtype)
