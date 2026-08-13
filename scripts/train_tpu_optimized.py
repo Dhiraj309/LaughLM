@@ -1,8 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 from pathlib import Path
+
+
+def _sanitize_single_vm_tpu_process_addresses() -> None:
+    """Remove the invalid literal `local` TPU topology override before JAX import."""
+    for env_name in ("TPU_PROCESS_ADDRESSES", "JAX_TPU_PROCESS_ADDRESSES"):
+        value = os.environ.get(env_name)
+        if value is not None and value.strip().lower() == "local":
+            os.environ.pop(env_name, None)
+            print(
+                f"[train_tpu_optimized] Ignoring {env_name}=local for a single TPU VM; "
+                "using JAX runtime device discovery instead.",
+                flush=True,
+            )
+
+
+_sanitize_single_vm_tpu_process_addresses()
 
 import jax
 from huggingface_hub import hf_hub_download
@@ -159,6 +176,7 @@ def main():
         args.config
     )
 
+    # Single-VM TPU mode relies on JAX runtime discovery; do not call jax.distributed.initialize().
     num_devices = jax.local_device_count()
 
     config = _apply_max_steps_override(

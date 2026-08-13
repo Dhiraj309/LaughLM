@@ -102,8 +102,13 @@ class GrainDataLoaderWrapper:
             self.loader = grain.DataLoader(
                 data_source=self.dataset,
                 sampler=sampler,
+                operations=[
+                    grain.Batch(
+                        batch_size=self.per_process_batch_size,
+                        drop_remainder=True,
+                    ),
+                ],
                 worker_count=self.num_workers,
-                batch_size=self.per_process_batch_size,
             )
             self._iterator = iter(self.loader)
             logger.info(
