@@ -64,10 +64,10 @@ loss:
 runtime:
   backend: pmap
   seq_len: 2048
-  # TPU v5 lite HBM-safe setting: process one sequence per device per pass.
-  # Sixteen accumulation passes preserve 262,144 tokens per optimizer step.
-  micro_batch_per_device: 1
-  gradient_accumulation: 16
+  # Baseline-proven v5-lite throughput setting. With unscanned layers and SplashAttention,
+  # this achieves the higher-memory-safe batch geometry used by the 470k tok/s run.
+  micro_batch_per_device: 8
+  gradient_accumulation: 8
   total_tokens: 100_000_000
   eval_interval: 1000
   log_interval: 10
@@ -125,7 +125,9 @@ spmd:
   remat:
     policy: dots_saveable
     granularity: block
-    scan_layers: true
+    # Layer scanning is retained in code for compile-time experiments, but the observed
+    # v5-lite high-throughput configuration is the unscanned stack.
+    scan_layers: false
     prevent_cse: false
 
 
@@ -146,8 +148,10 @@ hardware:
 
 # Optimization Overrides
 optimizations:
-  kernel_backend: "tokamax"
-  data_backend: "grain"
+  # Tokamax gated-linear-unit kernels are GPU-only; native XLA fuses this path on TPU v5 lite.
+  kernel_backend: "native"
+  # Native memmap is the throughput-proven v5-lite path; Grain remains optional.
+  data_backend: "native"
   sharding_strategy: "fsdp"
   optimizer_mu_bf16: true
   async_checkpointing: true
