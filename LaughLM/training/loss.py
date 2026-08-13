@@ -1543,17 +1543,27 @@ def tokamax_linear_ce_loss_from_hidden(
 
     from tokamax import linear_softmax_cross_entropy_loss
 
-    per_token_loss = linear_softmax_cross_entropy_loss(
+    # Mosaic TPU's validated scalar reductions preserve its custom VJP. The
+    # reduction="none" path produced numerically invalid loss values for this
+    # TPU/JAX combination, so use mean and restore LaughLM's active-token mean.
+    padded_mean_loss = linear_softmax_cross_entropy_loss(
         hidden_flat,
         safe_targets,
         weights_hidden_major,
-        reduction="none",
+        reduction="mean",
         implementation=implementation,
     ).astype(jnp.float32)
 
     active_f32 = active.astype(jnp.float32)
     token_count = jnp.maximum(jnp.sum(active_f32), 1.0)
-    loss = jnp.sum(per_token_loss * active_f32) / token_count
+    padded_count_f32 = jnp.asarray(padded_token_count, dtype=jnp.float32)
+    padded_row_loss = (
+        jnp.asarray(padding, dtype=jnp.float32)
+        * jnp.log(jnp.asarray(vocab_size, dtype=jnp.float32))
+    )
+    loss = (
+        padded_mean_loss * padded_count_f32 - padded_row_loss
+    ) / token_count
     return loss, {
         "loss": loss,
         "z_loss": jnp.asarray(0.0, dtype=jnp.float32),
