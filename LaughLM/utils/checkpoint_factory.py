@@ -83,11 +83,11 @@ class OrbaxCompositeCheckpointManager:
                 enable_background_delete=True,
             )
 
-            # PyTreeCheckpointer / StandardCheckpointHandler
-            checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
+            # The manager discovers handlers from the StandardSave/JsonSave
+            # and StandardRestore/JsonRestore arguments used below. Supplying
+            # a positional Checkpointer selects Orbax's deprecated legacy API.
             self.manager = ocp.CheckpointManager(
                 self.directory,
-                checkpointer,
                 options=options,
             )
             logger.info(

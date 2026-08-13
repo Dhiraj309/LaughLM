@@ -2,7 +2,7 @@
 Canonical Llama decoder-only language model.
 
 PMAP chunked-loss fix:
-────────────────────────────────────────────────────
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 LlamaForCausalLM can return final hidden states before the LM head
 via return_hidden=True. This lets training compute exact chunked CE
 without materializing full [B, T, vocab] logits.
@@ -130,12 +130,16 @@ class LlamaModel(nn.Module):
                     "params": True,
                     "dropout": True,
                 },
+                # `hidden_states` is the scan carry. `in_axes` therefore
+                # describes only the remaining four scan-body inputs. All of
+                # them are shared by every decoder layer during training;
+                # scanning them would incorrectly require a leading layer axis
+                # and produces a carry/xs pytree-length mismatch.
                 in_axes=(
-                    0,  # hidden_states
-                    0,  # positions
-                    0,  # attention_mask
-                    0,  # kv_cache
-                    0,  # mode
+                    nn.broadcast,  # positions
+                    nn.broadcast,  # attention_mask
+                    nn.broadcast,  # kv_cache
+                    nn.broadcast,  # mode
                 ),
                 out_axes=0,
                 length=config.num_hidden_layers,
