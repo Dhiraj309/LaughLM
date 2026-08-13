@@ -100,6 +100,20 @@ def _loss_kwargs(
                 -100,
             )
         ),
+        "loss_backend": str(
+            _loss_attr(
+                loss_config,
+                "backend",
+                "native",
+            )
+        ),
+        "tokamax_implementation": str(
+            _loss_attr(
+                loss_config,
+                "tokamax_implementation",
+                "mosaic_tpu",
+            )
+        ),
     }
 
 

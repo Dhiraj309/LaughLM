@@ -211,6 +211,8 @@ def main():
         f"  checkpoint_dir={config.runtime.checkpoint_dir}\n"
         f"  global_batch_size={global_batch_size}\n"
         f"  gradient_accumulation={config.runtime.gradient_accumulation}\n"
+        f"  loss_backend={config.loss.backend}\n"
+        f"  tokamax_implementation={config.loss.tokamax_implementation}\n"
         f"  tokens_per_step={tokens_per_step:,}\n"
         f"  total_tokens={int(config.runtime.total_tokens):,}\n"
         f"  total_steps={total_steps:,}",
