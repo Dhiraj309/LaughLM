@@ -80,6 +80,13 @@ class GrainDataLoaderWrapper:
     def _init_grain_loader(self):
         """Initialize Grain DataLoader with IndexSampler."""
         try:
+            # Grain reads its worker-profiling absl flag lazily from the
+            # prefetch worker. Parse registered defaults here so that worker
+            # startup cannot raise UnparsedFlagAccessError.
+            from absl import flags as absl_flags
+            if not absl_flags.FLAGS.is_parsed():
+                absl_flags.FLAGS(["laughlm"], known_only=True)
+
             # Simple custom sequence dataset source over token shards
             self.dataset = _TokenShardDataset(
                 paths=self.paths,
@@ -191,7 +198,8 @@ class _TokenShardDataset:
         self.dtype = dtype
 
         self.maps = [np.memmap(p, dtype=self.dtype, mode="r") for p in paths]
-        self.sample_counts = [len(m) // (seq_len + 1) for m in self.maps]
+        # Match MemmapDataset: the trainer performs token shifting internally.
+        self.sample_counts = [len(m) // seq_len for m in self.maps]
         self.total_samples = sum(self.sample_counts)
 
     def __len__(self) -> int:
@@ -203,13 +211,13 @@ class _TokenShardDataset:
         for m, count in zip(self.maps, self.sample_counts):
             if idx < cum + count:
                 local_idx = idx - cum
-                offset = local_idx * (self.seq_len + 1)
-                chunk = m[offset : offset + self.seq_len + 1]
+                offset = local_idx * self.seq_len
+                chunk = m[offset : offset + self.seq_len]
                 return np.array(chunk, dtype=np.int32)
             cum += count
 
         # Fallback dummy chunk if index out of bounds
-        return np.zeros((self.seq_len + 1,), dtype=np.int32)
+        return np.zeros((self.seq_len,), dtype=np.int32)
 
 
 # ------------------------------------------------------------

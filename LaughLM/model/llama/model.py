@@ -2,7 +2,7 @@
 Canonical Llama decoder-only language model.
 
 PMAP chunked-loss fix:
-â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 LlamaForCausalLM can return final hidden states before the LM head
 via return_hidden=True. This lets training compute exact chunked CE
 without materializing full [B, T, vocab] logits.
@@ -76,14 +76,13 @@ class ScannedDecoderLayer(nn.Module):
         positions,
         attention_mask,
         kv_cache,
-        mode,
     ):
         return self.layer(
             hidden_states=hidden_states,
             positions=positions,
             attention_mask=attention_mask,
             kv_cache=kv_cache,
-            mode=mode,
+            mode="train",
         )
 
 
@@ -131,15 +130,14 @@ class LlamaModel(nn.Module):
                     "dropout": True,
                 },
                 # `hidden_states` is the scan carry. `in_axes` therefore
-                # describes only the remaining four scan-body inputs. All of
-                # them are shared by every decoder layer during training;
-                # scanning them would incorrectly require a leading layer axis
-                # and produces a carry/xs pytree-length mismatch.
+                # describes only the three tensor inputs shared by every
+                # decoder layer during training. The mode is captured as the
+                # static string "train" inside ScannedDecoderLayer because
+                # Python strings are not valid dynamic JAX scan inputs.
                 in_axes=(
                     nn.broadcast,  # positions
                     nn.broadcast,  # attention_mask
                     nn.broadcast,  # kv_cache
-                    nn.broadcast,  # mode
                 ),
                 out_axes=0,
                 length=config.num_hidden_layers,
@@ -267,7 +265,6 @@ class LlamaModel(nn.Module):
                 position_ids,
                 attention_mask,
                 None,
-                mode,
             )
 
             hidden_states = constrain_hidden_states(
