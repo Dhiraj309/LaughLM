@@ -64,8 +64,10 @@ loss:
 runtime:
   backend: pmap
   seq_len: 2048
-  micro_batch_per_device: 8
-  gradient_accumulation: 8
+  # TPU v5 lite HBM-safe setting: process one sequence per device per pass.
+  # Sixteen accumulation passes preserve 262,144 tokens per optimizer step.
+  micro_batch_per_device: 1
+  gradient_accumulation: 16
   total_tokens: 100_000_000
   eval_interval: 1000
   log_interval: 10
