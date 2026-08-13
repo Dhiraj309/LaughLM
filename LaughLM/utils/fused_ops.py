@@ -142,9 +142,14 @@ def fused_swiglu(
     """
     Fused SwiGLU activation dispatcher.
 
-    Computes silu(gate) * up in a single MXU pass when kernel_backend == "tokamax".
+    Uses Tokamax on supported GPU backends and native XLA fusion on TPU.
     """
     global _TOKAMAX_SWIGLU_FAILED
+    # Tokamax gated_linear_unit is currently GPU-only; use XLA fusion on TPU.
+    # Avoid tracing an unsupported custom kernel before falling back.
+    if kernel_backend == "tokamax" and jax.default_backend() != "gpu":
+        return jax.nn.silu(gate) * up
+
     if kernel_backend == "tokamax" and not _TOKAMAX_SWIGLU_FAILED:
         if not _TOKAMAX_AVAILABLE:
             logger.warning(
