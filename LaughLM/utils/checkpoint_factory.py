@@ -135,6 +135,28 @@ class OrbaxCompositeCheckpointManager:
         """Alias for wait_until_finished to match native CheckpointManager interface."""
         self.wait_until_finished()
 
+    @staticmethod
+    def build_metadata_from_config(
+        *,
+        config: LaughLMConfig,
+        step: int,
+        tokens_processed: int,
+        num_devices: int,
+    ) -> Dict[str, Any]:
+        """Build the standard LaughLM checkpoint metadata for Orbax saves.
+
+        Trainer code uses the same metadata contract for native and Orbax
+        managers. Delegate to the established native implementation so that
+        checkpoint validation and cross-backend restore behavior remain identical.
+        """
+        return NativeCheckpointManager.build_metadata_from_config(
+            config=config,
+            step=step,
+            tokens_processed=tokens_processed,
+            num_devices=num_devices,
+        )
+
+
     def save_composite(
         self,
         step: int,
