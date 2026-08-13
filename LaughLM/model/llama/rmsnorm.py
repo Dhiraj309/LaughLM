@@ -97,8 +97,12 @@ class RMSNorm(nn.Module):
             )
         )
 
-        weight = weight.astype(
-            self.dtype
+        # Match the actual normalized activation dtype rather than relying on
+        # a module-level dtype annotation. This keeps strict JAX primitives
+        # valid when a custom TPU VJP is present in the same traced step.
+        weight = jnp.asarray(
+            weight,
+            dtype=hidden_states_normed.dtype,
         )
 
         return (
