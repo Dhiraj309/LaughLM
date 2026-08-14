@@ -83,6 +83,55 @@ def parse_args():
         help="Delete checkpoint_dir before training.",
     )
 
+    parser.add_argument(
+        "--hf-repo-id",
+        type=str,
+        default=None,
+        help="Override data.hf_repo_id for this run.",
+    )
+    parser.add_argument(
+        "--hf-revision",
+        type=str,
+        default=None,
+        help="Optional Hugging Face dataset revision override.",
+    )
+    parser.add_argument(
+        "--shard-directory",
+        type=str,
+        default=None,
+        help="Override data.shard_directory, for example fineweb-edu.",
+    )
+    parser.add_argument(
+        "--shard-filename-prefix",
+        type=str,
+        default=None,
+        help="Override data.shard_filename_prefix, for example fineweb-edu_shard.",
+    )
+    parser.add_argument(
+        "--train-shard-start",
+        type=int,
+        default=None,
+        help="First training shard ID to download.",
+    )
+    parser.add_argument(
+        "--train-shard-count",
+        type=int,
+        default=None,
+        help="Number of consecutive training shard files to download.",
+    )
+    parser.add_argument(
+        "--validation-shard-start",
+        type=int,
+        default=None,
+        help="First held-out validation shard ID to download.",
+    )
+    parser.add_argument(
+        "--validation-shard-count",
+        type=int,
+        default=None,
+        help="Number of consecutive held-out validation shard files to download.",
+    )
+
     return parser.parse_args()
 
 
@@ -163,6 +212,37 @@ def _fresh_checkpoint_dir(config) -> None:
         )
 
 
+def _apply_data_source_overrides(data_cfg, args) -> None:
+    """Apply optional CLI dataset-source overrides without changing YAML defaults."""
+    overrides = {
+        "hf_repo_id": args.hf_repo_id,
+        "hf_revision": args.hf_revision,
+        "shard_directory": args.shard_directory,
+        "shard_filename_prefix": args.shard_filename_prefix,
+        "train_shard_start": args.train_shard_start,
+        "train_shard_count": args.train_shard_count,
+        "validation_shard_start": args.validation_shard_start,
+        "validation_shard_count": args.validation_shard_count,
+    }
+    for field_name, value in overrides.items():
+        if value is not None:
+            setattr(data_cfg, field_name, value)
+
+    if not data_cfg.hf_repo_id.strip():
+        raise ValueError("data.hf_repo_id must be a non-empty dataset repository.")
+    if not data_cfg.shard_directory.strip("/"):
+        raise ValueError("data.shard_directory must be a non-empty folder path.")
+    if not data_cfg.shard_filename_prefix.strip():
+        raise ValueError("data.shard_filename_prefix must be non-empty.")
+    if data_cfg.train_shard_count <= 0:
+        raise ValueError("data.train_shard_count must be > 0.")
+    if data_cfg.validation_shard_count < 0:
+        raise ValueError("data.validation_shard_count must be >= 0.")
+
+    # Hugging Face filenames are repository-relative, never absolute paths.
+    data_cfg.shard_directory = data_cfg.shard_directory.strip("/")
+
+
 def main():
     args = parse_args()
 
@@ -176,6 +256,7 @@ def main():
     )
 
     data_cfg = config.data
+    _apply_data_source_overrides(data_cfg, args)
     train_start = int(data_cfg.train_shard_start)
     train_count = int(data_cfg.train_shard_count)
     validation_count = int(data_cfg.validation_shard_count)
@@ -211,9 +292,24 @@ def main():
 
     cache_dir = data_cfg.hf_cache_dir
     download_kwargs = {
-        "repo_id": "LaughTaleAI/LaughLM-Tokenized-Fine",
+        "repo_id": data_cfg.hf_repo_id,
         "repo_type": "dataset",
     }
+    resolved_revision = data_cfg.hf_revision or "default branch"
+    print(
+        "[data] Hugging Face dataset source: "
+        f"{data_cfg.hf_repo_id} @ {resolved_revision}",
+        flush=True,
+    )
+    print(
+        "[data] shard selector: "
+        f"folder={data_cfg.shard_directory}, "
+        f"prefix={data_cfg.shard_filename_prefix}, "
+        f"train={train_start}:{train_start + train_count - 1}",
+        flush=True,
+    )
+    if data_cfg.hf_revision:
+        download_kwargs["revision"] = data_cfg.hf_revision
     if cache_dir:
         cache_path = Path(cache_dir).expanduser().resolve()
         cache_path.mkdir(parents=True, exist_ok=True)

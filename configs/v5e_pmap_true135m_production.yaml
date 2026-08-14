@@ -78,6 +78,10 @@ runtime:
 
 
 data:
+  # Hugging Face source controls. This resolves to:
+  # https://huggingface.co/datasets/{hf_repo_id}/resolve/{hf_revision or main}/{shard_directory}/{shard_filename_prefix}_{shard_id:05d}.bin
+  hf_repo_id: "LaughTaleAI/LaughLM-Tokenized-Fine"
+  hf_revision: null  # null means the repository default branch.
   sources:
     - name: fineweb-edu
       weight: 1.0
