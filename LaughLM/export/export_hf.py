@@ -37,6 +37,7 @@ _sanitize_single_vm_tpu_process_addresses()
 import gc
 import json
 import shutil
+import time
 from pathlib import Path
 
 import jax
@@ -60,7 +61,10 @@ from LaughLM.export.convert_params import (
 )
 
 from LaughLM.export.hf_config import build_hf_config
-from LaughLM.export.validate_hf import validate_hf_export
+from LaughLM.export.validate_hf import (
+    unbox_logically_partitioned,
+    validate_hf_export,
+)
 
 
 # ============================================================
@@ -96,6 +100,58 @@ def _metadata_num_devices(config) -> int:
         f"  runtime.backend={config.runtime.backend!r}\n"
         f"  canonical_backend={backend!r}"
     )
+
+
+def _collapse_pmap_replica_axis(
+    restored_params,
+    reference_params,
+):
+    """Collapse only a verified leading PMAP replica axis before host export."""
+    restored_params = unbox_logically_partitioned(
+        restored_params
+    )
+    reference_params = unbox_logically_partitioned(
+        reference_params
+    )
+
+    collapsed_leaf_count = 0
+
+    def collapse_if_replicated(restored_leaf, reference_leaf):
+        nonlocal collapsed_leaf_count
+
+        restored_shape = getattr(
+            restored_leaf,
+            "shape",
+            None,
+        )
+        reference_shape = getattr(
+            reference_leaf,
+            "shape",
+            None,
+        )
+
+        if (
+            restored_shape is not None
+            and reference_shape is not None
+            and len(restored_shape) == len(reference_shape) + 1
+            and tuple(restored_shape[1:]) == tuple(reference_shape)
+        ):
+            collapsed_leaf_count += 1
+            return restored_leaf[0]
+
+        return restored_leaf
+
+    normalized_params = jax.tree_util.tree_map(
+        collapse_if_replicated,
+        restored_params,
+        reference_params,
+    )
+    print(
+        "[export] PMAP replica-axis normalization: "
+        f"collapsed_leaves={collapsed_leaf_count}",
+        flush=True,
+    )
+    return normalized_params
 
 
 def _require_supported_export_backend(config) -> None:
@@ -406,8 +462,22 @@ def export_hf_checkpoint(
             f"[export] restored step={step:,}"
         )
 
+        params = _collapse_pmap_replica_axis(
+            state.params,
+            target_state.params,
+        )
+        print(
+            "[export] transferring normalized parameters to host...",
+            flush=True,
+        )
+        host_transfer_start = time.perf_counter()
         params = jax.device_get(
-            state.params
+            params
+        )
+        print(
+            "[export] host parameter transfer complete: "
+            f"elapsed={time.perf_counter() - host_transfer_start:.2f}s",
+            flush=True,
         )
 
         source_metadata = checkpoints.load_metadata(

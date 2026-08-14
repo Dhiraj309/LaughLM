@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from typing import Dict
 
 import numpy as np
@@ -771,13 +772,24 @@ def convert_params_to_hf(
     # Embeddings
     # ========================================================
 
-    print("[export] embeddings...")
-
-    tensors[
-        "model.embed_tokens.weight"
-    ] = _to_numpy(
+    print(
+        "[export] embeddings: materializing host array...",
+        flush=True,
+    )
+    embedding_start = time.perf_counter()
+    embedding_weight = _to_numpy(
         model["embed_tokens"]["embedding"]
     )
+    print(
+        "[export] embeddings: ready "
+        f"shape={embedding_weight.shape} "
+        f"dtype={embedding_weight.dtype} "
+        f"elapsed={time.perf_counter() - embedding_start:.2f}s",
+        flush=True,
+    )
+    tensors[
+        "model.embed_tokens.weight"
+    ] = embedding_weight
 
     # ========================================================
     # Layers
