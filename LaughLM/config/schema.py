@@ -452,6 +452,12 @@ class RuntimeConfig(BaseModel):
         ge=1,
     )
 
+    eval_batches: int = Field(
+        default=4,
+        ge=1,
+        description="Number of held-out batches averaged at each evaluation interval.",
+    )
+
     log_interval: int = Field(
         ...,
         ge=1,
@@ -516,6 +522,15 @@ class DataConfig(BaseModel):
     packing: bool
     eos_between_docs: bool
     pad_to_multiple: int
+
+    train_shard_start: int = Field(default=0, ge=0)
+    train_shard_count: int = Field(default=1, ge=1)
+    validation_shard_start: Optional[int] = Field(default=None, ge=0)
+    validation_shard_count: int = Field(default=0, ge=0)
+    hf_cache_dir: Optional[str] = Field(
+        default=None,
+        description="Optional Hugging Face cache directory for tokenized shard files.",
+    )
 
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•

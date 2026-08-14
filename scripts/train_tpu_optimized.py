@@ -171,33 +171,75 @@ def main():
         flush=True,
     )
 
-    files = [
-        f"fineweb_edu_100bt/fineweb_edu_100bt_shard_{i:05d}.bin"
-        for i in range(0,1)
-    ]
-
-    print(
-        "Downloading shards:",
-        flush=True,
+    config = load_config(
+        args.config
     )
 
-    for f in files:
+    data_cfg = config.data
+    train_start = int(data_cfg.train_shard_start)
+    train_count = int(data_cfg.train_shard_count)
+    validation_count = int(data_cfg.validation_shard_count)
+    validation_start = data_cfg.validation_shard_start
+
+    if validation_count and validation_start is None:
+        raise ValueError(
+            "data.validation_shard_start is required when validation_shard_count > 0"
+        )
+
+    train_ids = list(range(train_start, train_start + train_count))
+    validation_ids = (
+        list(range(int(validation_start), int(validation_start) + validation_count))
+        if validation_count
+        else []
+    )
+    overlap = set(train_ids).intersection(validation_ids)
+    if overlap:
+        raise ValueError(
+            f"Train/validation shard overlap is not allowed: {sorted(overlap)}"
+        )
+
+    def _shard_name(shard_id: int) -> str:
+        return (
+            "fineweb_edu_100bt/"
+            f"fineweb_edu_100bt_shard_{shard_id:05d}.bin"
+        )
+
+    train_files = [_shard_name(shard_id) for shard_id in train_ids]
+    validation_files = [
+        _shard_name(shard_id) for shard_id in validation_ids
+    ]
+
+    cache_dir = data_cfg.hf_cache_dir
+    download_kwargs = {
+        "repo_id": "LaughTaleAI/LaughLM-Tokenized-Fine",
+        "repo_type": "dataset",
+    }
+    if cache_dir:
+        cache_path = Path(cache_dir).expanduser().resolve()
+        cache_path.mkdir(parents=True, exist_ok=True)
+        download_kwargs["cache_dir"] = str(cache_path)
         print(
-            f"  {f}",
+            f"[data] Hugging Face cache directory: {cache_path}",
             flush=True,
         )
 
-    paths = [
-        hf_hub_download(
-            repo_id="LaughTaleAI/LaughLM-Tokenized-Fine",
-            filename=f,
-            repo_type="dataset",
+    def _download(files, label: str):
+        print(
+            f"[data] downloading {label} shards: {len(files)}",
+            flush=True,
         )
-        for f in files
-    ]
+        for filename in files:
+            print(f"  {filename}", flush=True)
+        return [
+            hf_hub_download(filename=filename, **download_kwargs)
+            for filename in files
+        ]
 
-    config = load_config(
-        args.config
+    paths = _download(train_files, "train")
+    validation_paths = (
+        _download(validation_files, "validation")
+        if validation_files
+        else []
     )
 
     _configure_persistent_compilation_cache(config)
@@ -260,8 +302,21 @@ def main():
         resume_dir=config.runtime.checkpoint_dir,
     )
 
+    eval_dataset = (
+        create_dataloader(
+            config=config,
+            paths=validation_paths,
+            global_batch_size=global_batch_size,
+            process_index=jax.process_index(),
+            process_count=jax.process_count(),
+        )
+        if validation_paths
+        else None
+    )
+
     trainer.train(
-        dataset
+        dataset,
+        eval_dataloader=eval_dataset,
     )
 
 
