@@ -760,6 +760,20 @@ class ProfilingConfig(BaseModel):
         description="Whether to trigger optional XProf / JAX trace collection.",
     )
 
+    capture_device_memory_profile: bool = Field(
+        default=False,
+        description=(
+            "Save one JAX device-memory profile after a completed warm training step. "
+            "This is independent of optional XProf trace collection."
+        ),
+    )
+
+    memory_profile_step: int = Field(
+        default=10,
+        ge=1,
+        description="Optimizer step at which to save the one-shot device-memory profile.",
+    )
+
     layer_profiling: bool = Field(
         default=False,
         description="Whether to profile individual transformer layers.",
