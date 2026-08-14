@@ -523,6 +523,8 @@ class DataConfig(BaseModel):
     eos_between_docs: bool
     pad_to_multiple: int
 
+    shard_directory: str = Field(default="fineweb_edu_100bt")
+    shard_filename_prefix: str = Field(default="fineweb_edu_100bt_shard")
     train_shard_start: int = Field(default=0, ge=0)
     train_shard_count: int = Field(default=1, ge=1)
     validation_shard_start: Optional[int] = Field(default=None, ge=0)

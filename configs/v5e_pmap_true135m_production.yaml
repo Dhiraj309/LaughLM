@@ -68,7 +68,7 @@ runtime:
   # this achieves the higher-memory-safe batch geometry used by the 470k tok/s run.
   micro_batch_per_device: 2
   gradient_accumulation: 32
-  total_tokens: 100_000_000
+  total_tokens: 20_000_000_000
   eval_interval: 1000
   eval_batches: 4
   log_interval: 10
@@ -87,10 +87,12 @@ data:
   eos_between_docs: true
   pad_to_multiple: 128
 
-  # 74 * 250M = 18.5B unique train tokens; two held-out shards provide 0.5B validation tokens.
+  # 28 available train shards plus two held-out validation shards from the 30-shard fineweb-edu corpus.
+  shard_directory: "fineweb-edu"
+  shard_filename_prefix: "fineweb-edu_shard"
   train_shard_start: 0
-  train_shard_count: 74
-  validation_shard_start: 74
+  train_shard_count: 28
+  validation_shard_start: 28
   validation_shard_count: 2
   # The Kaggle writable mount is limited; use the large ephemeral root overlay for downloaded source shards.
   hf_cache_dir: "/tmp/laughlm_hf_cache"

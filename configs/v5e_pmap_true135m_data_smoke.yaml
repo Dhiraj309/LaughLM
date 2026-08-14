@@ -88,6 +88,8 @@ data:
   pad_to_multiple: 128
 
   # 74 * 250M = 18.5B unique train tokens; two held-out shards provide 0.5B validation tokens.
+  shard_directory: "fineweb-edu"
+  shard_filename_prefix: "fineweb-edu_shard"
   train_shard_start: 0
   train_shard_count: 2
   validation_shard_start: 2
