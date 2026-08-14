@@ -1241,12 +1241,45 @@ class CheckpointManager:
             )
 
         try:
-            restored = self.manager.restore(
-                latest,
-                args=ocp.args.StandardRestore(
-                    target_state
-                ),
-            )
+            try:
+                restored = self.manager.restore(
+                    latest,
+                    args=ocp.args.StandardRestore(
+                        target_state
+                    ),
+                )
+            except KeyError as error:
+                error_text = str(error)
+                if (
+                    'Item "default"' not in error_text
+                    or "state" not in error_text
+                ):
+                    raise
+
+                # Older composite checkpoints stored the train state under
+                # a named `state` item alongside `grain_iterator`. Keep the
+                # modern default-item restore first, then use this narrow
+                # fallback only for that verified legacy layout.
+                print(
+                    "[checkpoint] legacy composite layout detected; "
+                    "restoring named state item",
+                    flush=True,
+                )
+                restored_items = self.manager.restore(
+                    latest,
+                    args=ocp.args.Composite(
+                        state=ocp.args.StandardRestore(
+                            target_state
+                        ),
+                    ),
+                )
+                try:
+                    restored = restored_items["state"]
+                except (KeyError, TypeError) as item_error:
+                    raise KeyError(
+                        "Legacy composite checkpoint restore did not return "
+                        "the required named state item."
+                    ) from item_error
 
             print(
                 f"[checkpoint] restored step {latest}",
