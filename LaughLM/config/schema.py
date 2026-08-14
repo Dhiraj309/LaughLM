@@ -121,6 +121,14 @@ class ArchitectureConfig(BaseModel):
         ),
     )
 
+    splash_block_size: Literal[128, 256, 512, 1024] = Field(
+        default=512,
+        description=(
+            "Static TPU SplashAttention block size. Values must divide the "
+            "sequence length for the benchmarked causal-attention path."
+        ),
+    )
+
     fused_qkv: bool = Field(
         default=False,
         description=(

@@ -60,6 +60,8 @@ class LlamaConfig:
     # - "error": raise immediately, useful for benchmark configs
     attention_fallback: str = "warn"
     
+    splash_block_size: int = 512
+
     fused_qkv: bool = False
 
     # =========================================================

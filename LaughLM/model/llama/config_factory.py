@@ -84,6 +84,11 @@ def build_llama_config(config: LaughLMConfig) -> LlamaConfig:
             "attention_fallback",
             "warn",
         ),
+        splash_block_size=getattr(
+            arch,
+            "splash_block_size",
+            512,
+        ),
         fused_qkv=getattr(
             arch,
             "fused_qkv",

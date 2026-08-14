@@ -192,26 +192,35 @@ def _handle_splash_fallback(
     )
 
 
-def _find_splash_block_size(seq_len: int) -> tuple[int, int]:
-    for block in (512, 256, 128):
-        if seq_len % block == 0:
-            return block, 0
+def _find_splash_block_size(
+    seq_len: int,
+    requested_block: int,
+) -> tuple[int, int]:
+    supported_blocks = (128, 256, 512, 1024)
+    if requested_block not in supported_blocks:
+        raise ValueError(
+            f"Unsupported SplashAttention block size: {requested_block}. "
+            f"Expected one of {supported_blocks}."
+        )
 
-    block = 512
+    if seq_len % requested_block == 0:
+        return requested_block, 0
 
     pad = (
-        ((seq_len + block - 1) // block)
-        * block
+        ((seq_len + requested_block - 1) // requested_block)
+        * requested_block
         - seq_len
     )
 
-    return block, pad
+    return requested_block, pad
 
 
 def _pad_for_splash(
     q: jnp.ndarray,
     k: jnp.ndarray,
     v: jnp.ndarray,
+    *,
+    block_size: int = 512,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, int]:
     """
     q/k/v layout:
@@ -221,7 +230,7 @@ def _pad_for_splash(
     B, T, QH, Dh = q.shape
     KVH = k.shape[2]
 
-    _, pad = _find_splash_block_size(T)
+    _, pad = _find_splash_block_size(T, block_size)
 
     if pad == 0:
         return q, k, v, 0
@@ -266,6 +275,8 @@ def _splash_attention(
     query_states: jnp.ndarray,
     key_states: jnp.ndarray,
     value_states: jnp.ndarray,
+    *,
+    block_size: int = 512,
 ) -> jnp.ndarray:
     """
     TPU SplashAttention.
@@ -294,6 +305,7 @@ def _splash_attention(
         query_states,
         key_states,
         value_states,
+        block_size=block_size,
     )
 
     B, T, QH, Dh = q.shape
@@ -306,7 +318,7 @@ def _splash_attention(
             "Use XLA SDPA for true GQA/MQA."
         )
 
-    block, _ = _find_splash_block_size(T)
+    block, _ = _find_splash_block_size(T, block_size)
 
     _log_attention_backend(
         f"splash attention block={block} seq={T}"
@@ -372,6 +384,8 @@ def _splash_attention_shard_map(
     query_states: jnp.ndarray,
     key_states: jnp.ndarray,
     value_states: jnp.ndarray,
+    *,
+    block_size: int = 512,
 ) -> jnp.ndarray:
     """
     GSPMD-compatible TPU SplashAttention.
@@ -415,6 +429,7 @@ def _splash_attention_shard_map(
             q,
             k,
             v,
+            block_size=block_size,
         )
 
     try:
@@ -579,12 +594,14 @@ def _attention(
                     query_states,
                     key_states,
                     value_states,
+                    block_size=config.splash_block_size,
                 )
 
             return _splash_attention(
                 query_states,
                 key_states,
                 value_states,
+                block_size=config.splash_block_size,
             )
 
         except Exception as e:
