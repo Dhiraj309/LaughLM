@@ -1,4 +1,24 @@
 from __future__ import annotations
+import os
+
+
+def _sanitize_single_vm_tpu_process_addresses() -> None:
+    """Remove the invalid literal `local` TPU topology override before JAX import."""
+    for env_name in (
+        "TPU_PROCESS_ADDRESSES",
+        "JAX_TPU_PROCESS_ADDRESSES",
+    ):
+        value = os.environ.get(env_name)
+        if value and value.strip().lower() == "local":
+            os.environ.pop(env_name, None)
+            print(
+                f"[tpu] removed invalid {env_name}=local for single-VM runtime",
+                flush=True,
+            )
+
+
+_sanitize_single_vm_tpu_process_addresses()
+
 
 import math
 import argparse
@@ -109,12 +129,19 @@ def load_token_batch(args):
     return input_ids_np
 
 
-def restore_params(checkpoint_dir, exp_config):
+def restore_params(checkpoint_dir, exp_config, *, allow_legacy_checkpoint=False):
     print("\n================ RESTORE JAX CHECKPOINT ================\n")
 
     checkpoints = CheckpointManager(
         checkpoint_dir,
     )
+
+    if allow_legacy_checkpoint:
+        print(
+            "[parity] WARNING: legacy checkpoint override enabled; "
+            "missing/v2 metadata cannot be fully validated.",
+            flush=True,
+        )
 
     backend = str(
         getattr(
@@ -192,9 +219,13 @@ def restore_params(checkpoint_dir, exp_config):
         target_state=target_state,
         config=exp_config,
         num_devices=num_devices,
-        require_metadata=True,
-        require_v3=True,
-        purpose="hf_parity_debug",
+        require_metadata=not allow_legacy_checkpoint,
+        require_v3=not allow_legacy_checkpoint,
+        purpose=(
+            "hf_parity_debug_legacy_override"
+            if allow_legacy_checkpoint
+            else "hf_parity_debug"
+        ),
     )
 
 
@@ -442,6 +473,14 @@ def main():
         default=2048,
     )
 
+    parser.add_argument(
+        "--allow_legacy_checkpoint",
+        action="store_true",
+        help=(
+            "Allow parity inspection of a legacy checkpoint missing v3 metadata. "
+            "Strict metadata validation remains the default."
+        ),
+    )
     args = parser.parse_args()
 
     exp_config = load_config(
@@ -476,6 +515,7 @@ def main():
     params, _ = restore_params(
         args.checkpoint_dir,
         exp_config,
+        allow_legacy_checkpoint=args.allow_legacy_checkpoint,
     )
 
     native_logits_np, native_loss_value = run_native(
