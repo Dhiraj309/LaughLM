@@ -799,17 +799,17 @@ class TrainingLogger:
         )
 
         if not self._printed_header:
-            print(_HEADER)
-            print(_RULE)
+            print(_HEADER, flush=True)
+            print(_RULE, flush=True)
             self._printed_header = True
 
         elif self._lines_since_header >= self._header_every:
             print()
-            print(_HEADER)
-            print(_RULE)
+            print(_HEADER, flush=True)
+            print(_RULE, flush=True)
             self._lines_since_header = 0
 
-        print(row)
+        print(row, flush=True)
 
         self._lines_since_header += 1
 
