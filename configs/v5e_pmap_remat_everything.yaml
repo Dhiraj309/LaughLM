@@ -123,8 +123,7 @@ spmd:
     sequence: null
     layers: null
   remat:
-    # TPU compute experiment: save all eligible residuals instead of recomputing them.
-  policy: everything_saveable
+    policy: everything_saveable
     granularity: block
     # Layer scanning is retained in code for compile-time experiments, but the observed
     # v5-lite high-throughput configuration is the unscanned stack.
