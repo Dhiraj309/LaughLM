@@ -1265,8 +1265,14 @@ class CheckpointManager:
                     "restoring named state item",
                     flush=True,
                 )
-                restored_items = self.manager.restore(
-                    latest,
+                # The active manager was intentionally created for modern
+                # single-item checkpoints. Instantiate a separate synchronous
+                # composite checkpointer for this read-only legacy fallback.
+                legacy_checkpointer = ocp.Checkpointer(
+                    ocp.CompositeCheckpointHandler()
+                )
+                restored_items = legacy_checkpointer.restore(
+                    self.directory / str(latest),
                     args=ocp.args.Composite(
                         state=ocp.args.StandardRestore(
                             target_state
@@ -1274,12 +1280,15 @@ class CheckpointManager:
                     ),
                 )
                 try:
-                    restored = restored_items["state"]
-                except (KeyError, TypeError) as item_error:
-                    raise KeyError(
-                        "Legacy composite checkpoint restore did not return "
-                        "the required named state item."
-                    ) from item_error
+                    restored = restored_items.state
+                except AttributeError:
+                    try:
+                        restored = restored_items["state"]
+                    except (KeyError, TypeError) as item_error:
+                        raise KeyError(
+                            "Legacy composite checkpoint restore did not return "
+                            "the required named state item."
+                        ) from item_error
 
             print(
                 f"[checkpoint] restored step {latest}",
