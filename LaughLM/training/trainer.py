@@ -384,8 +384,10 @@ class Trainer:
             self._device_memory_profile_captured = True
 
 
-    def train(        self,
+    def train(
+        self,
         dataloader: Iterator,
+        eval_dataloader: Iterator | None = None,
     ):
         cfg = self.config
 
@@ -425,6 +427,17 @@ class Trainer:
 
         data_iter = iter(
             prefetched_loader
+        )
+
+        eval_iter = (
+            iter(
+                prefetch_to_device(
+                    iter(eval_dataloader),
+                    size=2,
+                )
+            )
+            if eval_dataloader is not None
+            else None
         )
 
         try:
@@ -574,6 +587,49 @@ class Trainer:
                             tokens_seen=host_tokens_seen,
                             tokens_in_step=tokens_per_step,
                             step_time=step_time,
+                        )
+
+                    # ============================================
+                    # Held-out evaluation
+                    # ============================================
+                    if (
+                        eval_iter is not None
+                        and current_step % cfg.runtime.eval_interval == 0
+                    ):
+                        eval_losses = []
+                        expected_eval_shape = (
+                            global_batch_size,
+                            cfg.runtime.seq_len,
+                        )
+                        for _ in range(cfg.runtime.eval_batches):
+                            eval_batch = next(eval_iter)
+                            if eval_batch.shape != expected_eval_shape:
+                                raise ValueError(
+                                    "Eval batch shape mismatch: "
+                                    f"got {eval_batch.shape}, "
+                                    f"expected {expected_eval_shape}"
+                                )
+                            eval_batch = eval_batch.reshape(
+                                self.num_devices,
+                                cfg.runtime.micro_batch_per_device,
+                                cfg.runtime.seq_len,
+                            )
+                            eval_metrics = self.eval_step(
+                                self.state,
+                                jax.device_put(eval_batch),
+                            )
+                            eval_losses.append(
+                                float(
+                                    jax.device_get(
+                                        eval_metrics["loss"][0]
+                                    )
+                                )
+                            )
+                        print(
+                            f"[eval] step={current_step:,} "
+                            f"loss={float(np.mean(eval_losses)):.6f} "
+                            f"batches={cfg.runtime.eval_batches}",
+                            flush=True,
                         )
 
                     # ============================================
