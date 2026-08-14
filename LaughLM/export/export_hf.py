@@ -13,6 +13,26 @@ Safety policy
 """
 
 from __future__ import annotations
+import os
+
+
+def _sanitize_single_vm_tpu_process_addresses() -> None:
+    """Remove the invalid literal `local` TPU topology override before JAX import."""
+    for env_name in (
+        "TPU_PROCESS_ADDRESSES",
+        "JAX_TPU_PROCESS_ADDRESSES",
+    ):
+        value = os.environ.get(env_name)
+        if value and value.strip().lower() == "local":
+            os.environ.pop(env_name, None)
+            print(
+                f"[tpu] removed invalid {env_name}=local for single-VM runtime",
+                flush=True,
+            )
+
+
+_sanitize_single_vm_tpu_process_addresses()
+
 
 import gc
 import json
@@ -294,6 +314,7 @@ def export_hf_checkpoint(
     output_dir,
     tokenizer_dir,
     validate=True,
+    allow_legacy_checkpoint=False,
 ) -> None:
     output_dir = Path(
         output_dir
@@ -352,14 +373,26 @@ def export_hf_checkpoint(
         checkpoint_dir
     )
 
+    if allow_legacy_checkpoint:
+        print(
+            "[export] WARNING: legacy checkpoint override enabled; "
+            "missing/v2 metadata cannot be fully validated. "
+            "Use only with the exact original model configuration.",
+            flush=True,
+        )
+
     try:
         restored = checkpoints.restore_latest(
             target_state=target_state,
             config=exp_config,
             num_devices=num_devices,
-            require_metadata=True,
-            require_v3=True,
-            purpose="hf_export",
+            require_metadata=not allow_legacy_checkpoint,
+            require_v3=not allow_legacy_checkpoint,
+            purpose=(
+                "hf_export_legacy_override"
+                if allow_legacy_checkpoint
+                else "hf_export"
+            ),
         )
 
         if restored is None:
@@ -547,6 +580,14 @@ def main() -> None:
         action="store_true",
     )
 
+    parser.add_argument(
+        "--allow_legacy_checkpoint",
+        action="store_true",
+        help=(
+            "Allow export of a legacy checkpoint missing v3 metadata. "
+            "Strict metadata validation remains the default."
+        ),
+    )
     args = parser.parse_args()
 
     export_hf_checkpoint(
@@ -555,6 +596,7 @@ def main() -> None:
         output_dir=args.output_dir,
         tokenizer_dir=args.tokenizer_dir,
         validate=not args.skip_validation,
+        allow_legacy_checkpoint=args.allow_legacy_checkpoint,
     )
 
 
