@@ -74,6 +74,7 @@ class Trainer:
     ):
         self.config = config
         self.profiler = profiler or Profiler.from_config(config)
+        self._device_memory_profile_captured = False
 
         self.num_devices = jax.local_device_count()
         self.devices = jax.local_devices()
@@ -351,8 +352,39 @@ class Trainer:
     # Train loop
     # ========================================================
 
-    def train(
-        self,
+    def _maybe_capture_device_memory_profile(self, *, step: int) -> None:
+        """Save one memory snapshot after a completed TPU step when configured."""
+        profiling = self.config.profiling
+        if (
+            self._device_memory_profile_captured
+            or not getattr(profiling, "capture_device_memory_profile", False)
+            or step != getattr(profiling, "memory_profile_step", 10)
+        ):
+            return
+
+        output_dir = Path(getattr(profiling, "output_dir", "profiles"))
+        profile_path = output_dir / "memory" / f"device_memory_step_{step:05d}.prof"
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            jax.profiler.save_device_memory_profile(str(profile_path))
+        except Exception as exc:
+            print(
+                "[profiler] device-memory profile capture skipped: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+        else:
+            print(
+                "[profiler] saved device-memory profile: "
+                f"{profile_path}",
+                flush=True,
+            )
+        finally:
+            self._device_memory_profile_captured = True
+
+
+    def train(        self,
         dataloader: Iterator,
     ):
         cfg = self.config
@@ -473,10 +505,11 @@ class Trainer:
                         batch_device = jnp.asarray(batch)
 
                     with self.profiler.section("device_step", category="compute"):
-                        self.state, metrics = self.train_step(
-                            self.state,
-                            batch_device,
-                        )
+                        with jax.named_scope("pmap_train_step"):
+                            self.state, metrics = self.train_step(
+                                self.state,
+                                batch_device,
+                            )
 
                         metrics = jax.tree_util.tree_map(
                             lambda x: x.block_until_ready(),
@@ -498,6 +531,9 @@ class Trainer:
                     )
 
                     current_step += 1
+                    self._maybe_capture_device_memory_profile(
+                        step=current_step,
+                    )
                     host_tokens_seen += tokens_per_step
 
                     if self.profiler.should_profile_step(current_step):
