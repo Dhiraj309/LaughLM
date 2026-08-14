@@ -200,8 +200,8 @@ def main():
 
     def _shard_name(shard_id: int) -> str:
         return (
-            "fineweb_edu_100bt/"
-            f"fineweb_edu_100bt_shard_{shard_id:05d}.bin"
+            f"{data_cfg.shard_directory}/"
+            f"{data_cfg.shard_filename_prefix}_{shard_id:05d}.bin"
         )
 
     train_files = [_shard_name(shard_id) for shard_id in train_ids]
