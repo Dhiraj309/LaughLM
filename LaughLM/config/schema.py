@@ -525,6 +525,14 @@ class DataConfig(BaseModel):
 
     shard_directory: str = Field(default="fineweb_edu_100bt")
     shard_filename_prefix: str = Field(default="fineweb_edu_100bt_shard")
+    hf_repo_id: str = Field(
+        default="LaughTaleAI/LaughLM-Tokenized-Fine",
+        description="Hugging Face dataset repository containing tokenized shards.",
+    )
+    hf_revision: Optional[str] = Field(
+        default=None,
+        description="Optional Hugging Face dataset revision; None uses the default branch.",
+    )
     train_shard_start: int = Field(default=0, ge=0)
     train_shard_count: int = Field(default=1, ge=1)
     validation_shard_start: Optional[int] = Field(default=None, ge=0)
