@@ -780,6 +780,15 @@ class OptimizationsConfig(BaseModel):
     Defaults preserve baseline native paths.
     """
 
+    compilation_cache_dir: Optional[str] = Field(
+        default=None,
+        description=(
+            "Directory for the JAX persistent compilation cache. "
+            "Use a persistent TPU-working-directory path to reuse compiled "
+            "executables and autotuning results across benchmark launches."
+        ),
+    )
+
     kernel_backend: Literal[
         "native",
         "tokamax",

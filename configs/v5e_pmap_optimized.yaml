@@ -148,6 +148,7 @@ hardware:
 
 # Optimization Overrides
 optimizations:
+  compilation_cache_dir: "jax_cache/v5e_optimized"
   # Tokamax gated-linear-unit kernels are GPU-only; native XLA fuses this path on TPU v5 lite.
   kernel_backend: "native"
   # Native memmap is the throughput-proven v5-lite path; Grain remains optional.

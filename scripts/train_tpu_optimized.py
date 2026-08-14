@@ -34,6 +34,30 @@ from LaughLM.utils.data_factory import create_dataloader
 DEFAULT_CONFIG = "configs/v5e_pmap_optimized.yaml"
 
 
+def _configure_persistent_compilation_cache(config) -> None:
+    """Configure JAX persistent caching before the trainer compiles a step."""
+    cache_dir = config.optimizations.compilation_cache_dir
+    if not cache_dir:
+        return
+
+    cache_path = Path(cache_dir).expanduser().resolve()
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    # Keep short TPU benchmarks cacheable and reuse compilation/autotuning work.
+    # This runs before Trainer creates the PMAP-compiled train step.
+    jax.config.update("jax_compilation_cache_dir", str(cache_path))
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+
+    print(
+        "[train_tpu_optimized] persistent JAX compilation cache enabled:\n"
+        f"  directory={cache_path}\n"
+        "  min_compile_time_secs=0\n"
+        "  min_entry_size_bytes=-1",
+        flush=True,
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Train LaughLM with Optimized JAX Stack."
@@ -175,6 +199,8 @@ def main():
     config = load_config(
         args.config
     )
+
+    _configure_persistent_compilation_cache(config)
 
     # Single-VM TPU mode relies on JAX runtime discovery; do not call jax.distributed.initialize().
     num_devices = jax.local_device_count()
