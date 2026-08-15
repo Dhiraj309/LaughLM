@@ -126,6 +126,18 @@ def _last(values: list[float]) -> float | None:
     return float(values[-1])
 
 
+def _first_nonzero(
+    rows: list[dict[str, Any]],
+    key: str,
+) -> float | None:
+    """Return the first positive timing value in a metric stream."""
+    for row in rows:
+        value = _as_float(row, key)
+        if value is not None and value > 0.0:
+            return value
+    return None
+
+
 def _select_rows(
     rows: list[dict[str, Any]],
     *,
@@ -264,6 +276,10 @@ def summarize_metrics(
         "device_put_time_mean": _mean(_values(rows, "device_put_time")),
         "input_pipeline_time_mean": _mean(_values(rows, "input_pipeline_time")),
         "host_overhead_time_mean": _mean(_values(rows, "host_overhead_time")),
+        "first_step_compile_plus_execute_time": _first_nonzero(
+            all_rows,
+            "first_step_compile_plus_execute_time",
+        ),
 
         # Raw sync/debug timing.
         "raw_sync_step_time_mean": _mean(_values(rows, "raw_sync_step_time")),
@@ -329,6 +345,10 @@ def print_metrics_summary(
     print(f"  host prep mean:    {fmt(summary['host_batch_prepare_time_mean'], 's')}")
     print(f"  device put mean:   {fmt(summary['device_put_time_mean'], 's')}")
     print(f"  host overhead mean:{fmt(summary['host_overhead_time_mean'], 's')}")
+    print(
+        "  first step compile+execute: "
+        f"{fmt(summary['first_step_compile_plus_execute_time'], 's')}"
+    )
     print()
     print(f"  MFU median:        {fmt(summary['mfu_non_embedding_median'], '%')}")
     print(f"  MFU+logits median: {fmt(summary['mfu_with_logits_estimate_median'], '%')}")
