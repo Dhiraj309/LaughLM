@@ -379,6 +379,7 @@ def main():
         f"  param_dtype={config.spmd.dtype.param_dtype}\n"
         f"  compute_dtype={config.spmd.dtype.compute_dtype}\n"
         f"  output_dtype={config.spmd.dtype.output_dtype}\n"
+        f"  attention_variant={config.architecture.attention_variant}\n"
         f"  attention_impl={config.architecture.attention_impl}\n"
         f"  num_kv_heads={config.model.num_kv_heads}\n"
         f"  loss_backend={config.loss.backend}\n"
