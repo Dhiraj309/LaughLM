@@ -152,9 +152,9 @@ Real GQA deferred to M5.
 
 ### Exit gate
 
-- [ ] The resolved configuration, model factory, checkpoint metadata, and
-  startup logs agree on backend, mesh, dtype, architecture, attention variant,
-  and vocabulary size.
+- [~] The resolved configuration, model factory, checkpoint metadata, and
+  startup logs now share an explicit execution contract. TPU validation and
+  migration coverage for older v3 checkpoints remain pending.
 
 ### TPU gate for changes in M2
 

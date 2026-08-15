@@ -462,6 +462,43 @@ class CheckpointManager:
             },
         }
 
+    @staticmethod
+    def _execution_contract_metadata(config) -> dict:
+        """Record the resolved settings that affect executable behavior."""
+
+        backend = CheckpointManager._canonical_backend(config)
+        remat = config.spmd.remat
+
+        return {
+            "backend": backend,
+            "effective_sharding_strategy": (
+                backend
+                if backend in {"pmap", "fsdp"}
+                else str(config.optimizations.sharding_strategy)
+            ),
+            "attention_impl": str(config.architecture.attention_impl),
+            "attention_variant": str(config.architecture.attention_variant),
+            "num_heads": int(config.model.num_heads),
+            "num_kv_heads": (
+                None
+                if config.model.num_kv_heads is None
+                else int(config.model.num_kv_heads)
+            ),
+            "param_dtype": str(config.spmd.dtype.param_dtype),
+            "compute_dtype": str(config.spmd.dtype.compute_dtype),
+            "output_dtype": str(config.spmd.dtype.output_dtype),
+            "remat_policy": str(remat.policy),
+            "remat_granularity": str(remat.granularity),
+            "scan_layers": bool(remat.scan_layers),
+            "prevent_cse": bool(remat.prevent_cse),
+            "chunked_logits": bool(config.loss.chunked_logits),
+            "logits_chunk_size": int(config.loss.logits_chunk_size),
+            "loss_backend": str(config.loss.backend),
+            "tokamax_implementation": str(
+                config.loss.tokamax_implementation
+            ),
+        }
+
     # --------------------------------------------------------
     # Build checkpoint metadata
     # --------------------------------------------------------
@@ -550,6 +587,12 @@ class CheckpointManager:
             )
         )
 
+        execution_contract = (
+            CheckpointManager._execution_contract_metadata(
+                config
+            )
+        )
+
         if state_token_counter_dtype not in {
             None,
             "int32",
@@ -569,6 +612,7 @@ class CheckpointManager:
             "raw_backend": raw_backend,
             "layout": layout,
             "dtype_policy": dtype_policy,
+            "execution_contract": execution_contract,
 
             "step": int(step),
             "tokens_processed": int(tokens_processed),
@@ -845,6 +889,11 @@ class CheckpointManager:
             None,
         )
 
+        meta_execution_contract = metadata.get(
+            "execution_contract",
+            None,
+        )
+
         # ----------------------------------------------------
         # v3 backend/layout/dtype checks
         # ----------------------------------------------------
@@ -953,6 +1002,39 @@ class CheckpointManager:
                     "or create an explicit checkpoint migration path.\n"
                     + "\n".join(backend_mismatches)
                 )
+
+            if meta_execution_contract is None:
+                print(
+                    "[checkpoint] warning: v3 metadata has no "
+                    "execution_contract; using legacy v3 compatibility checks",
+                    flush=True,
+                )
+            else:
+                execution_mismatches = []
+                current_execution_contract = (
+                    CheckpointManager._execution_contract_metadata(
+                        config
+                    )
+                )
+
+                for field_name, current_value in (
+                    current_execution_contract.items()
+                ):
+                    CheckpointManager._compare_strict(
+                        name=f"execution_contract.{field_name}",
+                        old=meta_execution_contract.get(field_name),
+                        new=current_value,
+                        mismatches=execution_mismatches,
+                    )
+
+                if execution_mismatches:
+                    raise ValueError(
+                        "Checkpoint execution contract is not compatible "
+                        "with current config.\n"
+                        "Use a checkpoint with matching executable settings, "
+                        "or create an explicit checkpoint migration path.\n"
+                        + "\n".join(execution_mismatches)
+                    )
 
         else:
             print(
