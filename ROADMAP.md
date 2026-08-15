@@ -231,7 +231,9 @@ warm-cache TPU validation remains pending.
   geometry, and effective tokens per optimizer step. The launcher now reports
   the resolved rematerialization, scan, logit, head, and cache settings;
   Splash reports its selected block size during model initialization.
-- [ ] Verify compilation-cache reuse on a second run.
+- [~] Verify compilation-cache reuse on a second run. The run manifest now
+  records the cache directory and pre-run file count, allowing cold/warm TPU
+  runs to be compared; TPU confirmation remains pending.
 
 ### Exit gate
 

@@ -68,6 +68,20 @@ def _manifest_summary(manifest: dict[str, Any] | None) -> list[str]:
                 f"- JAX x64 enabled: `{jax_info.get('x64_enabled', 'unknown')}`",
             ]
         )
+    cache_info = manifest.get("compilation_cache", {})
+    if isinstance(cache_info, dict):
+        cache_state = (
+            "warm candidate"
+            if cache_info.get("file_count_before_run", 0) > 0
+            else "cold candidate"
+        )
+        lines.extend(
+            [
+                f"- Compilation cache: `{cache_state}`",
+                f"- Cache directory: `{cache_info.get('directory') or 'disabled'}`",
+                f"- Cache files before run: `{cache_info.get('file_count_before_run', 'n/a')}`",
+            ]
+        )
     return lines
 
 
@@ -134,7 +148,7 @@ def build_report(
         "",
         f"- First-step compile-plus-execute: `{_fmt(summary.get('first_step_compile_plus_execute_time'))} seconds`",
         "- Exact compile-only time: `pending TPU validation`; the first step includes execution.",
-        "- Warm-cache reuse: `pending comparison of cold and warm TPU runs`.",
+        "- Warm-cache reuse: compare reports whose manifests are marked `cold candidate` and `warm candidate`.",
         f"- Checkpoint records: `{checkpoint_count}`",
         f"- Checkpoint save-call time total: `{_fmt(checkpoint_save)} seconds`",
         f"- Checkpoint completion-wait time total: `{_fmt(checkpoint_wait)} seconds`",

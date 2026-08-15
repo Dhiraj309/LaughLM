@@ -64,6 +64,37 @@ def _configure_persistent_compilation_cache(config) -> None:
     )
 
 
+def _compilation_cache_snapshot(config) -> dict:
+    """Capture cache state before this run changes it."""
+    cache_dir = config.optimizations.compilation_cache_dir
+    if not cache_dir:
+        return {
+            "configured": False,
+            "directory": None,
+            "exists_before_run": False,
+            "file_count_before_run": 0,
+        }
+
+    cache_path = Path(cache_dir).expanduser().resolve()
+    file_count = 0
+    if cache_path.exists():
+        try:
+            file_count = sum(
+                1
+                for path in cache_path.rglob("*")
+                if path.is_file()
+            )
+        except OSError:
+            file_count = -1
+
+    return {
+        "configured": True,
+        "directory": str(cache_path),
+        "exists_before_run": cache_path.exists(),
+        "file_count_before_run": file_count,
+    }
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Train LaughLM with Optimized JAX Stack."
@@ -279,6 +310,7 @@ def _write_run_manifest(
     train_files,
     validation_files,
     num_devices: int,
+    compilation_cache: dict,
 ) -> None:
     """Persist the resolved inputs needed to compare TPU runs later."""
     if jax.process_index() != 0:
@@ -315,7 +347,7 @@ def _write_run_manifest(
         pass
 
     manifest = {
-        "manifest_version": 1,
+        "manifest_version": 2,
         "python": sys.version,
         "platform": platform.platform(),
         "package_versions": versions,
@@ -330,6 +362,7 @@ def _write_run_manifest(
             "process_count": int(jax.process_count()),
             "x64_enabled": bool(jax.config.x64_enabled),
         },
+        "compilation_cache": compilation_cache,
         "data": {
             "train_local_paths": [str(path) for path in train_paths],
             "validation_local_paths": [
@@ -460,6 +493,7 @@ def main():
         else []
     )
 
+    compilation_cache = _compilation_cache_snapshot(config)
     _configure_persistent_compilation_cache(config)
 
     # Single-VM TPU mode relies on JAX runtime discovery; do not call jax.distributed.initialize().
@@ -530,6 +564,7 @@ def main():
         train_files=train_files,
         validation_files=validation_files,
         num_devices=num_devices,
+        compilation_cache=compilation_cache,
     )
 
     # --- UPDATED DATA LOADER CREATION ---
