@@ -568,6 +568,19 @@ class TrainingLogger:
             "host_batch_prepare_time": float(host_batch_prepare_time),
             "device_put_time": float(device_put_time),
             "device_step_time": float(device_step_time),
+            # The first device step may include JAX compilation. This is kept
+            # separate from steady-state device time, but is not presented as
+            # compile-only until TPU-side timing validates that interpretation.
+            "first_step_compile_plus_execute_time": (
+                None
+                if "first_step_compile_plus_execute_time"
+                not in timing_breakdown
+                else float(
+                    timing_breakdown[
+                        "first_step_compile_plus_execute_time"
+                    ]
+                )
+            ),
 
             # Derived overheads.
             "host_overhead_time": float(
