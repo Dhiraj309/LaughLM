@@ -19,7 +19,11 @@ from typing import Any, Dict, List, Optional, Iterator
 import numpy as np
 import jax
 
-from LaughLM.data.memmap_loader import MemmapDataset
+from LaughLM.data.memmap_loader import (
+    MemmapDataset,
+    _validate_shard,
+    storage_dtype_for_vocab_size,
+)
 from LaughLM.config.schema import LaughLMConfig
 
 logger = logging.getLogger(__name__)
@@ -60,6 +64,7 @@ class GrainDataLoaderWrapper:
         process_count: int = 1,
         num_workers: int = 4,
         seed: int = 42,
+        vocab_size: int = 65_536,
     ):
         self.paths = paths
         self.seq_len = seq_len
@@ -68,14 +73,38 @@ class GrainDataLoaderWrapper:
         self.process_count = process_count
         self.num_workers = num_workers
         self.seed = seed
+        self.vocab_size = int(vocab_size)
+
+        if process_count <= 0:
+            raise ValueError(
+                f"process_count must be > 0, got {process_count}."
+            )
+        if process_index < 0 or process_index >= process_count:
+            raise ValueError(
+                f"process_index must be in [0, {process_count}), "
+                f"got {process_index}."
+            )
+        if global_batch_size <= 0:
+            raise ValueError(
+                f"global_batch_size must be > 0, got {global_batch_size}."
+            )
+        if global_batch_size % process_count != 0:
+            raise ValueError(
+                "global_batch_size must be divisible by process_count: "
+                f"global_batch_size={global_batch_size}, "
+                f"process_count={process_count}"
+            )
 
         # Host-local batch size
-        self.per_process_batch_size = global_batch_size // max(1, process_count)
+        self.per_process_batch_size = global_batch_size // process_count
 
-        if _GRAIN_AVAILABLE and grain is not None:
-            self._init_grain_loader()
-        else:
-            self._init_fallback_memmap()
+        if not _GRAIN_AVAILABLE or grain is None:
+            raise RuntimeError(
+                "Grain was requested but is not installed. "
+                "Select data_backend='native' explicitly."
+            )
+
+        self._init_grain_loader()
 
     def _init_grain_loader(self):
         """Initialize Grain DataLoader with IndexSampler."""
@@ -91,6 +120,7 @@ class GrainDataLoaderWrapper:
             self.dataset = _TokenShardDataset(
                 paths=self.paths,
                 seq_len=self.seq_len,
+                vocab_size=self.vocab_size,
             )
 
             # Grain IndexSampler for deterministic multi-worker host sharding
@@ -122,10 +152,10 @@ class GrainDataLoaderWrapper:
                 f"[data_factory] Initialized Grain DataLoader with {len(self.dataset)} records across {self.process_count} hosts."
             )
         except Exception as e:
-            logger.warning(
-                f"[data_factory] Grain DataLoader initialization failed ({e}). Falling back to MemmapDataset."
-            )
-            self._init_fallback_memmap()
+            raise RuntimeError(
+                "Grain DataLoader initialization failed; refusing to silently "
+                "fall back to native loading."
+            ) from e
 
     def _init_fallback_memmap(self):
         """Fallback to MemmapDataset if Grain is unavailable or fails."""
@@ -135,6 +165,7 @@ class GrainDataLoaderWrapper:
             global_batch_size=self.global_batch_size,
             process_index=self.process_index,
             process_count=self.process_count,
+            vocab_size=self.vocab_size,
         )
         self._iterator = iter(self.loader)
 
@@ -192,21 +223,45 @@ class GrainDataLoaderWrapper:
 class _TokenShardDataset:
     """Simple sequence dataset source for Grain over memmap binary token shards."""
 
-    def __init__(self, paths: List[str], seq_len: int, dtype=np.uint16):
+    def __init__(
+        self,
+        paths: List[str],
+        seq_len: int,
+        vocab_size: int = 65_536,
+    ):
         self.paths = paths
         self.seq_len = seq_len
-        self.dtype = dtype
+        self.vocab_size = int(vocab_size)
+        self.dtype = storage_dtype_for_vocab_size(self.vocab_size)
 
-        self.maps = [np.memmap(p, dtype=self.dtype, mode="r") for p in paths]
+        validated = [
+            _validate_shard(
+                p,
+                dtype=self.dtype,
+                seq_len=self.seq_len,
+                vocab_size=self.vocab_size,
+            )
+            for p in paths
+        ]
+        self.maps = [item[0] for item in validated]
         # Match MemmapDataset: the trainer performs token shifting internally.
-        self.sample_counts = [len(m) // seq_len for m in self.maps]
+        self.sample_counts = [
+            token_count - self.seq_len + 1
+            for _, token_count, _ in validated
+        ]
         self.total_samples = sum(self.sample_counts)
 
+        if self.total_samples <= 0:
+            raise ValueError(
+                "Token shards contain no complete sequence windows: "
+                f"seq_len={self.seq_len}, paths={self.paths}"
+            )
+
     def __len__(self) -> int:
-        return max(1, self.total_samples)
+        return self.total_samples
 
     def __getitem__(self, idx: int) -> np.ndarray:
-        idx = idx % max(1, self.total_samples)
+        idx = idx % self.total_samples
         cum = 0
         for m, count in zip(self.maps, self.sample_counts):
             if idx < cum + count:
@@ -216,8 +271,10 @@ class _TokenShardDataset:
                 return np.array(chunk, dtype=np.int32)
             cum += count
 
-        # Fallback dummy chunk if index out of bounds
-        return np.zeros((self.seq_len,), dtype=np.int32)
+        raise IndexError(
+            f"Token shard index resolution failed for idx={idx}, "
+            f"total_samples={self.total_samples}"
+        )
 
 
 # ------------------------------------------------------------
@@ -263,16 +320,9 @@ def create_dataloader(
 
     if data_backend == "grain":
         if not _GRAIN_AVAILABLE:
-            logger.warning(
-                "[data_factory] data_backend='grain' requested, but Grain is not installed. "
-                "Falling back to native MemmapDataset."
-            )
-            return MemmapDataset(
-                paths=paths,
-                seq_len=config.runtime.seq_len,
-                global_batch_size=global_batch_size,
-                process_index=process_index,
-                process_count=process_count,
+            raise RuntimeError(
+                "data_backend='grain' was requested, but Grain is not installed. "
+                "Select data_backend='native' explicitly."
             )
         return GrainDataLoaderWrapper(
             paths=paths,
@@ -280,6 +330,7 @@ def create_dataloader(
             global_batch_size=global_batch_size,
             process_index=process_index,
             process_count=process_count,
+            vocab_size=config.model.vocab_size,
         )
 
     # ------------------------------------------------------------
@@ -291,4 +342,5 @@ def create_dataloader(
         global_batch_size=global_batch_size,
         process_index=process_index,
         process_count=process_count,
+        vocab_size=config.model.vocab_size,
     )

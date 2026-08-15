@@ -1,153 +1,346 @@
-# LaughLM Training Stabilization Roadmap
+# LaughLM Roadmap
 
-**Status:** Draft for execution  
-**Scope:** Resolve the remaining scan, Grain, checkpointing, and single-VM TPU startup risks in the optimized Llama training path.  
-**Starting revision:** `b96d922f78e6591c81c49ecd3417ee90981eff51` on `feature/performance-profiler`.
+**Status:** Active planning baseline
+**Primary path:** LLaMA + PMAP + TPU v5e-8 single VM
+**Dataset path:** Hugging Face pre-tokenized raw `.bin` shards
+**Current production config:** `configs/v5e_pmap_true135m_production.yaml`
 
-## Purpose and operating model
+## Scope and operating rules
 
-This roadmap is intentionally narrower than [`docs/v2_optimization_roadmap.md`](docs/v2_optimization_roadmap.md). It is the execution plan for restoring a **reliable optimized training run** before additional architecture or performance work continues. The current `v5e_pmap_optimized.yaml` configuration enables both scanned Llama layers and the Grain backend, so the scan and batching defects must be treated as release blockers.
+This roadmap covers the maintained training and export path. The following are
+deprecated and are not roadmap blockers:
 
-> **One-milestone rule:** only one milestone may be active at a time. The next milestone begins only after the current milestone has passed every acceptance gate, its tests are committed, and its completion evidence is recorded in the pull request or issue. Defects discovered in a later milestone are triaged back to their originating milestone rather than patched opportunistically.
+- `LaughLM/data/train_tokenizer.py`
+- `LaughLM/data/tokenizer.py`
+- `LaughLM/data/domain_sampler.py`
+- `LaughLM/model/layers/*`
 
-| Order | Milestone | Primary outcome | Entry condition | Exit condition |
-|---|---|---|---|---|
-| M0 | Reproducible baseline | A pinned, repeatable local and TPU validation environment | This roadmap is accepted | Baseline failure and environment are documented |
-| M1 | Scanned Llama contract | A valid, tested `nn.scan` carry contract | M0 complete | Scanned and unscanned forward paths agree on a deterministic smoke case |
-| M2 | Grain data pipeline | A correctly batched, resumable per-host input pipeline | M1 complete | Grain yields fixed-size batches and restores iterator state |
-| M3 | Checkpoint compatibility | Orbax lifecycle proven against the supported dependency set | M2 complete | Composite save, retention, and restore succeed |
-| M4 | Single-VM TPU startup | TPU runtime starts without explicit distributed initialization | M3 complete | A short TPU smoke run initializes and executes safely |
-| M5 | End-to-end release gate | Optimized training is safe to use and regressions are guarded | M4 complete | Fresh run, resume run, and automated regression suite pass |
+Training must not be executed locally in the Windows development environment.
+Runtime validation, throughput measurements, profiling, and model/JAX tests are
+manual TPU gates supplied by the project owner.
 
-## Current implementation status
+Only one milestone should be active at a time. Every implementation change must
+include a reviewable diff and an explicit TPU test gate before the next change.
 
-> An initial remediation patch has been prepared for the scan axes, Grain batching API, Orbax manager construction, and single-VM TPU startup policy. No milestone is complete until the user runs the relevant manual validation gates.
+Status flags: `[ ]` not started, `[~]` implementation in progress or awaiting
+validation, `[x]` fully completed.
 
+## Active baseline
 
-## Known-risk register
+The current production path already includes:
 
-| ID | Risk | Current evidence | Owner milestone | Release impact |
-|---|---|---|---|---|
-| R-01 | The Llama scan wrapper does not maintain the intended stable carry structure. | `LaughLM/model/llama/model.py` calls the scanned layer with five separate arguments while the wrapper returns a two-item result. | M1 | Blocking |
-| R-02 | The Grain loader uses the removed `DataLoader(batch_size=...)` API and no batch operation. | `LaughLM/utils/data_factory.py` still constructs `grain.DataLoader(..., batch_size=...)`. | M2 | Blocking when `data_backend: grain` |
-| R-03 | Orbax behavior must be verified against the actual pinned package versions. | The manager now uses `CheckpointManagerOptions` and `options=`, but the project does not pin a tested JAX/Flax/Grain/Orbax stack. | M3 | High |
-| R-04 | Single-VM TPU startup must continue to rely on JAX device discovery. | `scripts/train_tpu_optimized.py` no longer explicitly initializes distributed JAX. | M4 | High |
-| R-05 | There are no focused regression tests for scanned Llama layers or the Grain pipeline. | The current test suite does not cover these two enabled optimized paths. | M5 | High |
+- PMAP over the v5e-8 local devices;
+- SplashAttention for training;
+- fused QKV projections;
+- chunked cross-entropy with rematerialized logit chunks;
+- gradient accumulation through JAX scan;
+- `dots_saveable` activation rematerialization;
+- host-side input prefetch;
+- Hugging Face shard download and cache handling;
+- persistent JAX compilation cache;
+- asynchronous checkpointing;
+- tied embeddings;
+- a 32,064-token vocabulary.
 
-## M0 â€” Reproducible baseline and failure capture
+The current configuration labels the attention variant as GQA but sets
+`num_kv_heads: 8` for `num_heads: 8`, which is effectively MHA. The target
+configuration is real GQA with fewer KV heads, subject to Splash TPU validation.
 
-**Objective.** Establish the dependency and execution baseline before changing behavior. The connected development environment currently lacks JAX, Flax, Grain, and Orbax, so runtime outcomes cannot be trusted until a named environment is created from a reproducible specification.
+## Milestone overview
 
-| Work item | Deliverable | Acceptance evidence |
-|---|---|---|
-| Define the supported Python, JAX, `jaxlib`, Flax, Grain, Orbax, Optax, and TPU runtime versions. | A lockfile or a documented constraints file referenced by the installation instructions. | A clean environment installs without solver drift. |
-| Record the minimal reproducer for each current failure. | A short command and captured traceback for scan and Grain failures; record the current single-VM TPU startup behavior. | Each failure is reproducible before its milestone begins. |
-| Create a lightweight test configuration. | A CPU-safe tiny Llama configuration with deterministic seed, tiny vocabulary, short context, and one or two layers. | Model initialization and a non-scanned forward pass complete. |
-| Define evidence storage. | A standard `tests/` location for regression tests and a concise PR checklist template. | Future milestones can link test names and logs rather than prose only. |
+| Status | Milestone | Outcome | Priority |
+|---|---|---|---|
+| [ ] | M0 | Freeze the active baseline and measurement contract | Now |
+| [~] | M1 | Make HF `.bin` ingestion safe and observable; implementation complete, TPU gate pending | Blocking |
+| [ ] | M2 | Make configuration and architecture intent authoritative | Blocking |
+| [ ] | M3 | Make token accounting and checkpoint resume durable | Blocking |
+| [ ] | M4 | Establish a measured PMAP performance baseline | High |
+| [ ] | M5 | Validate and optimize real GQA + SplashAttention | High |
+| [ ] | M6 | Tune memory, input pipeline, and compilation behavior | High |
+| [ ] | M7 | Evaluate optional fused kernels and advanced execution paths | Future |
+| [ ] | M8 | Release, export, and long-run operational gate | Final |
 
-**Completion gate.** Commit the version constraints, tiny configuration, and baseline tests or reproducer scripts. Do not modify scan logic, the Grain API call, or TPU startup policy during M0.
+## M0 — Baseline and measurement contract
 
-## M1 â€” Scanned Llama carry-contract repair
+**Goal:** Establish one reproducible TPU baseline before optimization changes.
 
-**Objective.** Make `nn.scan` use a single, JAX-compatible carry pytree that is unpacked and returned in exactly the same structure and order on every layer iteration. Flax scan bodies must follow the `(carry, *xs) -> (carry, ys)` contract, and values that are global to all layers must be broadcast rather than scanned along a non-existent layer axis.[1]
+**Status:** [ ] Not started
 
-**Scope.** This milestone owns `LaughLM/model/llama/model.py`, `LaughLM/model/llama/decoder.py`, and any directly involved scan adapter. It does not change attention math, optimizer behavior, data loading, or checkpoint formats.
+### Features
 
-| Work item | Implementation requirement | Validation gate |
-|---|---|---|
-| Freeze the active Llama layer contract. | Reconcile the incident prompt's `freqs_cis` and `deterministic` fields with the current `positions`, `attention_mask`, `kv_cache`, and `mode` interface before coding. Record the selected contract in a code comment and test name. | There is one authoritative layer signature; no parallel legacy signature remains. |
-| Create the scan adapter. | Use an explicit named carry type or documented tuple. It must contain the intended five elements in a stable order, and the adapter must return the same five-element structure. Python strings and other non-JAX state must be supplied as static/broadcast inputs or encoded safely; they must not become an unstable scan carry. | `jax.tree_util.tree_structure` of input and output carries matches. |
-| Correct scan axes. | Only per-layer parameters are scanned on the layer axis. Shared tensors and control inputs use broadcast semantics, while hidden state and cache state are carried. | `nn.scan` initialization succeeds for the tiny configuration. |
-| Preserve train and decode behavior. | Verify cache-free training, cached decode, and the intended deterministic/dropout behavior separately. | Shape, dtype, and cache-tree assertions pass for each mode. |
-| Add a regression suite. | Cover scan initialization, one forward pass, and deterministic numerical agreement with the unscanned stack using identical parameters. | The scanned and unscanned logits satisfy a defined tolerance. |
+- [ ] Record the exact Python, JAX, jaxlib, Flax, Optax, Orbax, Grain, and TPU
+  runtime versions used on the training VM.
+- [ ] Record the exact git revision, YAML config, CLI overrides, HF revision, and
+  shard list for every run.
+- [ ] Standardize metrics for loss, learning rate, tokens/sec, step time, input
+  wait, device transfer, compilation time, checkpoint time, and MFU.
+- [ ] Use an isolated checkpoint directory for every smoke or benchmark run.
+- [ ] Keep the production baseline with `kernel_backend: native` and
+  `data_backend: native` until alternatives prove better on TPU.
 
-**Completion gate.** The tiny test configuration passes scan initialization and forward execution. For a deterministic configuration, scanned and unscanned outputs are numerically equivalent within the agreed tolerance. The new regression tests run on CPU and are required in continuous integration.
+### Exit gate
 
-## M2 â€” Grain batching and resumability
+- [ ] One bounded TPU run produces a complete run manifest and enough metrics to
+  compare later changes. No performance claim is accepted without a baseline.
 
-**Objective.** Replace the obsolete loader-level `batch_size` parameter with an explicit Grain operations pipeline, while preserving per-host batch sizing and deterministic resume behavior. Grain applies transformations through `operations`, and its `Batch` transform accepts `batch_size` and `drop_remainder` directly.[2]
+## M1 — HF binary shard safety
 
-**Scope.** This milestone owns `LaughLM/utils/data_factory.py` and focused tests/fixtures. It may adjust caller assumptions only where a batch-shape contract requires it.
+**Goal:** Make pre-tokenized shard loading correct, fail-fast, and measurable.
 
-| Work item | Implementation requirement | Validation gate |
-|---|---|---|
-| Define batch ownership. | Document that `global_batch_size` is divided by `process_count`, and establish `per_process_batch_size` as the only batch size given to Grain. | One host produces exactly the expected local batch shape. |
-| Build the operations pipeline. | Remove `batch_size=` from `grain.DataLoader`. Pass `operations=[grain.Batch(batch_size=self.per_process_batch_size, drop_remainder=True)]` after token-record creation. | Grain initializes without an unexpected-keyword error. |
-| Prevent double batching. | Verify source records remain individual `seq_len + 1` token windows until the Batch operation runs. | Returned tensors have exactly `[per_process_batch_size, seq_len + 1]`. |
-| Preserve multi-host determinism. | Retain `IndexSampler` sharding and seed semantics; test distinct host shards and intentional final-batch dropping. | Two simulated shards are non-overlapping and fixed-size. |
-| Prove checkpoint/resume semantics. | Advance the iterator, serialize its state through the existing wrapper, restore it, and compare the next batch. | The restored iterator yields the same next batch as the uninterrupted iterator. |
+**Status:** [x] Implementation complete
+**Acceptance:** [ ] TPU validation pending
 
-**Completion gate.** A focused Grain test proves fixed local batch shape, `drop_remainder=True`, deterministic sharding, and exact next-batch recovery after restore. The native memmap backend must retain its existing test behavior.
+### Features
 
-## M3 â€” Orbax checkpoint compatibility and lifecycle proof
+- [~] Document and validate the on-disk format: flat raw `uint16` token stream,
+  no header, no index sidecar, and vocabulary IDs within range.
+- [x] Keep `uint16` while vocabulary size is at most 65,535. If vocabulary size
+  exceeds that limit, migrate the shard format to `uint64` and document the
+  device-side input cast policy.
+- [x] Reject empty or shorter-than-`seq_len + 1` shards.
+- [x] Remove the fallback that silently reuses all shards when a host receives no
+  assigned shard.
+- [x] Propagate prefetch-thread exceptions to the training iterator.
+- [x] Make requested data backend behavior explicit: fallback from Grain to native
+  must be either disabled or clearly recorded as a deliberate choice.
+- [x] Validate global/local batch divisibility before creating the loader.
+- [~] Log resolved shard paths, byte size, dtype, token count, host assignment,
+  and local batch shape before model initialization.
 
-**Objective.** Verify the already-applied `CheckpointManagerOptions` migration against the supported dependency set and prove that model, optimizer, metadata, and Grain state form a coherent checkpoint lifecycle. Orbax exposes manager behavior through `CheckpointManagerOptions`, and checkpoint saves may be asynchronous, so tests must wait before inspection or restoration.[3]
+### Exit gate
 
-**Scope.** This milestone owns `LaughLM/utils/checkpoint_factory.py`, dependency constraints established in M0, and checkpoint-focused tests. Avoid switching checkpoint formats unless existing behavior fails validation.
+- [ ] The exact production command loads the selected train and validation
+  shards, produces fixed-shape batches, and fails clearly for invalid or
+  incomplete shards.
+- [ ] The TPU log proves that each selected shard is used according to the
+  single-VM process topology.
 
-| Work item | Implementation requirement | Validation gate |
-|---|---|---|
-| Lock the Orbax interface. | Confirm that the pinned Orbax version supports every selected option, including async settings and background deletion. | Manager construction emits no legacy API warning or unsupported-option error. |
-| Validate single-item state. | Save and restore a small model/optimizer pytree using the production manager construction. | Restored leaves equal the saved state. |
-| Validate composite state. | Include model state, metadata, and Grain iterator state in the production save/restore path. | All items restore with the intended names and types. |
-| Validate retention and synchronization. | Save more than `max_to_keep` checkpoints, call `wait_until_finished`, and inspect retained steps. | Exactly the configured retention set remains. |
-| Define failure behavior. | Ensure missing/corrupt checkpoint handling falls back or raises a clear error without silently changing training state. | Negative-path tests assert the selected behavior. |
+### TPU gate for changes in M1
 
-**Completion gate.** A clean process can save a checkpoint, wait for completion, restart, restore the composite state, and continue from the same model and input position. Retention behavior is tested under the pinned Orbax version.
+- [ ] Run the two-train/three-validation-shard command with `--max_steps 2`
+  and `--fresh`.
+- [ ] Report shard paths, dtype, token counts, batch shapes, process index/count,
+  first-step loss, and whether any fallback was used.
 
-## M4 â€” Single-VM TPU startup hardening
+## M2 — Configuration and architecture contract
 
-**Objective.** Preserve the removal of the failing explicit multi-host initialization path and make single-VM TPU assumptions visible, tested, and safe.
+**Goal:** Ensure configuration values describe the model and execution that
+actually run.
 
-**Scope.** This milestone owns `scripts/train_tpu_optimized.py`, its launch documentation, and TPU-specific smoke configuration. It does not add multi-host training support.
+**Status:** [ ] Not started
 
-| Work item | Implementation requirement | Validation gate |
-|---|---|---|
-| Make the deployment policy explicit. | State in the script documentation that this entrypoint targets one TPU VM and relies on JAX runtime discovery. | The entrypoint contains no `jax.distributed.initialize()` call or manual `tpu_process_addresses` setting. |
-| Preserve runtime discovery. | Use `jax.local_device_count()` for device-local batch calculation and JAX-reported process index/count for data sharding. | Startup logs report expected local devices and one resolved process on the target VM. |
-| Add preflight checks. | Emit clear diagnostics for zero devices, invalid microbatch divisibility, missing token shards, and unsafe fresh-checkpoint deletion. | Expected configuration errors fail before model initialization. |
-| Execute an accelerator smoke run. | Run a bounded training job using the M1/M2/M3 validated configuration and an isolated checkpoint directory. | Initialization, at least one optimizer update, logging, and clean shutdown succeed. |
-| Guard against scope creep. | If multi-VM support is required, create a separate RFC and milestone series with an explicit coordination design. | No multi-host flags are silently introduced into this entrypoint. |
+### Features
 
-**Completion gate.** A fresh single-VM TPU run starts without the former SliceBuilder `INVALID_ARGUMENT` failure, performs a bounded update, and exits with a durable checkpoint when checkpointing is enabled.
+- [ ] Make `spmd.dtype` the canonical dtype policy for parameter, compute, and
+  output dtypes.
+- [ ] Remove or reject the unused top-level `dtype` YAML block.
+- [ ] Reconcile legacy `parallelism` dtype fields and checkpoint metadata during
+  migration.
+- [ ] Set `optimizations.sharding_strategy` to a PMAP-appropriate value or clearly
+  mark it as unused by the PMAP trainer.
+- [ ] Require true GQA when `attention_variant: gqa`: `num_kv_heads` must be less
+  than `num_heads` unless an explicit MHA mode is selected.
+- [ ] Validate all architecture options used by the active LLaMA implementation;
+  unsupported variants must fail during config loading.
+- [ ] Keep `fused_qkv`, tied embeddings, SwiGLU, pre-norm, RoPE, and Splash as
+  explicit supported production choices.
 
-## M5 â€” Integrated optimized-run release gate
+### Exit gate
 
-**Objective.** Demonstrate that the optimized configuration works as a system and make its critical behavior resistant to regression.
+- [ ] The resolved configuration, model factory, checkpoint metadata, and
+  startup logs agree on backend, mesh, dtype, architecture, attention variant,
+  and vocabulary size.
 
-**Scope.** This milestone integrates, but does not redesign, the outputs of M0 through M4. It owns `configs/v5e_pmap_optimized.yaml`, release notes, automated checks, and final evidence.
+### TPU gate for changes in M2
 
-| Work item | Implementation requirement | Validation gate |
-|---|---|---|
-| Validate a fresh run. | Start from an empty, isolated checkpoint directory with `scan_layers: true`, `data_backend: grain`, and async checkpointing enabled. | The run completes the defined smoke-step count with finite loss. |
-| Validate a resume run. | Stop after a checkpoint, create a new process, restore, and continue. | Step count, model state, optimizer state, and next input batch resume coherently. |
-| Compare execution modes. | Run the same tiny workload in scanned and unscanned modes under deterministic settings. | Outputs/losses meet the M1 tolerance, and both paths remain usable. |
-| Add automation. | Require unit tests for scan, Grain, and checkpoint behavior; make TPU smoke evidence part of release review. | CI blocks regressions before merge. |
-| Publish operational notes. | Document supported environment versions, single-VM constraint, launch command, resume command, and known non-goals. | README or dedicated runbook is linked from the project entrypoint. |
+- [ ] Run model initialization and one training step with the production config.
+- [ ] Confirm the logs show the resolved dtypes, `num_heads`, `num_kv_heads`,
+  actual attention implementation, and no unsupported-option fallback.
 
-**Completion gate.** The optimized configuration completes a fresh bounded run and a restart/resume run on the target single-VM TPU environment. All focused regression tests pass, required operational documentation is merged, and no unresolved blocking risks remain in the register.
+## M3 — Long-run state and checkpoint durability
 
-## Execution protocol
+**Goal:** Make 20B-token training resumable without counter overflow or stale
+checkpoint metadata.
 
-Every milestone should use a dedicated branch and a small, reviewable pull request. The pull request description must include the milestone identifier, the test command(s), the observed result, and a short rollback note. Avoid bundling unrelated performance optimizations, model changes, or dependency upgrades with a stabilization milestone.
+**Status:** [ ] Not started
 
-| Required artifact | Standard |
-|---|---|
-| Issue or PR title | `[M#] concise milestone outcome` |
-| Tests | A new regression test for every repaired failure mode, plus relevant existing tests |
-| Review evidence | Commands, environment versions, and pass/fail output summarized in the PR |
-| Rollback plan | Revert the milestone commit; retain diagnostic logs and the prior working configuration |
-| Advancement decision | Explicit sign-off that every completion gate passed before opening the next milestone |
+### Features
 
-## Start here
+- [ ] Store `tokens_processed` and per-step token increments as `int64`.
+- [ ] Keep optimizer step dtype separate from token-count dtype.
+- [ ] Ensure async checkpoint restore performs the same metadata compatibility
+  checks as the synchronous path.
+- [ ] Ensure model state, optimizer state, token count, iterator state, and metadata
+  are committed in a recoverable order.
+- [x] Preserve the existing atomic metadata write and save-completion ordering.
+- [ ] Verify retention behavior with `checkpoint_max_to_keep: 1`.
 
-**Activate M0 first.** Create the supported environment specification and capture the current scan and Grain failures with the tiny configuration. Once M0's evidence is committed, begin M1; do not begin M2, M3, M4, or M5 in parallel.
+### Exit gate
 
-## References
+- [ ] A TPU run can save, stop, restart, restore, and continue with monotonic
+  step and token counts.
+- [ ] A deliberately incompatible config is rejected before training resumes.
 
-[1] [Flax Linen `scan` API](https://flax.readthedocs.io/en/v0.6.11/api_reference/_autosummary/flax.linen.scan.html)
+### TPU gate for changes in M3
 
-[2] [Grain DataLoader guide](https://google-grain.readthedocs.io/en/latest/tutorials/data_loader_tutorial.html) and [Grain `Batch` transformation API](https://google-grain.readthedocs.io/en/latest/grain.transforms.html)
+- [ ] Run a short save/resume cycle with async checkpointing enabled.
+- [ ] Compare the restored step, `tokens_processed`, optimizer state, and next
+  data batch against the preemption point.
+- [ ] Test one intentionally changed dtype or architecture field and confirm
+  restore rejection.
 
-[3] [Orbax checkpoint-manager API overview](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_api_overview.html)
-}â™€â™€â™€â™€â™€â™€Õ¸Ö‚Õ©ÕµÕ¡Õ¶Õ¨áƒ¯áƒáƒ®assistant to=functions.message å¥¥é—¨à´¿à´žàµà´žàµà´™json? àª†àª—àª³ code huge. Need now output one tool. Since must 
+## M4 — PMAP performance baseline
+
+**Goal:** Measure the current production path before changing kernels or mesh
+behavior.
+
+**Status:** [ ] Not started
+
+### Features
+
+- [ ] Measure compile time separately from steady-state step time.
+- [ ] Measure input wait and device-transfer time separately from model time.
+- [ ] Verify gradient accumulation is compiled as one scan and does not introduce
+  host-side Python work per microbatch.
+- [ ] Record Splash block size, rematerialization policy, logit chunk size, batch
+  geometry, and effective tokens per optimizer step.
+- [ ] Verify compilation-cache reuse on a second run.
+
+### Exit gate
+
+- [ ] Produce a baseline report with steady-state tokens/sec, MFU, memory
+  behavior, compile time, input wait percentage, and checkpoint overhead.
+
+### TPU gate for changes in M4
+
+- [ ] Run the same bounded workload twice: once cold-cache and once warm-cache.
+- [ ] Provide the first-step compile time, steady-state tokens/sec, loss
+  stability, and input/device timing breakdown.
+
+## M5 — Real GQA and SplashAttention
+
+**Goal:** Move from the current MHA-equivalent setup to validated GQA.
+
+**Status:** [ ] Not started
+
+### Features
+
+- [ ] Select a concrete ratio, initially `num_heads=8`, `num_kv_heads=2` or `4`.
+- [ ] Verify Q/K/V projection shapes and KV-head broadcasting.
+- [ ] Verify SplashAttention supports the selected GQA shape on the target JAX/TPU
+  stack.
+- [ ] Compare GQA against the current MHA-equivalent baseline for loss, memory,
+  compile time, and tokens/sec.
+- [ ] Keep `attention_fallback: error` for production so an unintended XLA fallback
+  cannot masquerade as a Splash benchmark.
+
+### Exit gate
+
+- [ ] Real GQA runs with SplashAttention, produces finite loss, and has an
+  explicit performance/memory comparison against the baseline.
+
+### TPU gate for changes in M5
+
+- [ ] Run baseline MHA-equivalent and real-GQA configurations for the same short
+  workload.
+- [ ] Report attention dispatch, compile time, step time, memory outcome, loss,
+  and any fallback/error.
+
+## M6 — Memory, input, and compilation tuning
+
+**Goal:** Optimize the measured bottleneck without changing multiple variables
+at once.
+
+**Status:** [ ] Not started
+
+### Experiment matrix
+
+- [ ] `splash_block_size`: 256, 512, 1024;
+- [ ] `spmd.remat.policy`: `dots_saveable` versus a less or more aggressive policy;
+- [ ] logit chunk size: 2048, 4096, 8192 where memory permits;
+- [ ] host prefetch depth and device-transfer scheduling;
+- [ ] microbatch/gradient-accumulation pairs with constant effective tokens;
+- [ ] compilation cache cold versus warm;
+- [ ] checkpoint interval and async checkpoint overhead.
+
+### Exit gate
+
+- [ ] Select changes only when they improve steady-state throughput or memory
+  while preserving loss and resume behavior.
+- [ ] Every accepted setting has a recorded TPU comparison.
+
+### TPU gate for changes in M6
+
+- [ ] Run one controlled A/B experiment per variable.
+- [ ] Report tokens/sec, peak memory, compile time, input wait, loss, and
+  checkpoint time.
+
+## M7 — Optional fused kernels and advanced execution
+
+**Goal:** Evaluate higher-risk optimizations only after the native PMAP path is
+stable and measured.
+
+**Status:** [ ] Not started
+
+### Features
+
+- [ ] Validate Tokamax linear CE and SwiGLU only on the target TPU stack.
+- [ ] Fix and test untied LM-head layout handling before enabling fused CE.
+- [ ] Compare native XLA, chunked CE, and Tokamax with identical inputs and
+  parameters.
+- [ ] Revisit scanned LLaMA layers only after the unscanned production path is
+  stable.
+- [ ] Revisit Grain only if native memmap remains the measured bottleneck.
+- [ ] Develop FSDP all-gather overlap, sequence parallelism, and 3D mesh support as
+  separate future tracks; do not mix them into PMAP production changes.
+
+### Exit gate
+
+- [ ] An optional optimization has a working fallback, explicit dispatch
+  logging, and measured TPU benefit.
+- [ ] Unsupported hardware or dependency combinations fail clearly or use a
+  documented fallback.
+
+## M8 — Export and release gate
+
+**Goal:** Make the trained checkpoint operationally useful and reproducible.
+
+**Status:** [ ] Not started
+
+### Features
+
+- [ ] Validate HF export with the same vocabulary size and special-token contract.
+- [ ] Verify tied embeddings and real GQA configuration in exported metadata.
+- [ ] Run checkpoint-to-HF parity checks on a manually selected TPU-produced
+  checkpoint or approved CPU/HF validation environment outside this local TPU
+  development workflow.
+- [ ] Publish the exact launch, resume, export, and shard-selection commands.
+- [ ] Archive the final config, dependency versions, git revision, HF revision, and
+  benchmark report.
+
+### Exit gate
+
+- [ ] A fresh run, resume run, export, and documented operational handoff are
+  all complete, with no unresolved blocking items in M1–M7.
+
+## Deferred tracks
+
+These remain valid future work but are not prerequisites for the current PMAP
+135M run:
+
+- live terminal dashboard and logger v2;
+- multi-host FSDP prefetch and all-gather overlap;
+- 3D tensor/sequence parallelism;
+- custom Pallas/Tokamax RMSNorm, SwiGLU, and cross-entropy kernels;
+- broad model-architecture variants;
+- legacy tokenizer, domain-sampler, and `model/layers` maintenance.
+
+## Change protocol
+
+Each change should include:
+
+1. one focused implementation diff;
+2. static review and `git diff --check`;
+3. the exact TPU command and expected observations;
+4. the user-supplied TPU log/result;
+5. a decision to keep, revert, or revise the change.
