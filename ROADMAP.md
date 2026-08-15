@@ -165,11 +165,15 @@ pending. Real GQA deferred to M5.
 **Goal:** Make 20B-token training resumable without counter overflow or stale
 checkpoint metadata.
 
-**Status:** [ ] Not started
+**Status:** [~] PMAP int64 token-counter implementation complete; TPU validation
+and remaining durability work pending.
 
 ### Features
 
-- [ ] Store `tokens_processed` and per-step token increments as `int64`.
+- [~] Store `tokens_processed` and per-step token increments as `int64`.
+  The active PMAP path now uses int64 counters and promotes legacy int32
+  checkpoints from metadata; TPU validation and the future FSDP path remain
+  pending.
 - [ ] Keep optimizer step dtype separate from token-count dtype.
 - [ ] Ensure async checkpoint restore performs the same metadata compatibility
   checks as the synchronous path.

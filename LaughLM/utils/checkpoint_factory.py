@@ -142,6 +142,7 @@ class OrbaxCompositeCheckpointManager:
         step: int,
         tokens_processed: int,
         num_devices: int,
+        state_token_counter_dtype: str | None = None,
     ) -> Dict[str, Any]:
         """Build the standard LaughLM checkpoint metadata for Orbax saves.
 
@@ -154,6 +155,7 @@ class OrbaxCompositeCheckpointManager:
             step=step,
             tokens_processed=tokens_processed,
             num_devices=num_devices,
+            state_token_counter_dtype=state_token_counter_dtype,
         )
 
 

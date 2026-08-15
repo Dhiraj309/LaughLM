@@ -452,6 +452,7 @@ class CheckpointManager:
         step: int,
         tokens_processed: int,
         num_devices: int,
+        state_token_counter_dtype: str | None = None,
     ) -> dict:
         """
         Build backend/layout-aware checkpoint metadata.
@@ -528,7 +529,13 @@ class CheckpointManager:
             )
         )
 
-        return {
+        if state_token_counter_dtype not in {None, "int32", "int64"}:
+            raise ValueError(
+                "state_token_counter_dtype must be None, 'int32', or 'int64', "
+                f"got {state_token_counter_dtype!r}."
+            )
+
+        metadata = {
             "format": "laughlm_checkpoint_v3",
 
             "backend": backend,
@@ -666,6 +673,14 @@ class CheckpointManager:
                 ),
             },
         }
+
+        if state_token_counter_dtype is not None:
+            metadata["state"] = {
+                "step_dtype": "int32",
+                "tokens_processed_dtype": state_token_counter_dtype,
+            }
+
+        return metadata
 
     # --------------------------------------------------------
     # Validation helpers

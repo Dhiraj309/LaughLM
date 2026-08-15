@@ -22,6 +22,11 @@ def _sanitize_single_vm_tpu_process_addresses() -> None:
 _sanitize_single_vm_tpu_process_addresses()
 
 import jax
+
+# Token counters must exceed int32's 2.1B maximum during 20B-token runs.
+# Configure this before importing the trainer, which creates JAX arrays.
+jax.config.update("jax_enable_x64", True)
+
 from huggingface_hub import hf_hub_download
 
 from LaughLM.config.loader import load_config

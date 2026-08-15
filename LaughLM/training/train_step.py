@@ -434,7 +434,7 @@ def create_train_step(
         global_tokens = jax.lax.psum(
             jnp.asarray(
                 local_tokens,
-                dtype=jnp.int32,
+                dtype=jnp.int64,
             ),
             axis_name="data",
         )
