@@ -224,9 +224,10 @@ warm-cache TPU validation remains pending.
 - [~] Verify gradient accumulation is compiled as one scan and does not introduce
   host-side Python work per microbatch. The active PMAP train step uses
   `jax.lax.scan`; TPU validation remains pending.
-- [~] Record Splash block size, rematerialization policy, logit chunk size, batch
-  geometry, and effective tokens per optimizer step. Startup and per-step
-  geometry are logged; rematerialization recording remains to be completed.
+- [x] Record Splash block size, rematerialization policy, logit chunk size, batch
+  geometry, and effective tokens per optimizer step. The launcher now reports
+  the resolved rematerialization, scan, logit, head, and cache settings;
+  Splash reports its selected block size during model initialization.
 - [ ] Verify compilation-cache reuse on a second run.
 
 ### Exit gate
