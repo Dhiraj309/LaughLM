@@ -178,8 +178,9 @@ and remaining durability work pending.
 - [~] Ensure async checkpoint restore performs the same metadata compatibility
   checks as the synchronous path. The composite manager now persists metadata
   atomically and validates it before restore; TPU validation is pending.
-- [ ] Ensure model state, optimizer state, token count, iterator state, and metadata
-  are committed in a recoverable order.
+- [~] Ensure model state, optimizer state, token count, iterator state, and metadata
+  are committed in a recoverable order. Native PMAP now records a deterministic
+  next-batch index; TPU save/resume validation is pending.
 - [x] Preserve the existing atomic metadata write and save-completion ordering.
 - [ ] Verify retention behavior with `checkpoint_max_to_keep: 1`.
 

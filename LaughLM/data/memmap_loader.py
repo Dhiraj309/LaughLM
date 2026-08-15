@@ -334,9 +334,9 @@ class MemmapDataset:
         # Independent deterministic RNG stream
         # ====================================================
 
-        self.rng = np.random.default_rng(
-            seed + process_index
-        )
+        self._sampling_seed = int(seed) + int(process_index)
+        self._next_batch_index = 0
+        self.resume_mode = "deterministic_batch_index_v1"
 
         # ====================================================
         # Cached offsets
@@ -370,10 +370,24 @@ class MemmapDataset:
     # Batch sampling
     # ========================================================
 
-    def sample_batch(self):
+    def sample_batch(self, batch_index: int):
         """
         Sample LOCAL batch.
         """
+
+        if batch_index < 0:
+            raise ValueError(
+                f"batch_index must be >= 0, got {batch_index}."
+            )
+
+        # Derive a fresh, deterministic RNG for each logical batch. This
+        # makes the next consumed batch independent of how far host prefetch
+        # workers have advanced ahead of the trainer.
+        rng = np.random.default_rng(
+            np.random.SeedSequence(
+                [self._sampling_seed, int(batch_index)]
+            )
+        )
 
         batch_size = (
             self.local_batch_size
@@ -383,7 +397,7 @@ class MemmapDataset:
         # Sample shards
         # ----------------------------------------------------
 
-        shard_ids = self.rng.integers(
+        shard_ids = rng.integers(
             0,
             len(self.shards),
             size=batch_size,
@@ -410,7 +424,7 @@ class MemmapDataset:
         # ----------------------------------------------------
 
         offsets = (
-            self.rng.random(batch_size)
+            rng.random(batch_size)
             * max_offsets
         ).astype(np.int64)
 
@@ -470,17 +484,33 @@ class MemmapDataset:
     # Infinite iterator
     # ========================================================
 
-    def _iterator(self):
-
-        while True:
-
-            yield self.sample_batch()
-
     def __iter__(self):
+        return self
 
-        return _PrefetchIterator(
-            self._iterator(),
-            prefetch_size=(
-                self.prefetch_size
-            ),
-        )
+    def __next__(self):
+        batch_index = self._next_batch_index
+        self._next_batch_index += 1
+        return self.sample_batch(batch_index)
+
+    def get_state(self):
+        """Return the next logical batch index for exact native resume."""
+        return {
+            "mode": self.resume_mode,
+            "next_batch_index": int(self._next_batch_index),
+        }
+
+    def set_state(self, state: dict):
+        """Restore the next logical batch index before creating prefetchers."""
+        if state.get("mode") != self.resume_mode:
+            raise ValueError(
+                "Unsupported native data resume mode: "
+                f"{state.get('mode')!r}."
+            )
+
+        next_batch_index = int(state.get("next_batch_index", -1))
+        if next_batch_index < 0:
+            raise ValueError(
+                "Native data resume state requires next_batch_index >= 0."
+            )
+
+        self._next_batch_index = next_batch_index

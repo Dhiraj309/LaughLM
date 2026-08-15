@@ -304,6 +304,25 @@ class Trainer:
                     * int(tokens_per_step_for_resume)
                 )
 
+            self._resume_iterator_state = (
+                None
+                if metadata is None
+                else metadata.get("data_iterator")
+            )
+
+            if self._resume_iterator_state is None:
+                self._resume_iterator_state = {
+                    "mode": "deterministic_batch_index_v1",
+                    "next_batch_index": (
+                        int(self.start_step) * int(self.grad_accum)
+                    ),
+                }
+                print(
+                    "[trainer] warning: checkpoint has no deterministic "
+                    "data-iterator state; resumed data sequence is non-exact",
+                    flush=True,
+                )
+
             # Metadata is the authoritative PMAP token counter. Promote old
             # int32 state here so all subsequent PMAP updates use int64.
             state = state.replace(
@@ -322,6 +341,7 @@ class Trainer:
         else:
             self.start_step = 0
             self.start_tokens_seen = 0
+            self._resume_iterator_state = None
 
             print(
                 "[trainer] fresh run",
@@ -469,6 +489,21 @@ class Trainer:
             f"\nTraining for {total_steps:,} optimizer steps with PMAP\n",
             flush=True,
         )
+
+        if self._resume_iterator_state is not None:
+            expected_mode = self._resume_iterator_state["mode"]
+            actual_mode = getattr(dataloader, "resume_mode", None)
+            if actual_mode != expected_mode or not hasattr(dataloader, "set_state"):
+                raise ValueError(
+                    "Checkpoint requires deterministic native data resume, but "
+                    f"the loader reports resume_mode={actual_mode!r}."
+                )
+            dataloader.set_state(self._resume_iterator_state)
+            print(
+                "[trainer] restored native data iterator: "
+                f"next_batch_index={self._resume_iterator_state['next_batch_index']}",
+                flush=True,
+            )
 
         prefetched_loader = prefetch_to_device(
             iter(dataloader),
@@ -708,6 +743,12 @@ class Trainer:
                                     state_token_counter_dtype="int64",
                                 )
                             )
+                            metadata["data_iterator"] = {
+                                "mode": "deterministic_batch_index_v1",
+                                "next_batch_index": (
+                                    current_step * self.grad_accum
+                                ),
+                            }
 
                             self.checkpoints.save(
                                 step=current_step,
@@ -749,6 +790,12 @@ class Trainer:
                     state_token_counter_dtype="int64",
                 )
             )
+            metadata["data_iterator"] = {
+                "mode": "deterministic_batch_index_v1",
+                "next_batch_index": (
+                    final_step * self.grad_accum
+                ),
+            }
 
             self.checkpoints.save(
                 step=final_step,
