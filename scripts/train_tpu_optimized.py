@@ -372,6 +372,23 @@ def _write_run_manifest(
             "process_count": int(jax.process_count()),
             "x64_enabled": bool(jax.config.x64_enabled),
         },
+        "attention_contract": {
+            "variant": str(config.architecture.attention_variant),
+            "implementation_requested": str(config.architecture.attention_impl),
+            "fallback_policy": str(config.architecture.attention_fallback),
+            "num_heads": int(config.model.num_heads),
+            "num_kv_heads": (
+                None
+                if config.model.num_kv_heads is None
+                else int(config.model.num_kv_heads)
+            ),
+            "splash_kv_expansion_expected": bool(
+                config.architecture.attention_impl == "splash"
+                and config.model.num_kv_heads is not None
+                and config.model.num_kv_heads < config.model.num_heads
+            ),
+            "dispatch_confirmation": "startup/log evidence required",
+        },
         "compilation_cache": compilation_cache,
         "data": {
             "train_local_paths": [str(path) for path in train_paths],

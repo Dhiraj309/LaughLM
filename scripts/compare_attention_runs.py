@@ -40,6 +40,16 @@ def _attention_label(manifest: dict[str, Any]) -> str:
     )
 
 
+def _dispatch_contract(manifest: dict[str, Any]) -> str:
+    contract = manifest.get("attention_contract", {})
+    if not isinstance(contract, dict):
+        return "not recorded"
+    requested = contract.get("implementation_requested", "unknown")
+    expansion = contract.get("splash_kv_expansion_expected", False)
+    suffix = "; GQA KV expansion expected" if expansion else ""
+    return f"requested {requested}{suffix}"
+
+
 def _fmt(value: Any, digits: int = 3) -> str:
     if value is None:
         return "n/a"
@@ -94,6 +104,8 @@ def build_report(
         f"- Selection: skip first `{skip_steps}` steps; last N `{last_n if last_n is not None else 'all'}`",
         f"- MHA attention: `{_attention_label(mha_manifest)}`",
         f"- GQA attention: `{_attention_label(gqa_manifest)}`",
+        f"- MHA dispatch contract: `{_dispatch_contract(mha_manifest)}`",
+        f"- GQA dispatch contract: `{_dispatch_contract(gqa_manifest)}`",
         f"- MHA cache: `{_cache_state(mha_manifest)}`",
         f"- GQA cache: `{_cache_state(gqa_manifest)}`",
         "",
