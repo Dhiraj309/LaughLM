@@ -154,6 +154,31 @@ class Trainer:
             config.runtime.checkpoint_interval
         )
 
+        resume_step = self.checkpoints.latest_step()
+        resume_metadata = (
+            None
+            if resume_step is None
+            else self.checkpoints.load_metadata(resume_step)
+        )
+
+        # Checkpoints written before M3 stored this scalar as int32. Restore
+        # them with their original target type, then promote from the
+        # authoritative metadata total before PMAP replication below.
+        state_metadata = (
+            {}
+            if resume_metadata is None
+            else resume_metadata.get("state", {})
+        )
+        stored_token_dtype = state_metadata.get(
+            "tokens_processed_dtype",
+            "int64" if resume_step is None else "int32",
+        )
+        if stored_token_dtype not in {"int32", "int64"}:
+            raise ValueError(
+                "Unsupported checkpoint state token-counter dtype: "
+                f"{stored_token_dtype!r}."
+            )
+
         config_path = (
             Path(ckpt_dir) / "config.json"
         )
@@ -233,7 +258,14 @@ class Trainer:
             params=params,
             opt_state=opt_state,
             step=jnp.array(0, dtype=jnp.int32),
-            tokens_processed=jnp.array(0, dtype=jnp.int32),
+            tokens_processed=jnp.array(
+                0,
+                dtype=(
+                    jnp.int64
+                    if stored_token_dtype == "int64"
+                    else jnp.int32
+                ),
+            ),
             rng_key=self.rng.key,
         )
 
@@ -269,6 +301,15 @@ class Trainer:
                     * int(tokens_per_step_for_resume)
                 )
 
+            # Metadata is the authoritative PMAP token counter. Promote old
+            # int32 state here so all subsequent PMAP updates use int64.
+            state = state.replace(
+                tokens_processed=jnp.asarray(
+                    self.start_tokens_seen,
+                    dtype=jnp.int64,
+                )
+            )
+
             print(
                 f"[trainer] resumed from step={self.start_step:,} "
                 f"tokens={self.start_tokens_seen:,}",
@@ -283,6 +324,12 @@ class Trainer:
                 "[trainer] fresh run",
                 flush=True,
             )
+
+        print(
+            "[trainer] token counter dtype="
+            f"{state.tokens_processed.dtype}",
+            flush=True,
+        )
 
         # ====================================================
         # Replicate state
@@ -655,6 +702,7 @@ class Trainer:
                                     step=current_step,
                                     tokens_processed=host_tokens_seen,
                                     num_devices=self.num_devices,
+                                    state_token_counter_dtype="int64",
                                 )
                             )
 
@@ -695,6 +743,7 @@ class Trainer:
                     step=final_step,
                     tokens_processed=final_tokens_seen,
                     num_devices=self.num_devices,
+                    state_token_counter_dtype="int64",
                 )
             )
 
