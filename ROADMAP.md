@@ -259,6 +259,10 @@ validation and performance comparison remain pending.
 
 - [x] Select the initial comparison ratio as `num_heads=8`, `num_kv_heads=4`;
   keep the production MHA baseline unchanged until the TPU comparison.
+- [x] Provide an isolated GQA override config and launcher overlay support so
+  the MHA baseline is not copied or overwritten.
+- [x] Add a dependency-light config-matrix audit for attention labels and
+  Q/KV head geometry before TPU allocation.
 - [~] Verify Q/K/V projection shapes and KV-head broadcasting. Compact K/V
   projections and caches are preserved; Splash receives an explicit expanded
   head layout. TPU shape validation remains pending.

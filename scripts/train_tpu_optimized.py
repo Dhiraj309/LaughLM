@@ -108,6 +108,16 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--override-config",
+        type=str,
+        default=None,
+        help=(
+            "Optional YAML overlay merged into --config. Use this for "
+            "isolated architecture experiments without copying the baseline."
+        ),
+    )
+
+    parser.add_argument(
         "--max_steps",
         type=int,
         default=None,
@@ -407,7 +417,8 @@ def main():
     )
 
     config = load_config(
-        args.config
+        args.config,
+        override_config=args.override_config,
     )
 
     data_cfg = config.data

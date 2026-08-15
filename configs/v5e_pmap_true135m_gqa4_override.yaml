@@ -1,0 +1,16 @@
+# M5 experiment overlay for the validated 135M PMAP baseline.
+# Apply with --config configs/v5e_pmap_true135m_production.yaml and
+# --override-config configs/v5e_pmap_true135m_gqa4_override.yaml.
+# The production MHA config remains unchanged.
+
+model:
+  num_kv_heads: 4
+
+architecture:
+  attention_variant: gqa
+
+runtime:
+  checkpoint_dir: checkpoints/experiments/135M_gqa4
+
+optimizations:
+  compilation_cache_dir: jax_cache/v5e_true135m_gqa4
