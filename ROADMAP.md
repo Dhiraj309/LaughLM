@@ -171,12 +171,13 @@ and remaining durability work pending.
 
 ### Features
 
-- [~] Store `tokens_processed` and per-step token increments as `int64`.
-  The active PMAP path now uses int64 counters and promotes legacy int32
-  checkpoints from metadata; TPU validation and the future FSDP path remain
-  pending.
-- [x] Keep the PMAP optimizer step dtype (`int32`) separate from the token-count
-  dtype (`int64`). The future FSDP state migration remains tracked separately.
+- [~] Store PMAP `tokens_processed` and per-step token increments as host-side
+  `int64` values. Device-side token accumulation is intentionally disabled
+  because global JAX x64 breaks SplashAttention index arithmetic; TPU
+  validation and the future FSDP path remain pending.
+- [x] Keep the PMAP optimizer step dtype (`int32`) separate from the host token
+  count dtype (`int64`). The future FSDP state migration remains tracked
+  separately.
 - [~] Ensure async checkpoint restore performs the same metadata compatibility
   checks as the synchronous path. The composite manager now persists metadata
   atomically and validates it before restore; TPU validation is pending.

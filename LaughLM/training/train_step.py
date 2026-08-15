@@ -425,24 +425,9 @@ def create_train_step(
             loss,
         )
 
-        local_tokens = (
-            batch.shape[0]
-            * batch.shape[1]
-            * batch.shape[2]
-        )
-
-        global_tokens = jax.lax.psum(
-            jnp.asarray(
-                local_tokens,
-                dtype=jnp.int64,
-            ),
-            axis_name="data",
-        )
-
         new_state = state.apply_grad_step(
             params=new_params,
             opt_state=new_opt_state,
-            tokens_in_step=global_tokens,
         )
 
         metrics = {
