@@ -23,6 +23,22 @@ def _load_json(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+
+    records = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                records.append(value)
+    return records
+
+
 def _fmt(value: Any, digits: int = 3, suffix: str = "") -> str:
     if value is None:
         return "n/a"
@@ -60,10 +76,24 @@ def build_report(
     metrics_path: Path,
     summary: dict[str, Any],
     manifest: dict[str, Any] | None,
+    checkpoint_timings: list[dict[str, Any]],
     skip_steps: int,
     last_n: int | None,
 ) -> str:
     total_step = summary.get("total_step_time_mean")
+    checkpoint_total = sum(
+        float(record.get("total_overhead_time", 0.0))
+        for record in checkpoint_timings
+    )
+    checkpoint_wait = sum(
+        float(record.get("completion_wait_time", 0.0))
+        for record in checkpoint_timings
+    )
+    checkpoint_save = sum(
+        float(record.get("save_call_time", 0.0))
+        for record in checkpoint_timings
+    )
+    checkpoint_count = len(checkpoint_timings)
     lines = [
         "# LaughLM PMAP Performance Baseline",
         "",
@@ -105,7 +135,10 @@ def build_report(
         f"- First-step compile-plus-execute: `{_fmt(summary.get('first_step_compile_plus_execute_time'))} seconds`",
         "- Exact compile-only time: `pending TPU validation`; the first step includes execution.",
         "- Warm-cache reuse: `pending comparison of cold and warm TPU runs`.",
-        "- Checkpoint completion overhead: `not present in metrics.jsonl`; use profiler/checkpoint artifacts when available.",
+        f"- Checkpoint records: `{checkpoint_count}`",
+        f"- Checkpoint save-call time total: `{_fmt(checkpoint_save)} seconds`",
+        f"- Checkpoint completion-wait time total: `{_fmt(checkpoint_wait)} seconds`",
+        f"- Checkpoint overhead total: `{_fmt(checkpoint_total)} seconds`",
         "",
         "## Runtime shape",
         "",
@@ -158,6 +191,9 @@ def main() -> int:
         last_n=args.last_n,
     )
     manifest = _load_json(metrics_path.parent / "run_manifest.json")
+    checkpoint_timings = _load_jsonl(
+        metrics_path.parent / "checkpoint_timings.jsonl"
+    )
     output_path = Path(args.output).expanduser() if args.output else (
         metrics_path.parent / "performance_baseline.md"
     )
@@ -167,6 +203,7 @@ def main() -> int:
             metrics_path=metrics_path,
             summary=summary,
             manifest=manifest,
+            checkpoint_timings=checkpoint_timings,
             skip_steps=args.skip_steps,
             last_n=args.last_n,
         ),
