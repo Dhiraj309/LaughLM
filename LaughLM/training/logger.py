@@ -339,6 +339,7 @@ class TrainingLogger:
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         self.metrics_path = ckpt_dir / "metrics.jsonl"
+        self.checkpoint_timings_path = ckpt_dir / "checkpoint_timings.jsonl"
 
         self._writer_thread = None
 
@@ -829,6 +830,38 @@ class TrainingLogger:
     # ========================================================
     # Writer thread
     # ========================================================
+
+    def log_checkpoint_timing(
+        self,
+        *,
+        step: int,
+        tokens_processed: int,
+        phase: str,
+        save_call_time: float,
+        completion_wait_time: float,
+        total_overhead_time: float,
+    ) -> None:
+        """Persist checkpoint timing without mixing it into step metrics."""
+        if not self._is_writer:
+            return
+
+        record = {
+            "record_type": "checkpoint",
+            "step": int(step),
+            "tokens_processed": int(tokens_processed),
+            "phase": str(phase),
+            "save_call_time": float(save_call_time),
+            "completion_wait_time": float(completion_wait_time),
+            "total_overhead_time": float(total_overhead_time),
+            "wall_time": float(time.time()),
+        }
+
+        with self.checkpoint_timings_path.open(
+            "a",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(json.dumps(record) + "\n")
+            handle.flush()
 
     def _writer_loop(self):
         with open(

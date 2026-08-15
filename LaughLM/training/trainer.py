@@ -746,6 +746,7 @@ class Trainer:
                         == 0
                     ):
                         with self.profiler.section("checkpoint", category="checkpoint"):
+                            checkpoint_start = time.perf_counter()
                             self.logger.flush()
 
                             state_to_save = _unreplicate(
@@ -768,10 +769,23 @@ class Trainer:
                                 ),
                             }
 
+                            save_start = time.perf_counter()
                             self.checkpoints.save(
                                 step=current_step,
                                 state=state_to_save,
                                 metadata=metadata,
+                            )
+                            save_call_time = time.perf_counter() - save_start
+                            total_overhead_time = (
+                                time.perf_counter() - checkpoint_start
+                            )
+                            self.logger.log_checkpoint_timing(
+                                step=current_step,
+                                tokens_processed=host_tokens_seen,
+                                phase="interval",
+                                save_call_time=save_call_time,
+                                completion_wait_time=0.0,
+                                total_overhead_time=total_overhead_time,
                             )
 
                             print(
@@ -790,6 +804,7 @@ class Trainer:
                 flush=True,
             )
 
+            checkpoint_start = time.perf_counter()
             self.logger.flush()
 
             state_to_save = _unreplicate(
@@ -815,13 +830,27 @@ class Trainer:
                 ),
             }
 
+            save_start = time.perf_counter()
             self.checkpoints.save(
                 step=final_step,
                 state=state_to_save,
                 metadata=metadata,
             )
+            save_call_time = time.perf_counter() - save_start
 
+            wait_start = time.perf_counter()
             self.checkpoints.wait()
+            completion_wait_time = time.perf_counter() - wait_start
+            self.logger.log_checkpoint_timing(
+                step=final_step,
+                tokens_processed=final_tokens_seen,
+                phase="final",
+                save_call_time=save_call_time,
+                completion_wait_time=completion_wait_time,
+                total_overhead_time=(
+                    time.perf_counter() - checkpoint_start
+                ),
+            )
 
             self.logger.log_summary(
                 step=final_step,
