@@ -27,6 +27,7 @@ for a clean resume.
 from __future__ import annotations
 
 import json
+import os
 import traceback
 from pathlib import Path
 
@@ -115,17 +116,31 @@ class CheckpointManager:
         path = self._metadata_path(
             step
         )
+        temp_path = path.with_name(
+            f".{path.name}.tmp-{os.getpid()}",
+        )
 
-        with open(
-            path,
-            "w",
-        ) as f:
-            json.dump(
-                metadata,
-                f,
-                indent=2,
-                sort_keys=True,
+        try:
+            with open(
+                temp_path,
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump(
+                    metadata,
+                    f,
+                    indent=2,
+                    sort_keys=True,
+                )
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(
+                temp_path,
+                path,
             )
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
 
     def load_metadata(
         self,
@@ -168,18 +183,32 @@ class CheckpointManager:
                 f"checkpoint-save-{step}"
             )
 
-            if metadata is not None:
-                self.save_metadata(
-                    step=step,
-                    metadata=metadata,
-                )
-
             self.manager.save(
                 step,
                 args=ocp.args.StandardSave(
                     state
                 ),
             )
+            self.manager.wait_until_finished()
+
+            saved_steps = self.manager.all_steps(
+                read=True,
+            )
+            if step not in saved_steps:
+                raise RuntimeError(
+                    "Orbax save completed without registering "
+                    f"checkpoint step {step}."
+                )
+
+            if metadata is not None:
+                self.save_metadata(
+                    step=step,
+                    metadata=metadata,
+                )
+                print(
+                    f"[checkpoint] metadata committed step {step:,}",
+                    flush=True,
+                )
 
         except Exception as e:
             print(

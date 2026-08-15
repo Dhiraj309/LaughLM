@@ -57,6 +57,7 @@ def main():
         global_batch_size=global_batch_size,
         process_index=jax.process_index(),
         process_count=jax.process_count(),
+        vocab_size=config.model.vocab_size,
     )
 
     trainer = Trainer(

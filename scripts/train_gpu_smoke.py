@@ -60,6 +60,10 @@ def main():
         process_count=(
             jax.process_count()
         ),
+
+        vocab_size=(
+            config.model.vocab_size
+        ),
     )
 
     trainer = Trainer(
