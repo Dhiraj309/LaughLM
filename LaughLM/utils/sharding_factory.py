@@ -41,6 +41,7 @@ def build_mesh(config: LaughLMConfig) -> Mesh:
     Construct physical TPU mesh based on config.optimizations.sharding_strategy.
 
     Enforces contiguous_submeshes=True for optimal ICI interconnect routing.
+    The PMAP strategy uses the native pure-data mesh path.
     """
     sharding_strategy = getattr(
         getattr(config, "optimizations", None),
@@ -94,7 +95,9 @@ def build_mesh(config: LaughLMConfig) -> Mesh:
         )
         return mesh
 
-    # Default FSDP native mesh construction (which already sets contiguous_submeshes=True)
+    # PMAP and FSDP use the native mesh construction, which already sets
+    # contiguous_submeshes=True. Their trainer-specific semantics are selected
+    # by runtime.backend.
     return create_native_mesh(config)
 
 

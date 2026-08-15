@@ -853,11 +853,16 @@ class OptimizationsConfig(BaseModel):
     )
 
     sharding_strategy: Literal[
+        "pmap",
         "fsdp",
         "maxtext_3d",
     ] = Field(
         default="fsdp",
-        description="Sharding & mesh layout. 'fsdp' uses standard FSDP, 'maxtext_3d' uses MaxText 3D & Sequence Parallelism.",
+        description=(
+            "Sharding & mesh layout. 'pmap' is pure replicated PMAP, "
+            "'fsdp' uses standard FSDP, and 'maxtext_3d' uses MaxText 3D "
+            "& Sequence Parallelism."
+        ),
     )
 
     optimizer_mu_bf16: bool = Field(
