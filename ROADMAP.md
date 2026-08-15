@@ -52,7 +52,7 @@ configuration is real GQA with fewer KV heads, subject to Splash TPU validation.
 |---|---|---|---|
 | [ ] | M0 | Freeze the active baseline and measurement contract | Now |
 | [~] | M1 | Make HF `.bin` ingestion safe and observable; implementation complete, TPU gate pending | Blocking |
-| [ ] | M2 | Make configuration and architecture intent authoritative | Blocking |
+| [~] | M2 | Make configuration and architecture intent authoritative; dtype subset complete, GQA pending | Blocking |
 | [ ] | M3 | Make token accounting and checkpoint resume durable | Blocking |
 | [ ] | M4 | Establish a measured PMAP performance baseline | High |
 | [ ] | M5 | Validate and optimize real GQA + SplashAttention | High |
@@ -127,16 +127,17 @@ configuration is real GQA with fewer KV heads, subject to Splash TPU validation.
 **Goal:** Ensure configuration values describe the model and execution that
 actually run.
 
-**Status:** [ ] Not started
+**Status:** [~] Dtype subset implemented; TPU validation pending. Real GQA deferred to M5.
 
 ### Features
 
-- [ ] Make `spmd.dtype` the canonical dtype policy for parameter, compute, and
+- [x] Make `spmd.dtype` the canonical dtype policy for parameter, compute, and
   output dtypes.
-- [ ] Remove or reject the unused top-level `dtype` YAML block.
-- [ ] Reconcile legacy `parallelism` dtype fields and checkpoint metadata during
+- [x] Remove or reject the unused top-level `dtype` YAML block from the active
+  production config.
+- [x] Reconcile legacy `parallelism` dtype fields and checkpoint metadata during
   migration.
-- [ ] Set `optimizations.sharding_strategy` to a PMAP-appropriate value or clearly
+- [x] Set `optimizations.sharding_strategy` to a PMAP-appropriate value or clearly
   mark it as unused by the PMAP trainer.
 - [ ] Require true GQA when `attention_variant: gqa`: `num_kv_heads` must be less
   than `num_heads` unless an explicit MHA mode is selected.

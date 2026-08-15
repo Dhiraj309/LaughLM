@@ -144,12 +144,12 @@ spmd:
     # v5-lite high-throughput configuration is the unscanned stack.
     scan_layers: false
     prevent_cse: false
-
-
-dtype:
-  param_dtype: float32
-  compute_dtype: bfloat16
-  output_dtype: float32
+  # Canonical model dtype policy. The parallelism dtype fields above remain
+  # only for backward-compatible config/checkpoint metadata.
+  dtype:
+    param_dtype: float32
+    compute_dtype: bfloat16
+    output_dtype: float32
 
 
 monitoring:
@@ -168,6 +168,6 @@ optimizations:
   kernel_backend: "native"
   # Native memmap is the throughput-proven v5-lite path; Grain remains optional.
   data_backend: "native"
-  sharding_strategy: "fsdp"
+  sharding_strategy: "pmap"
   optimizer_mu_bf16: true
   async_checkpointing: true

@@ -274,8 +274,13 @@ def estimate_memory_usage(config: LaughLMConfig) -> Dict[str, float]:
 
     total_params = estimate_parameters(config)["total_params"]
 
+    dtype_cfg = getattr(
+        getattr(config, "spmd", None),
+        "dtype",
+        None,
+    )
     param_dtype = getattr(
-        config.parallelism,
+        dtype_cfg,
         "param_dtype",
         "float32",
     )

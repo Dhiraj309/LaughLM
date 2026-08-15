@@ -54,9 +54,10 @@ def build_llama_config(config: LaughLMConfig) -> LlamaConfig:
         multiple_of=256,
     )
 
-    param_dtype = _dtype(config.parallelism.param_dtype)
-    compute_dtype = _dtype(config.parallelism.compute_dtype)
-    output_dtype = jnp.float32
+    dtype_cfg = config.spmd.dtype
+    param_dtype = _dtype(dtype_cfg.param_dtype)
+    compute_dtype = _dtype(dtype_cfg.compute_dtype)
+    output_dtype = _dtype(dtype_cfg.output_dtype)
 
     return LlamaConfig(
         # ====================================================

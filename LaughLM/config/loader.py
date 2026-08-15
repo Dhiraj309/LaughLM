@@ -69,6 +69,35 @@ def _normalize_path(path: Union[str, Path]) -> Path:
     return path
 
 
+def _normalize_dtype_config(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Migrate legacy parallelism dtypes into the canonical SPMD block."""
+    parallelism = data.get("parallelism")
+    if not isinstance(parallelism, dict):
+        return data
+
+    spmd = data.get("spmd")
+    if spmd is None:
+        spmd = {}
+    elif not isinstance(spmd, dict):
+        raise ValueError("spmd must be a mapping when provided.")
+
+    if "dtype" not in spmd:
+        legacy_dtype = data.get("dtype")
+        legacy_output = (
+            legacy_dtype.get("output_dtype", "float32")
+            if isinstance(legacy_dtype, dict)
+            else "float32"
+        )
+        spmd["dtype"] = {
+            "param_dtype": parallelism.get("param_dtype", "float32"),
+            "compute_dtype": parallelism.get("compute_dtype", "bfloat16"),
+            "output_dtype": legacy_output,
+        }
+
+    data["spmd"] = spmd
+    return data
+
+
 # ------------------------------------------------------------
 # Main config loader
 # ------------------------------------------------------------
@@ -107,6 +136,8 @@ def load_config(
 
     else:
         merged = base_dict
+
+    merged = _normalize_dtype_config(merged)
 
     # Pydantic schema validation
     config = LaughLMConfig(**merged)

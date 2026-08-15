@@ -16,6 +16,7 @@ def validate_config(config: LaughLMConfig) -> None:
     """
 
     _validate_runtime_backend(config)
+    _validate_dtype_alignment(config)
     _validate_parallelism_mesh_alignment(config)
     _validate_attention_mesh_compatibility(config)
     _validate_attention_heads(config)
@@ -30,6 +31,30 @@ def validate_config(config: LaughLMConfig) -> None:
 # ------------------------------------------------------------
 # Shared helpers
 # ------------------------------------------------------------
+
+def _validate_dtype_alignment(config: LaughLMConfig) -> None:
+    """Ensure legacy dtype fields cannot diverge from canonical SPMD policy."""
+    canonical = config.spmd.dtype
+    legacy = config.parallelism
+
+    mismatches = []
+    if canonical.param_dtype != legacy.param_dtype:
+        mismatches.append(
+            f"param_dtype: spmd={canonical.param_dtype!r}, "
+            f"parallelism={legacy.param_dtype!r}"
+        )
+    if canonical.compute_dtype != legacy.compute_dtype:
+        mismatches.append(
+            f"compute_dtype: spmd={canonical.compute_dtype!r}, "
+            f"parallelism={legacy.compute_dtype!r}"
+        )
+
+    if mismatches:
+        raise ValueError(
+            "Canonical spmd.dtype and legacy parallelism dtype fields must "
+            "match during the dtype migration:\n"
+            + "\n".join(f"  - {item}" for item in mismatches)
+        )
 
 def _validate_optimizations(config: LaughLMConfig) -> None:
     """Validate optimization options."""
@@ -51,7 +76,7 @@ def _validate_optimizations(config: LaughLMConfig) -> None:
             f"Expected one of {sorted(valid_data)}"
         )
 
-    valid_sharding = {"fsdp", "maxtext_3d"}
+    valid_sharding = {"pmap", "fsdp", "maxtext_3d"}
     if opts.sharding_strategy not in valid_sharding:
         raise ValueError(
             f"Invalid optimizations.sharding_strategy: {opts.sharding_strategy!r}. "
