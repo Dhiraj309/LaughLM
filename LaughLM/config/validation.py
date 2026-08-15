@@ -472,12 +472,11 @@ def _validate_gqa_kv_heads(config: LaughLMConfig) -> None:
     """
     When GQA is selected, num_kv_heads must:
       - Be specified
-      - Be <= num_heads
+      - Be < num_heads
       - Divide num_heads evenly
 
-    Equal Q/KV head counts remain temporarily valid for backward-compatible
-    configurations. The production configuration uses attention_variant='mha'
-    until real GQA is implemented in M5.
+    Equal Q/KV head counts are MHA and must be declared explicitly as
+    attention_variant='mha'.
     """
 
     if config.architecture.attention_variant != "gqa":
@@ -490,7 +489,6 @@ def _validate_gqa_kv_heads(config: LaughLMConfig) -> None:
         raise ValueError(
             "attention_variant='gqa' requires model.num_kv_heads to be set. "
             f"For a {num_heads}-head model, typical values are "
-            f"{num_heads} for MHA-compatible GQA, "
             f"{max(num_heads // 4, 1)} for 4:1 GQA, or "
             f"{max(num_heads // 8, 1)} for 8:1 GQA."
         )
@@ -500,9 +498,11 @@ def _validate_gqa_kv_heads(config: LaughLMConfig) -> None:
             f"num_kv_heads must be > 0, got {num_kv_heads}."
         )
 
-    if num_kv_heads > num_heads:
+    if num_kv_heads >= num_heads:
         raise ValueError(
-            f"num_kv_heads ({num_kv_heads}) must be <= num_heads ({num_heads})."
+            "attention_variant='gqa' requires fewer KV heads than query heads: "
+            f"num_kv_heads={num_kv_heads}, num_heads={num_heads}. "
+            "Use attention_variant='mha' when the head counts are equal."
         )
 
     if num_heads % num_kv_heads != 0:
