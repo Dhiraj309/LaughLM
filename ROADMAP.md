@@ -188,14 +188,16 @@ deliberate incompatible-config rejection remain pending.
   before continuing to step 60.
 - [x] Preserve the existing atomic metadata write and save-completion ordering.
 - [~] Verify retention behavior with `checkpoint_max_to_keep: 1`.
-  Native sidecar metadata now follows Orbax-retained steps; TPU validation of
-  both native and async managers is pending.
+  Native sidecar metadata now follows Orbax-retained steps, including for
+  state-only saves; TPU validation of both native and async managers is pending.
 
 ### Exit gate
 
 - [x] A TPU run can save, stop, restart, restore, and continue with monotonic
   step and token counts.
-- [ ] A deliberately incompatible config is rejected before training resumes.
+- [~] A deliberately incompatible config is rejected before training resumes.
+  Model, optimizer/scheduler, layout/dtype, and execution-contract mismatches
+  now fail before restore; TPU confirmation remains pending.
 
 ### TPU gate for changes in M3
 
