@@ -252,17 +252,22 @@ warm-cache TPU validation remains pending.
 
 **Goal:** Move from the current MHA-equivalent setup to validated GQA.
 
-**Status:** [ ] Not started
+**Status:** [~] Maintained LLaMA GQA/Splash implementation started; TPU
+validation and performance comparison remain pending.
 
 ### Features
 
-- [ ] Select a concrete ratio, initially `num_heads=8`, `num_kv_heads=2` or `4`.
-- [ ] Verify Q/K/V projection shapes and KV-head broadcasting.
-- [ ] Verify SplashAttention supports the selected GQA shape on the target JAX/TPU
-  stack.
+- [x] Select the initial comparison ratio as `num_heads=8`, `num_kv_heads=4`;
+  keep the production MHA baseline unchanged until the TPU comparison.
+- [~] Verify Q/K/V projection shapes and KV-head broadcasting. Compact K/V
+  projections and caches are preserved; Splash receives an explicit expanded
+  head layout. TPU shape validation remains pending.
+- [~] Verify SplashAttention supports the selected GQA shape on the target JAX/TPU
+  stack. The maintained path now expands compact KV heads at the Splash
+  boundary; TPU kernel validation remains pending.
 - [ ] Compare GQA against the current MHA-equivalent baseline for loss, memory,
   compile time, and tokens/sec.
-- [ ] Keep `attention_fallback: error` for production so an unintended XLA fallback
+- [x] Keep `attention_fallback: error` for production so an unintended XLA fallback
   cannot masquerade as a Splash benchmark.
 
 ### Exit gate

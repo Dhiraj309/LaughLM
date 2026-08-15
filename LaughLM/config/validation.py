@@ -440,18 +440,6 @@ def _validate_attention_variant(config: LaughLMConfig) -> None:
             f"{num_kv_heads}."
         )
 
-    if (
-        config.architecture.attention_impl == "splash"
-        and variant in {"gqa", "mqa"}
-        and num_kv_heads != num_heads
-    ):
-        raise ValueError(
-            "attention_impl='splash' does not yet support grouped KV heads "
-            "in this LLaMA implementation. Use attention_variant='mha' with "
-            f"num_kv_heads={num_heads}, or use attention_impl='standard' or "
-            "'xla' until M5 adds real GQA/MQA Splash support."
-        )
-
 def _validate_attention_heads(config: LaughLMConfig) -> None:
     """
     Ensure head dimension divides model dimension.
