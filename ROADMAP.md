@@ -174,7 +174,8 @@ and remaining durability work pending.
   The active PMAP path now uses int64 counters and promotes legacy int32
   checkpoints from metadata; TPU validation and the future FSDP path remain
   pending.
-- [ ] Keep optimizer step dtype separate from token-count dtype.
+- [x] Keep the PMAP optimizer step dtype (`int32`) separate from the token-count
+  dtype (`int64`). The future FSDP state migration remains tracked separately.
 - [~] Ensure async checkpoint restore performs the same metadata compatibility
   checks as the synchronous path. The composite manager now persists metadata
   atomically and validates it before restore; TPU validation is pending.
@@ -182,7 +183,9 @@ and remaining durability work pending.
   are committed in a recoverable order. Native PMAP now records a deterministic
   next-batch index; TPU save/resume validation is pending.
 - [x] Preserve the existing atomic metadata write and save-completion ordering.
-- [ ] Verify retention behavior with `checkpoint_max_to_keep: 1`.
+- [~] Verify retention behavior with `checkpoint_max_to_keep: 1`.
+  Native sidecar metadata now follows Orbax-retained steps; TPU validation of
+  both native and async managers is pending.
 
 ### Exit gate
 

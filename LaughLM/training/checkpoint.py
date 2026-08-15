@@ -43,6 +43,13 @@ class CheckpointManager:
     ):
         self.directory = Path(directory).expanduser().resolve()
 
+        if max_to_keep <= 0:
+            raise ValueError(
+                f"max_to_keep must be > 0, got {max_to_keep}."
+            )
+
+        self.max_to_keep = int(max_to_keep)
+
         self.directory.mkdir(
             parents=True,
             exist_ok=True,
@@ -159,6 +166,19 @@ class CheckpointManager:
         ) as f:
             return json.load(f)
 
+    def _prune_metadata(self, saved_steps) -> None:
+        """Remove sidecar metadata for checkpoints Orbax already deleted."""
+        retained_steps = {int(step) for step in saved_steps}
+
+        for path in self.metadata_dir.glob("step_*.json"):
+            try:
+                step = int(path.stem.removeprefix("step_"))
+            except ValueError:
+                continue
+
+            if step not in retained_steps:
+                path.unlink()
+
     # --------------------------------------------------------
     # Save / restore
     # --------------------------------------------------------
@@ -205,6 +225,7 @@ class CheckpointManager:
                     step=step,
                     metadata=metadata,
                 )
+                self._prune_metadata(saved_steps)
                 print(
                     f"[checkpoint] metadata committed step {step:,}",
                     flush=True,
