@@ -271,6 +271,42 @@ def _pad_for_splash(
     return q, k, v, pad
 
 
+def _expand_kv_heads_for_splash(
+    query_states: jnp.ndarray,
+    key_states: jnp.ndarray,
+    value_states: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Expand compact KV heads to the query-head shape required by Splash.
+
+    The projections and KV cache remain GQA-shaped. Expansion happens only at
+    the current Splash kernel boundary, which still consumes an MHA-shaped
+    head layout. This preserves GQA parameterization and cache memory while
+    making the kernel's head contract explicit for TPU validation.
+    """
+
+    query_heads = query_states.shape[2]
+    kv_heads = key_states.shape[2]
+
+    if query_heads == kv_heads:
+        return key_states, value_states
+
+    if query_heads % kv_heads != 0:
+        raise ValueError(
+            "Splash GQA requires query heads to be divisible by KV heads: "
+            f"query_heads={query_heads}, kv_heads={kv_heads}."
+        )
+
+    repeats = query_heads // kv_heads
+    _log_attention_backend(
+        f"splash attention GQA KV expansion {kv_heads}->{query_heads}"
+    )
+
+    return (
+        jnp.repeat(key_states, repeats, axis=2),
+        jnp.repeat(value_states, repeats, axis=2),
+    )
+
+
 def _splash_attention(
     query_states: jnp.ndarray,
     key_states: jnp.ndarray,
@@ -308,15 +344,9 @@ def _splash_attention(
         block_size=block_size,
     )
 
-    B, T, QH, Dh = q.shape
-    KVH = k.shape[2]
+    k, v = _expand_kv_heads_for_splash(q, k, v)
 
-    if QH != KVH:
-        raise NotImplementedError(
-            "Splash path currently requires "
-            "num_attention_heads == num_key_value_heads. "
-            "Use XLA SDPA for true GQA/MQA."
-        )
+    B, T, QH, Dh = q.shape
 
     block, _ = _find_splash_block_size(T, block_size)
 
