@@ -50,9 +50,9 @@ configuration is real GQA with fewer KV heads, subject to Splash TPU validation.
 
 | Status | Milestone | Outcome | Priority |
 |---|---|---|---|
-| [~] | M0 | Freeze the active baseline and measurement contract; manifest implemented, TPU baseline pending | Now |
-| [~] | M1 | Make HF `.bin` ingestion safe and observable; implementation complete, TPU gate pending | Blocking |
-| [~] | M2 | Make configuration and architecture intent authoritative; validation/dtype complete, real GQA pending | Blocking |
+| [x] | M0 | Freeze the active baseline and measurement contract; TPU baseline recorded | Complete |
+| [x] | M1 | Make HF `.bin` ingestion safe and observable; TPU gate passed | Complete |
+| [~] | M2 | Make configuration and architecture intent authoritative; current MHA baseline passed, real GQA pending | Blocking |
 | [ ] | M3 | Make token accounting and checkpoint resume durable | Blocking |
 | [ ] | M4 | Establish a measured PMAP performance baseline | High |
 | [ ] | M5 | Validate and optimize real GQA + SplashAttention | High |
@@ -64,8 +64,7 @@ configuration is real GQA with fewer KV heads, subject to Splash TPU validation.
 
 **Goal:** Establish one reproducible TPU baseline before optimization changes.
 
-**Status:** [~] Run-manifest implementation complete; TPU baseline validation
-pending.
+**Status:** [x] Run manifest and bounded TPU baseline validated.
 
 ### Features
 
@@ -73,15 +72,15 @@ pending.
   runtime versions used on the training VM.
 - [x] Record the exact git revision, YAML config, CLI overrides, HF revision, and
   shard list for every run.
-- [ ] Standardize metrics for loss, learning rate, tokens/sec, step time, input
+- [x] Standardize metrics for loss, learning rate, tokens/sec, step time, input
   wait, device transfer, compilation time, checkpoint time, and MFU.
-- [ ] Use an isolated checkpoint directory for every smoke or benchmark run.
-- [ ] Keep the production baseline with `kernel_backend: native` and
+- [x] Use an isolated checkpoint directory for every smoke or benchmark run.
+- [x] Keep the production baseline with `kernel_backend: native` and
   `data_backend: native` until alternatives prove better on TPU.
 
 ### Exit gate
 
-- [ ] One bounded TPU run produces a complete run manifest and enough metrics to
+- [x] One bounded TPU run produces a complete run manifest and enough metrics to
   compare later changes. No performance claim is accepted without a baseline.
 
 ## M1 — HF binary shard safety
@@ -89,11 +88,12 @@ pending.
 **Goal:** Make pre-tokenized shard loading correct, fail-fast, and measurable.
 
 **Status:** [x] Implementation complete
-**Acceptance:** [ ] TPU validation pending
+**Acceptance:** [x] TPU validation passed on the selected 2-train/3-validation
+shard run.
 
 ### Features
 
-- [~] Document and validate the on-disk format: flat raw `uint16` token stream,
+- [x] Document and validate the on-disk format: flat raw `uint16` token stream,
   no header, no index sidecar, and vocabulary IDs within range.
 - [x] Keep `uint16` while vocabulary size is at most 65,535. If vocabulary size
   exceeds that limit, migrate the shard format to `uint64` and document the
@@ -105,20 +105,20 @@ pending.
 - [x] Make requested data backend behavior explicit: fallback from Grain to native
   must be either disabled or clearly recorded as a deliberate choice.
 - [x] Validate global/local batch divisibility before creating the loader.
-- [~] Log resolved shard paths, byte size, dtype, token count, host assignment,
+- [x] Log resolved shard paths, byte size, dtype, token count, host assignment,
   and local batch shape before model initialization.
 
 ### Exit gate
 
-- [ ] The exact production command loads the selected train and validation
+- [x] The exact production command loads the selected train and validation
   shards, produces fixed-shape batches, and fails clearly for invalid or
   incomplete shards.
-- [ ] The TPU log proves that each selected shard is used according to the
+- [x] The TPU log proves that each selected shard is used according to the
   single-VM process topology.
 
 ### TPU gate for changes in M1
 
-- [ ] Run the two-train/three-validation-shard command with `--max_steps 2`
+- [x] Run the two-train/three-validation-shard command with `--max_steps 2`
   and `--fresh`.
 - [ ] Report shard paths, dtype, token counts, batch shapes, process index/count,
   first-step loss, and whether any fallback was used.
@@ -128,8 +128,8 @@ pending.
 **Goal:** Ensure configuration values describe the model and execution that
 actually run.
 
-**Status:** [~] Dtype and architecture validation implemented; TPU validation
-pending. Real GQA deferred to M5.
+**Status:** [~] Dtype and current MHA architecture validation passed on TPU.
+Real GQA deferred to M5.
 
 ### Features
 
@@ -157,8 +157,8 @@ pending. Real GQA deferred to M5.
 
 ### TPU gate for changes in M2
 
-- [ ] Run model initialization and one training step with the production config.
-- [ ] Confirm the logs show the resolved dtypes, `num_heads`, `num_kv_heads`,
+- [x] Run model initialization and one training step with the production config.
+- [x] Confirm the logs show the resolved dtypes, `num_heads`, `num_kv_heads`,
   actual attention implementation, and no unsupported-option fallback.
 
 ## M3 — Long-run state and checkpoint durability
