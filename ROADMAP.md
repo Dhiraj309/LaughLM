@@ -269,8 +269,9 @@ validation and performance comparison remain pending.
 - [~] Verify SplashAttention supports the selected GQA shape on the target JAX/TPU
   stack. The maintained path now expands compact KV heads at the Splash
   boundary; TPU kernel validation remains pending.
-- [ ] Compare GQA against the current MHA-equivalent baseline for loss, memory,
-  compile time, and tokens/sec.
+- [~] Compare GQA against the current MHA-equivalent baseline for loss, memory,
+  compile time, and tokens/sec. A static MHA-vs-GQA report is implemented;
+  TPU artifacts and memory/fallback evidence remain pending.
 - [x] Keep `attention_fallback: error` for production so an unintended XLA fallback
   cannot masquerade as a Splash benchmark.
 
