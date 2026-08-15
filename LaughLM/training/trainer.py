@@ -273,6 +273,9 @@ class Trainer:
             target_state=state,
             config=config,
             num_devices=self.num_devices,
+            require_metadata=True,
+            require_v3=True,
+            purpose="pmap_resume",
         )
 
         tokens_per_step_for_resume = (

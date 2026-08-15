@@ -175,8 +175,9 @@ and remaining durability work pending.
   checkpoints from metadata; TPU validation and the future FSDP path remain
   pending.
 - [ ] Keep optimizer step dtype separate from token-count dtype.
-- [ ] Ensure async checkpoint restore performs the same metadata compatibility
-  checks as the synchronous path.
+- [~] Ensure async checkpoint restore performs the same metadata compatibility
+  checks as the synchronous path. The composite manager now persists metadata
+  atomically and validates it before restore; TPU validation is pending.
 - [ ] Ensure model state, optimizer state, token count, iterator state, and metadata
   are committed in a recoverable order.
 - [x] Preserve the existing atomic metadata write and save-completion ordering.

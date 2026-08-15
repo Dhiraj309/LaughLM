@@ -122,13 +122,22 @@ class OrbaxCompositeCheckpointManager:
         require_v3: bool = True,
         purpose: str = "fsdp_resume",
     ) -> Optional[Tuple[Any, int]]:
-        """Restore latest checkpoint to match native CheckpointManager interface."""
+        """Validate metadata, then restore latest checkpoint state."""
         latest_step = self.latest_step()
         if latest_step is None:
             return None
-        
+
+        metadata = self.load_metadata(latest_step)
+        NativeCheckpointManager.validate_metadata_compatible(
+            metadata=metadata,
+            config=config,
+            num_devices=num_devices,
+            require_metadata=require_metadata,
+            require_v3=require_v3,
+            purpose=purpose,
+        )
+
         state, _ = self.restore_composite(latest_step, target_state)
-        # Simplified return to match native interface expected by FSDPTrainer
         return state, latest_step
 
     def wait(self):
@@ -169,11 +178,13 @@ class OrbaxCompositeCheckpointManager:
         """
         Atomically co-serialize model weights, Optax optimizer states, and Grain dataset iterator states.
         """
-        composite_data = {
-            "state": model_state,
-            "grain_iterator": grain_state or {},
-            "metadata": metadata or {},
-        }
+        if isinstance(self.manager, NativeCheckpointManager):
+            self.manager.save(
+                step,
+                model_state,
+                metadata=metadata,
+            )
+            return True
 
         try:
             if hasattr(self.manager, "save"):
@@ -182,23 +193,74 @@ class OrbaxCompositeCheckpointManager:
                     save_args = ocp.args.Composite(
                         state=ocp.args.StandardSave(model_state),
                         grain_iterator=ocp.args.JsonSave(grain_state or {}),
+                        metadata=ocp.args.JsonSave(metadata or {}),
                     )
                     self.manager.save(step, args=save_args)
                 else:
-                    self.manager.save(step, composite_data)
+                    self.manager.save(
+                        step,
+                        {
+                            "state": model_state,
+                            "grain_iterator": grain_state or {},
+                            "metadata": metadata or {},
+                        },
+                    )
 
                 logger.info(f"[checkpoint_factory] Composite checkpoint saved at step {step}.")
                 return True
         except Exception as e:
-            logger.warning(
-                f"[checkpoint_factory] Composite save via Orbax failed ({e}). Trying fallback native save."
-            )
+            raise RuntimeError(
+                "Composite checkpoint save failed before metadata could be "
+                "committed; refusing to write a state-only checkpoint."
+            ) from e
 
-        # Native fallback
-        if hasattr(self.manager, "save"):
-            self.manager.save(step, model_state)
-            return True
-        return False
+        raise RuntimeError(
+            "Checkpoint manager does not provide a supported save method."
+        )
+
+    @staticmethod
+    def _composite_item(restored: Any, name: str, default: Any) -> Any:
+        """Read a named Orbax composite item across supported return types."""
+        try:
+            return restored[name]
+        except (KeyError, TypeError):
+            return getattr(restored, name, default)
+
+    def load_metadata(self, step: int) -> Optional[Dict[str, Any]]:
+        """Load metadata written atomically with an async composite checkpoint."""
+        if isinstance(self.manager, NativeCheckpointManager):
+            return self.manager.load_metadata(step)
+
+        if not (
+            hasattr(self.manager, "restore")
+            and hasattr(ocp, "args")
+            and hasattr(ocp.args, "Composite")
+        ):
+            return None
+
+        try:
+            restored = self.manager.restore(
+                step,
+                args=ocp.args.Composite(
+                    metadata=ocp.args.JsonRestore(),
+                ),
+            )
+            metadata = self._composite_item(restored, "metadata", None)
+        except Exception as error:
+            logger.warning(
+                "[checkpoint_factory] Could not restore checkpoint metadata "
+                f"for step {step}: {error}"
+            )
+            return None
+
+        if metadata is None:
+            return None
+        if not isinstance(metadata, dict):
+            raise ValueError(
+                "Checkpoint metadata must be a JSON object, got "
+                f"{type(metadata).__name__}."
+            )
+        return metadata
 
     def restore_composite(
         self,
@@ -227,8 +289,16 @@ class OrbaxCompositeCheckpointManager:
                         grain_iterator=ocp.args.JsonRestore(),
                     )
                     restored = self.manager.restore(step, args=res_args)
-                    model_state = restored.get("state", target_model_state)
-                    grain_state = restored.get("grain_iterator", {})
+                    model_state = self._composite_item(
+                        restored,
+                        "state",
+                        target_model_state,
+                    )
+                    grain_state = self._composite_item(
+                        restored,
+                        "grain_iterator",
+                        {},
+                    )
                     return model_state, grain_state
                 else:
                     restored = self.manager.restore(step, target_model_state)
