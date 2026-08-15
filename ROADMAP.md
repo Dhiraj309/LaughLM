@@ -52,7 +52,7 @@ configuration is real GQA with fewer KV heads, subject to Splash TPU validation.
 |---|---|---|---|
 | [ ] | M0 | Freeze the active baseline and measurement contract | Now |
 | [~] | M1 | Make HF `.bin` ingestion safe and observable; implementation complete, TPU gate pending | Blocking |
-| [~] | M2 | Make configuration and architecture intent authoritative; dtype subset complete, GQA pending | Blocking |
+| [~] | M2 | Make configuration and architecture intent authoritative; validation/dtype complete, real GQA pending | Blocking |
 | [ ] | M3 | Make token accounting and checkpoint resume durable | Blocking |
 | [ ] | M4 | Establish a measured PMAP performance baseline | High |
 | [ ] | M5 | Validate and optimize real GQA + SplashAttention | High |
@@ -127,7 +127,8 @@ configuration is real GQA with fewer KV heads, subject to Splash TPU validation.
 **Goal:** Ensure configuration values describe the model and execution that
 actually run.
 
-**Status:** [~] Dtype subset implemented; TPU validation pending. Real GQA deferred to M5.
+**Status:** [~] Dtype and architecture validation implemented; TPU validation
+pending. Real GQA deferred to M5.
 
 ### Features
 
@@ -141,10 +142,11 @@ actually run.
   mark it as unused by the PMAP trainer.
 - [ ] Require true GQA when `attention_variant: gqa`: `num_kv_heads` must be less
   than `num_heads` unless an explicit MHA mode is selected.
-- [ ] Validate all architecture options used by the active LLaMA implementation;
-  unsupported variants must fail during config loading.
-- [ ] Keep `fused_qkv`, tied embeddings, SwiGLU, pre-norm, RoPE, and Splash as
-  explicit supported production choices.
+- [x] Validate all architecture options used by the active LLaMA implementation;
+  unsupported variants fail during config loading rather than silently no-op.
+- [x] Keep `fused_qkv`, tied embeddings, SwiGLU, pre-norm, RoPE, and Splash as
+  explicit supported production choices; label the current 8-Q/8-KV setup as
+  MHA until real GQA is available.
 
 ### Exit gate
 

@@ -14,7 +14,9 @@ architecture:
   positional: rope
   normalization: rms_norm
   norm_placement: pre
-  attention_variant: gqa
+  # 8 Q heads and 8 KV heads is MHA. Real GQA is an M5 change because the
+  # current SplashAttention path rejects grouped KV heads.
+  attention_variant: mha
   attention_impl: splash
   attention_fallback: error
   fused_qkv: true

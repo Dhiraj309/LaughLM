@@ -20,10 +20,9 @@ def validate_config(config: LaughLMConfig) -> None:
     _validate_parallelism_mesh_alignment(config)
     _validate_attention_mesh_compatibility(config)
     _validate_attention_heads(config)
+    _validate_active_llama_architecture(config)
+    _validate_attention_variant(config)
     _validate_gqa_kv_heads(config)
-    _validate_positional(config)
-    _validate_norm_residual_compatibility(config)
-    _validate_moe_requirements(config)
     _validate_scheduler_horizon(config)
     _validate_wsd_scheduler(config)
     _validate_optimizations(config)
@@ -380,6 +379,79 @@ def _validate_attention_mesh_compatibility(config: LaughLMConfig) -> None:
 # Validation Rules
 # ------------------------------------------------------------
 
+def _validate_active_llama_architecture(config: LaughLMConfig) -> None:
+    """Reject schema variants the maintained LLaMA model does not implement.
+
+    The shared schema intentionally contains options reserved for future model
+    families.  The maintained training path always constructs the LLaMA model,
+    so accepting a value that the implementation ignores would make the YAML
+    describe a different model from the one that is trained.
+    """
+
+    arch = config.architecture
+    required_values = {
+        "positional": (arch.positional, "rope"),
+        "normalization": (arch.normalization, "rms_norm"),
+        "norm_placement": (arch.norm_placement, "pre"),
+        "ffn_type": (arch.ffn_type, "swiglu"),
+        "residual": (arch.residual, "standard"),
+        "embeddings": (arch.embeddings, "standard"),
+    }
+
+    unsupported = [
+        f"{name}={actual!r} (supported: {expected!r})"
+        for name, (actual, expected) in required_values.items()
+        if actual != expected
+    ]
+
+    if arch.attention_variant == "mla":
+        unsupported.append(
+            "attention_variant='mla' (not implemented by LLaMA attention)"
+        )
+
+    if unsupported:
+        raise ValueError(
+            "The maintained LLaMA training path does not implement the "
+            "following architecture option(s):\n"
+            + "\n".join(f"  - {item}" for item in unsupported)
+            + "\nUse the documented LLaMA options, or implement and validate "
+            "the variant before enabling it."
+        )
+
+
+def _validate_attention_variant(config: LaughLMConfig) -> None:
+    """Ensure attention labels agree with the Q/KV head geometry."""
+
+    variant = config.architecture.attention_variant
+    num_heads = config.model.num_heads
+    num_kv_heads = config.model.num_kv_heads
+
+    if variant == "mha":
+        if num_kv_heads not in {None, num_heads}:
+            raise ValueError(
+                "attention_variant='mha' requires model.num_kv_heads to be "
+                f"unset or equal to num_heads ({num_heads}), got {num_kv_heads}."
+            )
+        return
+
+    if variant == "mqa" and num_kv_heads != 1:
+        raise ValueError(
+            "attention_variant='mqa' requires model.num_kv_heads=1, got "
+            f"{num_kv_heads}."
+        )
+
+    if (
+        config.architecture.attention_impl == "splash"
+        and variant in {"gqa", "mqa"}
+        and num_kv_heads != num_heads
+    ):
+        raise ValueError(
+            "attention_impl='splash' does not yet support grouped KV heads "
+            "in this LLaMA implementation. Use attention_variant='mha' with "
+            f"num_kv_heads={num_heads}, or use attention_impl='standard' or "
+            "'xla' until M5 adds real GQA/MQA Splash support."
+        )
+
 def _validate_attention_heads(config: LaughLMConfig) -> None:
     """
     Ensure head dimension divides model dimension.
@@ -402,6 +474,10 @@ def _validate_gqa_kv_heads(config: LaughLMConfig) -> None:
       - Be specified
       - Be <= num_heads
       - Divide num_heads evenly
+
+    Equal Q/KV head counts remain temporarily valid for backward-compatible
+    configurations. The production configuration uses attention_variant='mha'
+    until real GQA is implemented in M5.
     """
 
     if config.architecture.attention_variant != "gqa":
@@ -434,48 +510,6 @@ def _validate_gqa_kv_heads(config: LaughLMConfig) -> None:
             f"num_heads ({num_heads}) must be divisible by "
             f"num_kv_heads ({num_kv_heads}) so each KV group covers "
             f"the same number of Q heads."
-        )
-
-
-def _validate_positional(config: LaughLMConfig) -> None:
-    """
-    Validate positional embedding compatibility.
-    """
-
-    positional = config.architecture.positional
-
-    if positional == "alibi":
-        raise ValueError(
-            "positional='alibi' is not yet implemented. "
-            "Use 'rope' for current TPU PMAP training."
-        )
-
-
-def _validate_norm_residual_compatibility(config: LaughLMConfig) -> None:
-    """
-    DeepNorm requires matching residual configuration.
-    """
-
-    norm = config.architecture.normalization
-    residual = config.architecture.residual
-
-    if norm == "deep_norm" and residual != "deep_norm":
-        raise ValueError(
-            "normalization='deep_norm' requires residual='deep_norm'. "
-            "DeepNorm uses coordinated alpha/beta scaling between norm "
-            "and residual."
-        )
-
-
-def _validate_moe_requirements(config: LaughLMConfig) -> None:
-    """
-    Placeholder validation for MoE architecture.
-    """
-
-    if config.architecture.ffn_type == "moe":
-        raise ValueError(
-            "ffn_type='moe' selected but MoE is not yet implemented. "
-            "Use 'swiglu' for the current PMAP path."
         )
 
 
