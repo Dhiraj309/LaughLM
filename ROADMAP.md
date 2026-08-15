@@ -232,8 +232,10 @@ warm-cache TPU validation remains pending.
 
 ### Exit gate
 
-- [ ] Produce a baseline report with steady-state tokens/sec, MFU, memory
-  behavior, compile time, input wait percentage, and checkpoint overhead.
+- [~] Produce a baseline report with steady-state tokens/sec, MFU, memory
+  behavior, compile time, input wait percentage, and checkpoint overhead. The
+  static report generator is implemented; TPU evidence and checkpoint timing
+  artifacts remain pending.
 
 ### TPU gate for changes in M4
 
