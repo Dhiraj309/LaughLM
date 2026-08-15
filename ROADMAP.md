@@ -263,6 +263,9 @@ validation and performance comparison remain pending.
   the MHA baseline is not copied or overwritten.
 - [x] Add a dependency-light config-matrix audit for attention labels and
   Q/KV head geometry before TPU allocation.
+- [x] Record the requested attention implementation, fallback policy, head
+  geometry, and expected Splash GQA expansion in each run manifest; actual
+  dispatch still requires TPU log confirmation.
 - [~] Verify Q/K/V projection shapes and KV-head broadcasting. Compact K/V
   projections and caches are preserved; Splash receives an explicit expanded
   head layout. TPU shape validation remains pending.
