@@ -550,9 +550,15 @@ class CheckpointManager:
             )
         )
 
-        if state_token_counter_dtype not in {None, "int32", "int64"}:
+        if state_token_counter_dtype not in {
+            None,
+            "int32",
+            "int64",
+            "host-int64",
+        }:
             raise ValueError(
-                "state_token_counter_dtype must be None, 'int32', or 'int64', "
+                "state_token_counter_dtype must be None, 'int32', 'int64', "
+                "or 'host-int64', "
                 f"got {state_token_counter_dtype!r}."
             )
 

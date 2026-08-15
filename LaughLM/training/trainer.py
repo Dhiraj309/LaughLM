@@ -171,9 +171,9 @@ class Trainer:
         )
         stored_token_dtype = state_metadata.get(
             "tokens_processed_dtype",
-            "int64" if resume_step is None else "int32",
+            "host-int64",
         )
-        if stored_token_dtype not in {"int32", "int64"}:
+        if stored_token_dtype not in {"int32", "int64", "host-int64"}:
             raise ValueError(
                 "Unsupported checkpoint state token-counter dtype: "
                 f"{stored_token_dtype!r}."
@@ -258,14 +258,10 @@ class Trainer:
             params=params,
             opt_state=opt_state,
             step=jnp.array(0, dtype=jnp.int32),
-            tokens_processed=jnp.array(
-                0,
-                dtype=(
-                    jnp.int64
-                    if stored_token_dtype == "int64"
-                    else jnp.int32
-                ),
-            ),
+            # Keep device index arithmetic int32 for SplashAttention. The
+            # authoritative PMAP token counter is host_tokens_seen (Python
+            # int), which is serialized in checkpoint metadata.
+            tokens_processed=jnp.array(0, dtype=jnp.int32),
             rng_key=self.rng.key,
         )
 
@@ -323,15 +319,6 @@ class Trainer:
                     flush=True,
                 )
 
-            # Metadata is the authoritative PMAP token counter. Promote old
-            # int32 state here so all subsequent PMAP updates use int64.
-            state = state.replace(
-                tokens_processed=jnp.asarray(
-                    self.start_tokens_seen,
-                    dtype=jnp.int64,
-                )
-            )
-
             print(
                 f"[trainer] resumed from step={self.start_step:,} "
                 f"tokens={self.start_tokens_seen:,}",
@@ -349,8 +336,8 @@ class Trainer:
             )
 
         print(
-            "[trainer] token counter dtype="
-            f"{state.tokens_processed.dtype}",
+            "[trainer] token counter dtype=host-int64 "
+            "(device state counter disabled for Splash compatibility)",
             flush=True,
         )
 
@@ -740,7 +727,7 @@ class Trainer:
                                     step=current_step,
                                     tokens_processed=host_tokens_seen,
                                     num_devices=self.num_devices,
-                                    state_token_counter_dtype="int64",
+                                    state_token_counter_dtype="host-int64",
                                 )
                             )
                             metadata["data_iterator"] = {
@@ -787,7 +774,7 @@ class Trainer:
                     step=final_step,
                     tokens_processed=final_tokens_seen,
                     num_devices=self.num_devices,
-                    state_token_counter_dtype="int64",
+                    state_token_counter_dtype="host-int64",
                 )
             )
             metadata["data_iterator"] = {
