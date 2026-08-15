@@ -53,8 +53,8 @@ configuration is real GQA with fewer KV heads, subject to Splash TPU validation.
 | [x] | M0 | Freeze the active baseline and measurement contract; TPU baseline recorded | Complete |
 | [x] | M1 | Make HF `.bin` ingestion safe and observable; TPU gate passed | Complete |
 | [~] | M2 | Make configuration and architecture intent authoritative; current MHA baseline passed, real GQA pending | Blocking |
-| [ ] | M3 | Make token accounting and checkpoint resume durable | Blocking |
-| [ ] | M4 | Establish a measured PMAP performance baseline | High |
+| [~] | M3 | Make token accounting and checkpoint resume durable; PMAP save/resume gate passed | Blocking |
+| [~] | M4 | Establish a measured PMAP performance baseline; timing instrumentation added | High |
 | [ ] | M5 | Validate and optimize real GQA + SplashAttention | High |
 | [ ] | M6 | Tune memory, input pipeline, and compilation behavior | High |
 | [ ] | M7 | Evaluate optional fused kernels and advanced execution paths | Future |
@@ -166,24 +166,25 @@ Real GQA deferred to M5.
 **Goal:** Make 20B-token training resumable without counter overflow or stale
 checkpoint metadata.
 
-**Status:** [~] PMAP int64 token-counter implementation complete; TPU validation
-and remaining durability work pending.
+**Status:** [~] PMAP save/resume validation passed; retention verification and
+deliberate incompatible-config rejection remain pending.
 
 ### Features
 
-- [~] Store PMAP `tokens_processed` and per-step token increments as host-side
+- [x] Store PMAP `tokens_processed` and per-step token increments as host-side
   `int64` values. Device-side token accumulation is intentionally disabled
-  because global JAX x64 breaks SplashAttention index arithmetic; TPU
-  validation and the future FSDP path remain pending.
+  because global JAX x64 breaks SplashAttention index arithmetic. The PMAP TPU
+  resume gate passed; the future FSDP path remains tracked separately.
 - [x] Keep the PMAP optimizer step dtype (`int32`) separate from the host token
   count dtype (`int64`). The future FSDP state migration remains tracked
   separately.
-- [~] Ensure async checkpoint restore performs the same metadata compatibility
+- [x] Ensure async checkpoint restore performs the same metadata compatibility
   checks as the synchronous path. The composite manager now persists metadata
-  atomically and validates it before restore; TPU validation is pending.
-- [~] Ensure model state, optimizer state, token count, iterator state, and metadata
-  are committed in a recoverable order. Native PMAP now records a deterministic
-  next-batch index; TPU save/resume validation is pending.
+  atomically and validates it before restore; the TPU resume gate passed.
+- [x] Ensure model state, optimizer state, token count, iterator state, and metadata
+  are committed in a recoverable order. Native PMAP restores the deterministic
+  next-batch index; TPU resume restored step 50, token count, and batch index
+  before continuing to step 60.
 - [x] Preserve the existing atomic metadata write and save-completion ordering.
 - [~] Verify retention behavior with `checkpoint_max_to_keep: 1`.
   Native sidecar metadata now follows Orbax-retained steps; TPU validation of
@@ -191,15 +192,17 @@ and remaining durability work pending.
 
 ### Exit gate
 
-- [ ] A TPU run can save, stop, restart, restore, and continue with monotonic
+- [x] A TPU run can save, stop, restart, restore, and continue with monotonic
   step and token counts.
 - [ ] A deliberately incompatible config is rejected before training resumes.
 
 ### TPU gate for changes in M3
 
-- [ ] Run a short save/resume cycle with async checkpointing enabled.
-- [ ] Compare the restored step, `tokens_processed`, optimizer state, and next
-  data batch against the preemption point.
+- [x] Run a short save/resume cycle with async checkpointing enabled.
+- [~] Compare the restored step, `tokens_processed`, optimizer state, and next
+  data batch against the preemption point. Step, token count, and deterministic
+  next-batch index were confirmed in the TPU log; exact optimizer-tree equality
+  still needs an explicit comparison.
 - [ ] Test one intentionally changed dtype or architecture field and confirm
   restore rejection.
 
@@ -208,16 +211,22 @@ and remaining durability work pending.
 **Goal:** Measure the current production path before changing kernels or mesh
 behavior.
 
-**Status:** [ ] Not started
+**Status:** [~] PMAP timing instrumentation is implemented; cold-cache and
+warm-cache TPU validation remains pending.
 
 ### Features
 
-- [ ] Measure compile time separately from steady-state step time.
-- [ ] Measure input wait and device-transfer time separately from model time.
-- [ ] Verify gradient accumulation is compiled as one scan and does not introduce
-  host-side Python work per microbatch.
-- [ ] Record Splash block size, rematerialization policy, logit chunk size, batch
-  geometry, and effective tokens per optimizer step.
+- [~] Measure compile time separately from steady-state step time. The first
+  device step now records compile-plus-execute time; TPU validation is needed to
+  separate compilation from execution precisely.
+- [x] Measure input wait, host batch preparation, and device-transfer time
+  separately from model time in PMAP metrics.
+- [~] Verify gradient accumulation is compiled as one scan and does not introduce
+  host-side Python work per microbatch. The active PMAP train step uses
+  `jax.lax.scan`; TPU validation remains pending.
+- [~] Record Splash block size, rematerialization policy, logit chunk size, batch
+  geometry, and effective tokens per optimizer step. Startup and per-step
+  geometry are logged; rematerialization recording remains to be completed.
 - [ ] Verify compilation-cache reuse on a second run.
 
 ### Exit gate

@@ -528,6 +528,7 @@ class Trainer:
                     # Data loading
                     # ============================================
 
+                    data_wait_start = time.perf_counter()
                     with self.profiler.section("data_wait", category="data"):
                         for _ in range(self.grad_accum):
 
@@ -562,7 +563,9 @@ class Trainer:
                             micro_batches.append(
                                 batch
                             )
+                    data_wait_time = time.perf_counter() - data_wait_start
 
+                    host_batch_prepare_start = time.perf_counter()
                     with self.profiler.section("host_prepare", category="host_prepare"):
                         batch = np.stack(
                             micro_batches,
@@ -581,14 +584,20 @@ class Trainer:
                             0,
                             1,
                         )
+                    host_batch_prepare_time = (
+                        time.perf_counter() - host_batch_prepare_start
+                    )
 
                     # ============================================
                     # Device step
                     # ============================================
 
+                    device_put_start = time.perf_counter()
                     with self.profiler.section("device_put", category="device_transfer"):
                         batch_device = jnp.asarray(batch)
+                    device_put_time = time.perf_counter() - device_put_start
 
+                    device_step_start = time.perf_counter()
                     with self.profiler.section("device_step", category="compute"):
                         with jax.named_scope("pmap_train_step"):
                             self.state, metrics = self.train_step(
@@ -602,11 +611,30 @@ class Trainer:
                         )
 
                         self.state.step.block_until_ready()
+                    device_step_time = time.perf_counter() - device_step_start
 
                     step_time = (
                         time.perf_counter()
                         - step_start
                     )
+
+                    timing_breakdown = {
+                        "total_step_time": float(step_time),
+                        "data_wait_time": float(data_wait_time),
+                        "host_batch_prepare_time": float(
+                            host_batch_prepare_time
+                        ),
+                        "device_put_time": float(device_put_time),
+                        "device_step_time": float(device_step_time),
+                        # The first device step includes any JAX compilation.
+                        # TPU validation will compare this with later steps and
+                        # warm-cache runs; it is not claimed as compile-only.
+                        "first_step_compile_plus_execute_time": float(
+                            device_step_time
+                            if current_step == self.start_step
+                            else 0.0
+                        ),
+                    }
 
                     metrics_host = jax.tree_util.tree_map(
                         lambda x: float(
@@ -626,6 +654,7 @@ class Trainer:
                             step=current_step,
                             duration=step_time,
                             tokens=tokens_per_step,
+                            **timing_breakdown,
                         )
 
                     lr = _scalar(
@@ -642,6 +671,7 @@ class Trainer:
                         tokens_seen=host_tokens_seen,
                         tokens_in_step=tokens_per_step,
                         step_time=step_time,
+                        timing_breakdown=timing_breakdown,
                     )
 
                     if (
@@ -659,6 +689,7 @@ class Trainer:
                             tokens_seen=host_tokens_seen,
                             tokens_in_step=tokens_per_step,
                             step_time=step_time,
+                            timing_breakdown=timing_breakdown,
                         )
 
                     # ============================================
