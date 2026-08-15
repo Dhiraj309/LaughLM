@@ -14,7 +14,7 @@ architecture:
   positional: rope
   normalization: rms_norm
   norm_placement: pre
-  attention_variant: gqa
+  attention_variant: mha
   attention_impl: splash
   attention_fallback: error
   fused_qkv: true
