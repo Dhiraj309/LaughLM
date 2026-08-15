@@ -225,11 +225,15 @@ class CheckpointManager:
                     step=step,
                     metadata=metadata,
                 )
-                self._prune_metadata(saved_steps)
                 print(
                     f"[checkpoint] metadata committed step {step:,}",
                     flush=True,
                 )
+
+            # Keep sidecar metadata aligned with Orbax retention even when a
+            # caller performs a state-only save. This prevents stale metadata
+            # from surviving after Orbax has deleted an older checkpoint.
+            self._prune_metadata(saved_steps)
 
         except Exception as e:
             print(
