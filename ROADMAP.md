@@ -50,7 +50,7 @@ configuration is real GQA with fewer KV heads, subject to Splash TPU validation.
 
 | Status | Milestone | Outcome | Priority |
 |---|---|---|---|
-| [ ] | M0 | Freeze the active baseline and measurement contract | Now |
+| [~] | M0 | Freeze the active baseline and measurement contract; manifest implemented, TPU baseline pending | Now |
 | [~] | M1 | Make HF `.bin` ingestion safe and observable; implementation complete, TPU gate pending | Blocking |
 | [~] | M2 | Make configuration and architecture intent authoritative; validation/dtype complete, real GQA pending | Blocking |
 | [ ] | M3 | Make token accounting and checkpoint resume durable | Blocking |
@@ -64,13 +64,14 @@ configuration is real GQA with fewer KV heads, subject to Splash TPU validation.
 
 **Goal:** Establish one reproducible TPU baseline before optimization changes.
 
-**Status:** [ ] Not started
+**Status:** [~] Run-manifest implementation complete; TPU baseline validation
+pending.
 
 ### Features
 
-- [ ] Record the exact Python, JAX, jaxlib, Flax, Optax, Orbax, Grain, and TPU
+- [x] Record the exact Python, JAX, jaxlib, Flax, Optax, Orbax, Grain, and TPU
   runtime versions used on the training VM.
-- [ ] Record the exact git revision, YAML config, CLI overrides, HF revision, and
+- [x] Record the exact git revision, YAML config, CLI overrides, HF revision, and
   shard list for every run.
 - [ ] Standardize metrics for loss, learning rate, tokens/sec, step time, input
   wait, device transfer, compilation time, checkpoint time, and MFU.

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
+import json
 import os
+import platform
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -248,6 +253,101 @@ def _apply_data_source_overrides(data_cfg, args) -> None:
     data_cfg.shard_directory = data_cfg.shard_directory.strip("/")
 
 
+def _write_run_manifest(
+    *,
+    args,
+    config,
+    train_paths,
+    validation_paths,
+    train_files,
+    validation_files,
+    num_devices: int,
+) -> None:
+    """Persist the resolved inputs needed to compare TPU runs later."""
+    if jax.process_index() != 0:
+        return
+
+    package_names = (
+        "jax",
+        "jaxlib",
+        "flax",
+        "optax",
+        "orbax-checkpoint",
+        "grain",
+    )
+    versions = {}
+    for package_name in package_names:
+        try:
+            versions[package_name] = importlib.metadata.version(package_name)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package_name] = None
+
+    repo_root = Path(__file__).resolve().parents[1]
+    git_revision = None
+    try:
+        git_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if git_result.returncode == 0:
+            git_revision = git_result.stdout.strip()
+    except OSError:
+        pass
+
+    manifest = {
+        "manifest_version": 1,
+        "python": sys.version,
+        "platform": platform.platform(),
+        "package_versions": versions,
+        "git_revision": git_revision,
+        "config_path": str(Path(args.config).expanduser().resolve()),
+        "cli_args": vars(args),
+        "resolved_config": config.model_dump(mode="json"),
+        "jax": {
+            "devices": [str(device) for device in jax.devices()],
+            "local_device_count": int(num_devices),
+            "process_index": int(jax.process_index()),
+            "process_count": int(jax.process_count()),
+            "x64_enabled": bool(jax.config.x64_enabled),
+        },
+        "data": {
+            "train_local_paths": [str(path) for path in train_paths],
+            "validation_local_paths": [
+                str(path) for path in validation_paths
+            ],
+            "train_files": train_files,
+            "validation_files": validation_files,
+        },
+    }
+
+    manifest_path = (
+        Path(config.runtime.checkpoint_dir).expanduser()
+        / "run_manifest.json"
+    )
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = manifest_path.with_name(
+        f".{manifest_path.name}.tmp-{os.getpid()}"
+    )
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, manifest_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+    print(
+        "[train_tpu_optimized] run manifest written:\n"
+        f"  {manifest_path}",
+        flush=True,
+    )
+
+
 def main():
     args = parse_args()
 
@@ -393,6 +493,16 @@ def main():
         f"  total_tokens={int(config.runtime.total_tokens):,}\n"
         f"  total_steps={total_steps:,}",
         flush=True,
+    )
+
+    _write_run_manifest(
+        args=args,
+        config=config,
+        train_paths=paths,
+        validation_paths=validation_paths,
+        train_files=train_files,
+        validation_files=validation_files,
+        num_devices=num_devices,
     )
 
     # --- UPDATED DATA LOADER CREATION ---
