@@ -191,6 +191,27 @@ def _apply_max_steps_override(
     return config
 
 
+def _report_backend_contract(config) -> None:
+    """Make backend/sharding fields explicit for the active launcher."""
+    backend = str(
+        getattr(
+            config.runtime,
+            "canonical_backend",
+            config.runtime.backend,
+        )
+    )
+    sharding_strategy = str(config.optimizations.sharding_strategy)
+
+    if backend == "pmap" and sharding_strategy != "pmap":
+        print(
+            "[train_tpu_optimized] warning: "
+            f"optimizations.sharding_strategy={sharding_strategy!r} is not "
+            "used by the PMAP trainer; runtime.backend='pmap' controls "
+            "execution. Set sharding_strategy='pmap' to remove this warning.",
+            flush=True,
+        )
+
+
 def _fresh_checkpoint_dir(config) -> None:
     ckpt_dir = Path(
         config.runtime.checkpoint_dir
@@ -454,6 +475,8 @@ def main():
         _fresh_checkpoint_dir(
             config
         )
+
+    _report_backend_contract(config)
 
     global_batch_size = (
         config.runtime.micro_batch_per_device

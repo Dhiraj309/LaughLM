@@ -140,7 +140,8 @@ Real GQA deferred to M5.
 - [x] Reconcile legacy `parallelism` dtype fields and checkpoint metadata during
   migration.
 - [x] Set `optimizations.sharding_strategy` to a PMAP-appropriate value or clearly
-  mark it as unused by the PMAP trainer.
+  mark it as unused by the PMAP trainer. The active PMAP launcher now warns when
+  a non-PMAP strategy such as `fsdp` is present.
 - [ ] Require true GQA when `attention_variant: gqa`: `num_kv_heads` must be less
   than `num_heads` unless an explicit MHA mode is selected.
 - [x] Validate all architecture options used by the active LLaMA implementation;
