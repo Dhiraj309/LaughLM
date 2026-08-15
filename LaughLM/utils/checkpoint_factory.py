@@ -284,8 +284,33 @@ class OrbaxCompositeCheckpointManager:
                         restore_args = None
 
                 if hasattr(ocp, "args") and hasattr(ocp.args, "Composite"):
+                    standard_restore_kwargs = {}
+                    if restore_args is not None:
+                        try:
+                            # Newer Orbax releases accept target-specific restore
+                            # args on StandardRestore.
+                            standard_restore_kwargs["restore_args"] = restore_args
+                            state_restore = ocp.args.StandardRestore(
+                                target_model_state,
+                                **standard_restore_kwargs,
+                            )
+                        except TypeError as error:
+                            if "restore_args" not in str(error):
+                                raise
+                            # Older Orbax releases infer restore args from the
+                            # target pytree and reject this keyword entirely.
+                            state_restore = ocp.args.StandardRestore(
+                                target_model_state,
+                            )
+                    else:
+                        # Do not pass restore_args=None: older Orbax versions
+                        # reject the keyword even when no target mesh is used.
+                        state_restore = ocp.args.StandardRestore(
+                            target_model_state,
+                        )
+
                     res_args = ocp.args.Composite(
-                        state=ocp.args.StandardRestore(target_model_state, restore_args=restore_args),
+                        state=state_restore,
                         grain_iterator=ocp.args.JsonRestore(),
                     )
                     restored = self.manager.restore(step, args=res_args)
@@ -307,12 +332,18 @@ class OrbaxCompositeCheckpointManager:
                     return restored, {}
             except Exception as e:
                 logger.warning(
-                    f"[checkpoint_factory] Composite restore failed ({e}). Falling back to standard restore."
+                    f"[checkpoint_factory] Composite restore failed ({e})."
                 )
 
-        if hasattr(self.manager, "restore"):
-            restored = self.manager.restore(step, target_model_state)
-            return restored, {}
+                # A composite checkpoint cannot be safely restored through the
+                # legacy positional API: Orbax interprets the TrainState as an
+                # item mapping and fails with an opaque ``.keys`` error. Raise
+                # the original compatibility problem instead of masking it.
+                raise RuntimeError(
+                    "Composite checkpoint restore failed; the checkpoint was "
+                    "not restored through a state-only fallback. Check the "
+                    "Orbax version/API compatibility."
+                ) from e
 
         return target_model_state, {}
 
