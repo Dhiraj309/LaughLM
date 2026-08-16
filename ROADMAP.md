@@ -393,8 +393,8 @@ documentation are implemented; checkpoint/export validation remains pending.
   development workflow.
 - [x] Publish the exact launch, resume, export, and shard-selection commands.
 - [~] Archive the final config, dependency versions, git revision, HF revision, and
-  benchmark report. The release checklist and audit artifact define the bundle;
-  final artifact collection remains pending.
+  benchmark report. A static checksummed bundle builder is implemented; final
+  artifact collection remains pending.
 
 ### Exit gate
 

@@ -55,7 +55,24 @@ revision, and benchmark-report presence. It does not load JAX or model code.
 
 ## 5. Archive contents
 
-Archive the final config, resolved run manifest, checkpoint metadata, export
-directory, release audit JSON, metrics, benchmark report, TPU logs, and the
-exact source git revision. Keep the dataset repository ID and revision with the
-release even when the revision is the default branch.
+Build the checksummed archive after the audit passes. The command is static and
+does not restore a checkpoint or import JAX:
+
+```bash
+python -u scripts/build_release_bundle.py \
+  --config configs/v5e_pmap_true135m_production.yaml \
+  --checkpoint-dir checkpoints/production/135M_true_h128 \
+  --export-dir releases/laughlm-135m \
+  --audit-report releases/laughlm-135m/release_audit.json \
+  --benchmark-report reports/production_baseline.md \
+  --output-dir releases/laughlm-135m-bundle \
+  --log train_production.log
+```
+
+Add one `--profile` option for each profiler artifact that belongs to the
+release. The builder refuses an existing output directory unless `--force` is
+provided, refuses source/output overlap, and never deletes files. It archives
+the final config, resolved run manifest, checkpoint metadata, export directory,
+release audit JSON, metrics, benchmark report, selected TPU logs/profiles, and
+the exact source git revision. SHA-256 checksums and dataset provenance are
+written to `release_manifest.json`.
