@@ -57,8 +57,8 @@ tracked as an M5 TPU experiment.
 | [~] | M4 | Establish a measured PMAP performance baseline; timing instrumentation added | High |
 | [~] | M5 | Validate and optimize real GQA + SplashAttention | High |
 | [~] | M6 | Tune memory, input pipeline, and compilation behavior | High |
-| [ ] | M7 | Evaluate optional fused kernels and advanced execution paths | Future |
-| [ ] | M8 | Release, export, and long-run operational gate | Final |
+| [~] | M7 | Evaluate optional fused kernels and advanced execution paths | Future |
+| [~] | M8 | Release, export, and long-run operational gate | Final |
 
 ## M0 — Baseline and measurement contract
 
