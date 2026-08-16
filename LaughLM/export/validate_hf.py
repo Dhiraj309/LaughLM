@@ -21,6 +21,7 @@ float16/bfloat16 as desired.
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -495,6 +496,12 @@ def assert_diagnostic_results(results):
 
     print("[validate] logits parity OK")
 
+    return {
+        "mean_tolerance": mean_tol,
+        "p99_tolerance": p99_tol,
+        "max_tolerance": max_tol,
+    }
+
 
 # ============================================================
 # Generation smoke test
@@ -544,6 +551,13 @@ def validate_generation(
 
     print("[validate] generation OK")
 
+    return {
+        "prompt": prompt,
+        "max_new_tokens": 8,
+        "do_sample": False,
+        "text": text,
+    }
+
 
 # ============================================================
 # Full validation pipeline
@@ -555,6 +569,7 @@ def validate_hf_export(
     hf_dir,
     config_path,
     params,
+    report_path=None,
 ):
     exp_config = load_config(
         config_path
@@ -646,16 +661,41 @@ def validate_hf_export(
         )
     )
 
-    assert_diagnostic_results(
+    thresholds = assert_diagnostic_results(
         results
     )
 
-    validate_generation(
+    generation = validate_generation(
         hf_model,
         tokenizer,
     )
 
+    report = {
+        "validator": "LaughLM HF export parity",
+        "status": "pass",
+        "hf_dir": str(Path(hf_dir).expanduser().resolve()),
+        "config_path": str(Path(config_path).expanduser().resolve()),
+        "validation_attention_impl": str(llama_config.attention_impl),
+        "validation_param_dtype": str(llama_config.param_dtype),
+        "validation_compute_dtype": str(llama_config.compute_dtype),
+        "validation_output_dtype": str(llama_config.output_dtype),
+        "vocab_size": int(llama_config.vocab_size),
+        "logit_sweep": results,
+        "thresholds": thresholds,
+        "generation": generation,
+    }
+
+    if report_path is not None:
+        report_path = Path(report_path).expanduser().resolve()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(f"[validate] parity report written: {report_path}")
+
     print("\n[validate] ALL CHECKS PASSED")
+    return report
 
 
 # ============================================================
@@ -684,6 +724,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--checkpoint_dir",
         required=True,
+    )
+
+    parser.add_argument(
+        "--report",
+        type=Path,
+        help="Write the passing parity/generation results as JSON.",
     )
 
     args = parser.parse_args()
@@ -794,8 +840,9 @@ if __name__ == "__main__":
         params
     )
 
-    # validate_hf_export(
-    #     hf_dir=args.hf_dir,
-    #     config_path=args.config,
-    #     params=params,
-    # )
+    validate_hf_export(
+        hf_dir=args.hf_dir,
+        config_path=args.config,
+        params=params,
+        report_path=args.report,
+    )

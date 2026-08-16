@@ -148,6 +148,7 @@ def build_bundle(
     benchmark_report: Path,
     output_dir: Path,
     audit_report: Path | None,
+    parity_report: Path | None,
     logs: list[Path],
     profiles: list[Path],
     force: bool,
@@ -157,6 +158,7 @@ def build_bundle(
     export_dir = _ensure_input_dir(export_dir, "--export-dir")
     benchmark_report = _ensure_input_file(benchmark_report, "--benchmark-report")
     audit_report = _resolve_optional_file(audit_report, "--audit-report")
+    parity_report = _resolve_optional_file(parity_report, "--parity-report")
     logs = [_ensure_input_file(path, f"--log {path}") for path in logs]
     profiles = [_ensure_input_file(path, f"--profile {path}") for path in profiles]
 
@@ -206,8 +208,9 @@ def build_bundle(
         *logs,
         *profiles,
     ]
-    if audit_report is not None:
-        input_files.append(audit_report)
+    for optional_file in (audit_report, parity_report):
+        if optional_file is not None:
+            input_files.append(optional_file)
     if any(_is_within(path, output_dir) for path in input_files):
         raise ValueError("An input file cannot be inside --output-dir")
 
@@ -217,6 +220,11 @@ def build_bundle(
     if audit is not None and audit.get("status") != "pass":
         raise ValueError(
             f"--audit-report is not a passing audit: {audit.get('status')!r}"
+        )
+    parity = _load_json(parity_report) if parity_report is not None else None
+    if parity is not None and parity.get("status") != "pass":
+        raise ValueError(
+            f"--parity-report is not a passing report: {parity.get('status')!r}"
         )
 
     plan: list[tuple[Path, Path]] = []
@@ -237,6 +245,12 @@ def build_bundle(
     )
     if audit_report is not None:
         _add_file(plan, audit_report, Path("provenance") / "release_audit.json")
+    if parity_report is not None:
+        _add_file(
+            plan,
+            parity_report,
+            Path("provenance") / "hf_parity_report.json",
+        )
     for source in logs:
         _add_file(plan, source, Path("evidence") / "logs" / source.name)
     for source in profiles:
@@ -256,6 +270,7 @@ def build_bundle(
             "benchmark_report": str(benchmark_report),
             "run_manifest": str(run_manifest),
             "audit_report": str(audit_report) if audit_report else None,
+            "parity_report": str(parity_report) if parity_report else None,
             "logs": [str(path) for path in logs],
             "profiles": [str(path) for path in profiles],
         },
@@ -278,6 +293,7 @@ def build_bundle(
             "manifest_version": manifest.get("manifest_version"),
             "checkpoint_metadata_files": len(metadata_files),
             "audit_status": audit.get("status") if audit is not None else None,
+            "parity_status": parity.get("status") if parity is not None else None,
         },
         "files": files,
     }
@@ -299,6 +315,7 @@ def main() -> int:
     parser.add_argument("--benchmark-report", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--audit-report", type=Path)
+    parser.add_argument("--parity-report", type=Path)
     parser.add_argument(
         "--log",
         action="append",
@@ -327,6 +344,7 @@ def main() -> int:
         benchmark_report=args.benchmark_report,
         output_dir=args.output_dir,
         audit_report=args.audit_report,
+        parity_report=args.parity_report,
         logs=args.log,
         profiles=args.profile,
         force=args.force,
