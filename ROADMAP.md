@@ -312,6 +312,8 @@ implemented; TPU validation remains pending.
   scheduling still requires TPU evidence.
 - [~] Opt-in one-shot device-memory snapshots are persisted in `metrics.jsonl`
   alongside the `.prof` artifact; TPU peak-memory evidence remains pending.
+- [~] The saved-artifact comparison report now includes input wait, input
+  pipeline, and captured peak-memory comparisons; TPU validation remains.
 - [ ] microbatch/gradient-accumulation pairs with constant effective tokens;
 - [ ] compilation cache cold versus warm;
 - [ ] checkpoint interval and async checkpoint overhead.
