@@ -437,6 +437,15 @@ class RuntimeConfig(BaseModel):
         ge=1,
     )
 
+    prefetch_size: int = Field(
+        default=8,
+        ge=1,
+        description=(
+            "CPU-side training batch prefetch queue depth. This does not "
+            "transfer data to devices."
+        ),
+    )
+
     total_tokens: int = Field(
         ...,
         ge=1,

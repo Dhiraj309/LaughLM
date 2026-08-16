@@ -494,7 +494,7 @@ class Trainer:
 
         prefetched_loader = prefetch_to_device(
             iter(dataloader),
-            size=8,
+            size=self.config.runtime.prefetch_size,
         )
 
         data_iter = iter(

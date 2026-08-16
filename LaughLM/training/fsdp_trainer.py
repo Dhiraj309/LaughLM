@@ -413,7 +413,7 @@ class FSDPTrainer:
         data_iter = iter(
             prefetch_to_device(
                 iter(dataloader),
-                size=8,
+                size=cfg.runtime.prefetch_size,
             )
         )
 

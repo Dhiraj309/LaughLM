@@ -561,6 +561,7 @@ def main():
         f"  checkpoint_dir={config.runtime.checkpoint_dir}\n"
         f"  global_batch_size={global_batch_size}\n"
         f"  gradient_accumulation={config.runtime.gradient_accumulation}\n"
+        f"  prefetch_size={config.runtime.prefetch_size}\n"
         f"  num_heads={config.model.num_heads}\n"
         f"  num_kv_heads={config.model.num_kv_heads}\n"
         f"  sharding_strategy={config.optimizations.sharding_strategy}\n"
