@@ -74,6 +74,8 @@ def audit_release(
     export_dir: Path,
     run_manifest_path: Path,
     benchmark_report: Path,
+    parity_report: Path | None,
+    require_parity: bool,
 ) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     config = _load_yaml(config_path)
@@ -297,6 +299,24 @@ def audit_release(
         actual=str(benchmark_report) if benchmark_report.is_file() else "missing",
     )
 
+    parity = (
+        _load_json(parity_report)
+        if parity_report is not None and parity_report.is_file()
+        else {}
+    )
+    parity_passed = parity.get("status") == "pass"
+    _record(
+        checks,
+        "HF parity report",
+        passed=parity_passed if require_parity or parity_report is not None else True,
+        expected="passing JSON parity report when present/required",
+        actual=(
+            parity.get("status")
+            if parity
+            else ("missing" if require_parity else "not supplied")
+        ),
+    )
+
     passed = all(check["passed"] for check in checks)
     return {
         "audit": "LaughLM release contract",
@@ -305,6 +325,7 @@ def audit_release(
         "export_dir": str(export_dir),
         "run_manifest": str(run_manifest_path),
         "benchmark_report": str(benchmark_report),
+        "parity_report": str(parity_report) if parity_report else None,
         "release_identity": {
             "vocab_size": vocab_size,
             "attention_variant": attention_variant,
@@ -328,6 +349,12 @@ def main() -> int:
     parser.add_argument("--checkpoint-dir", type=Path)
     parser.add_argument("--run-manifest", type=Path)
     parser.add_argument("--benchmark-report", required=True, type=Path)
+    parser.add_argument("--parity-report", type=Path)
+    parser.add_argument(
+        "--require-parity",
+        action="store_true",
+        help="Require --parity-report to exist and contain status=pass.",
+    )
     parser.add_argument("--output", type=Path, default=Path("release_audit.json"))
     args = parser.parse_args()
 
@@ -336,12 +363,16 @@ def main() -> int:
         run_manifest = args.checkpoint_dir / "run_manifest.json"
     if run_manifest is None:
         parser.error("provide --run-manifest or --checkpoint-dir")
+    if args.require_parity and args.parity_report is None:
+        parser.error("--require-parity requires --parity-report")
 
     report = audit_release(
         config_path=args.config,
         export_dir=args.export_dir,
         run_manifest_path=run_manifest,
         benchmark_report=args.benchmark_report,
+        parity_report=args.parity_report,
+        require_parity=args.require_parity,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")

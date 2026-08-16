@@ -45,6 +45,8 @@ python -u scripts/audit_release_contract.py \
   --checkpoint-dir checkpoints/production/135M_true_h128 \
   --export-dir releases/laughlm-135m \
   --benchmark-report reports/production_baseline.md \
+  --parity-report reports/laughlm-135m-hf-parity.json \
+  --require-parity \
   --output releases/laughlm-135m/release_audit.json
 ```
 
