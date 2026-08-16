@@ -388,9 +388,11 @@ documentation are implemented; checkpoint/export validation remains pending.
 - [~] Verify tied embeddings and real GQA configuration in exported metadata.
   The auditor checks both HF config and source-checkpoint metadata; TPU/export
   evidence remains pending.
-- [ ] Run checkpoint-to-HF parity checks on a manually selected TPU-produced
+- [~] Run checkpoint-to-HF parity checks on a manually selected TPU-produced
   checkpoint or approved CPU/HF validation environment outside this local TPU
-  development workflow.
+  development workflow. The validator CLI now executes the previously disabled
+  parity path and can persist logits/generation results as JSON; TPU evidence is
+  still pending.
 - [x] Publish the exact launch, resume, export, and shard-selection commands.
 - [~] Archive the final config, dependency versions, git revision, HF revision, and
   benchmark report. A static checksummed bundle builder and verifier are

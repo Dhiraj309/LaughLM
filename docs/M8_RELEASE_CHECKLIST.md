@@ -53,7 +53,27 @@ The audit checks vocabulary size, the LaughLM special-token contract
 export files, run provenance, dependency versions, git revision, HF dataset
 revision, and benchmark-report presence. It does not load JAX or model code.
 
-## 5. Archive contents
+## 5. Checkpoint-to-HF parity
+
+Run the parity validator on the manually selected TPU-produced checkpoint and
+export. This command is runtime validation and must not be run in the local
+Windows development environment:
+
+```bash
+python -u -m LaughLM.export.validate_hf \
+  --hf_dir releases/laughlm-135m \
+  --config configs/v5e_pmap_true135m_production.yaml \
+  --checkpoint_dir checkpoints/production/135M_true_h128 \
+  --report reports/laughlm-135m-hf-parity.json
+```
+
+The validator restores the checkpoint, compares native and Hugging Face logits
+at sequence lengths 1, 16, and 128, checks deterministic generation, and
+writes a passing JSON report. It uses a float32/XLA comparison configuration so
+the result diagnoses export mapping rather than TPU Splash/bfloat16 rounding.
+Archive this report with the release bundle.
+
+## 6. Archive contents
 
 Build the checksummed archive after the audit passes. The command is static and
 does not restore a checkpoint or import JAX:
@@ -64,6 +84,7 @@ python -u scripts/build_release_bundle.py \
   --checkpoint-dir checkpoints/production/135M_true_h128 \
   --export-dir releases/laughlm-135m \
   --audit-report releases/laughlm-135m/release_audit.json \
+  --parity-report reports/laughlm-135m-hf-parity.json \
   --benchmark-report reports/production_baseline.md \
   --output-dir releases/laughlm-135m-bundle \
   --log train_production.log
@@ -77,7 +98,7 @@ release audit JSON, metrics, benchmark report, selected TPU logs/profiles, and
 the exact source git revision. SHA-256 checksums and dataset provenance are
 written to `release_manifest.json`.
 
-## 6. Verify the archive
+## 7. Verify the archive
 
 Run the verifier against the completed bundle. Keep its report outside the
 bundle so it does not become an unchecksummed extra file:
@@ -86,6 +107,7 @@ bundle so it does not become an unchecksummed extra file:
 python -u scripts/verify_release_bundle.py \
   --bundle-dir releases/laughlm-135m-bundle \
   --require-audit \
+  --require-parity \
   --output reports/laughlm-135m-bundle-verification.json
 ```
 

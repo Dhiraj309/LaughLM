@@ -79,6 +79,7 @@ def verify_bundle(
     *,
     bundle_dir: Path,
     require_audit: bool,
+    require_parity: bool,
     output_path: Path | None,
 ) -> dict[str, Any]:
     bundle_dir = bundle_dir.expanduser().resolve()
@@ -270,6 +271,20 @@ def verify_bundle(
         actual=audit_status or ("not supplied" if not require_audit else "missing"),
     )
 
+    parity_path = bundle_dir / "provenance" / "hf_parity_report.json"
+    parity_status = None
+    if parity_path.is_file():
+        parity = _load_json(parity_path)
+        parity_status = parity.get("status")
+    parity_ok = parity_status == "pass"
+    _record(
+        checks,
+        "HF parity report status",
+        passed=parity_ok if require_parity or parity_path.exists() else True,
+        expected="passing HF parity report when present/required",
+        actual=parity_status or ("not supplied" if not require_parity else "missing"),
+    )
+
     passed = all(check["passed"] for check in checks)
     report = {
         "verification": "LaughLM release bundle",
@@ -277,6 +292,7 @@ def verify_bundle(
         "bundle_dir": str(bundle_dir),
         "manifest": str(manifest_path),
         "require_audit": require_audit,
+        "require_parity": require_parity,
         "checks": checks,
     }
     if output_path is not None:
@@ -300,12 +316,18 @@ def main() -> int:
         action="store_true",
         help="Require provenance/release_audit.json with status=pass.",
     )
+    parser.add_argument(
+        "--require-parity",
+        action="store_true",
+        help="Require provenance/hf_parity_report.json with status=pass.",
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
     report = verify_bundle(
         bundle_dir=args.bundle_dir,
         require_audit=args.require_audit,
+        require_parity=args.require_parity,
         output_path=args.output,
     )
     print(f"[release-bundle-verify] {report['status'].upper()}")
