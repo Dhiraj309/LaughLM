@@ -1,0 +1,6 @@
+# M6 host-prefetch experiment overlay.
+# Keep the production model/data/cache settings unchanged; vary only queue depth.
+
+runtime:
+  prefetch_size: 4
+  checkpoint_dir: checkpoints/experiments/135M_prefetch4

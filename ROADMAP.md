@@ -295,14 +295,17 @@ validation and performance comparison remain pending.
 **Goal:** Optimize the measured bottleneck without changing multiple variables
 at once.
 
-**Status:** [ ] Not started
+**Status:** [~] Controlled tuning overlays are being prepared; TPU
+validation remains pending.
 
 ### Experiment matrix
 
 - [ ] `splash_block_size`: 256, 512, 1024;
 - [ ] `spmd.remat.policy`: `dots_saveable` versus a less or more aggressive policy;
 - [ ] logit chunk size: 2048, 4096, 8192 where memory permits;
-- [ ] host prefetch depth and device-transfer scheduling;
+- [~] Host prefetch depth is now configurable through
+  `runtime.prefetch_size`, with `4` and `16` A/B overlays; device-transfer
+  scheduling still requires TPU evidence.
 - [ ] microbatch/gradient-accumulation pairs with constant effective tokens;
 - [ ] compilation cache cold versus warm;
 - [ ] checkpoint interval and async checkpoint overhead.
