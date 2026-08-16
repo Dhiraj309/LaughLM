@@ -60,6 +60,8 @@ def _cache_state(manifest: dict[str, Any]) -> str:
     cache = manifest.get("compilation_cache", {})
     if not isinstance(cache, dict):
         return "unknown"
+    if cache.get("cleared_before_run") is True:
+        return "cold (explicit reset)"
     file_count = cache.get("file_count_before_run", 0)
     if not isinstance(file_count, int) or file_count < 0:
         return "unknown"

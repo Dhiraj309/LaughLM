@@ -1,0 +1,9 @@
+# M6 isolated synchronous-checkpoint experiment.
+# Base: v5e_pmap_true135m_production.yaml
+
+runtime:
+  checkpoint_dir: checkpoints/experiments/135M_checkpoint_sync
+
+optimizations:
+  compilation_cache_dir: jax_cache/v5e_true135m_checkpoint_sync
+  async_checkpointing: false

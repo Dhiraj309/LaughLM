@@ -304,9 +304,12 @@ implemented; TPU validation remains pending.
 
 ### Experiment matrix
 
-- [ ] `splash_block_size`: 256, 512, 1024;
-- [ ] `spmd.remat.policy`: `dots_saveable` versus a less or more aggressive policy;
-- [ ] logit chunk size: 2048, 4096, 8192 where memory permits;
+- [~] `splash_block_size`: 256, 512, 1024 overlays are isolated in the M6
+  experiment matrix; TPU selection remains pending.
+- [~] `spmd.remat.policy`: `dots_saveable` versus controlled alternative
+  overlays; TPU memory/throughput selection remains pending.
+- [~] Logit chunk sizes 2048, 4096, and 8192 are represented by controlled
+  overlays; TPU memory/throughput selection remains pending.
 - [~] Host prefetch depth is now configurable through
   `runtime.prefetch_size`, with `4` and `16` A/B overlays; device-transfer
   scheduling still requires TPU evidence.
@@ -316,9 +319,14 @@ implemented; TPU validation remains pending.
   pipeline, and captured peak-memory comparisons; TPU validation remains.
 - [~] Compile deltas are now blocked when MHA/GQA cache states differ; a
   cache-matched cold/warm TPU comparison is still required.
-- [ ] microbatch/gradient-accumulation pairs with constant effective tokens;
-- [ ] compilation cache cold versus warm;
-- [ ] checkpoint interval and async checkpoint overhead.
+- [~] `--clear-compilation-cache` now provides an explicit cold-cache run
+  control and records the reset in the run manifest.
+- [~] Constant-effective-token microbatch/gradient-accumulation overlays now
+  cover 1/64, 2/32, and 4/16; TPU selection remains pending.
+- [~] Compilation-cache cold versus warm control is implemented; matched TPU
+  comparison remains pending.
+- [~] Checkpoint interval and asynchronous-versus-synchronous checkpoint
+  overlays are isolated; TPU checkpoint-overhead evidence remains pending.
 
 ### Exit gate
 
