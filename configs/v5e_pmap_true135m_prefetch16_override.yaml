@@ -4,3 +4,6 @@
 runtime:
   prefetch_size: 16
   checkpoint_dir: checkpoints/experiments/135M_prefetch16
+
+optimizations:
+  compilation_cache_dir: jax_cache/v5e_true135m_prefetch16
