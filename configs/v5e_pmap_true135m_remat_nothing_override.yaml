@@ -1,0 +1,12 @@
+# M6 isolated activation-rematerialization experiment.
+# Base: v5e_pmap_true135m_production.yaml
+
+spmd:
+  remat:
+    policy: nothing_saveable
+
+runtime:
+  checkpoint_dir: checkpoints/experiments/135M_remat_nothing
+
+optimizations:
+  compilation_cache_dir: jax_cache/v5e_true135m_remat_nothing

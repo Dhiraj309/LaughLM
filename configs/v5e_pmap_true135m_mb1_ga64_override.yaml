@@ -1,0 +1,10 @@
+# M6 constant-effective-token geometry experiment.
+# Base: v5e_pmap_true135m_production.yaml
+
+runtime:
+  micro_batch_per_device: 1
+  gradient_accumulation: 64
+  checkpoint_dir: checkpoints/experiments/135M_mb1_ga64
+
+optimizations:
+  compilation_cache_dir: jax_cache/v5e_true135m_mb1_ga64

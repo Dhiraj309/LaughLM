@@ -1,0 +1,11 @@
+# M6 isolated SplashAttention block-size experiment.
+# Base: v5e_pmap_true135m_production.yaml
+
+architecture:
+  splash_block_size: 1024
+
+runtime:
+  checkpoint_dir: checkpoints/experiments/135M_splash1024
+
+optimizations:
+  compilation_cache_dir: jax_cache/v5e_true135m_splash1024

@@ -64,7 +64,11 @@ def _configure_persistent_compilation_cache(config) -> None:
     )
 
 
-def _compilation_cache_snapshot(config) -> dict:
+def _compilation_cache_snapshot(
+    config,
+    *,
+    cleared_before_run: bool = False,
+) -> dict:
     """Capture cache state before this run changes it."""
     cache_dir = config.optimizations.compilation_cache_dir
     if not cache_dir:
@@ -73,6 +77,7 @@ def _compilation_cache_snapshot(config) -> dict:
             "directory": None,
             "exists_before_run": False,
             "file_count_before_run": 0,
+            "cleared_before_run": bool(cleared_before_run),
         }
 
     cache_path = Path(cache_dir).expanduser().resolve()
@@ -92,7 +97,50 @@ def _compilation_cache_snapshot(config) -> dict:
         "directory": str(cache_path),
         "exists_before_run": cache_path.exists(),
         "file_count_before_run": file_count,
+        "cleared_before_run": bool(cleared_before_run),
     }
+
+
+def _clear_compilation_cache(config) -> bool:
+    """Clear the configured JAX cache when explicitly requested."""
+    cache_dir = config.optimizations.compilation_cache_dir
+    if not cache_dir:
+        raise ValueError(
+            "--clear-compilation-cache requires a configured "
+            "optimizations.compilation_cache_dir."
+        )
+
+    cache_path = Path(cache_dir).expanduser().resolve()
+    cwd = Path.cwd().resolve()
+    if cache_path == Path(cache_path.anchor) or cache_path == cwd:
+        raise ValueError(
+            "Refusing to clear a filesystem root or the current working "
+            f"directory as a compilation cache: {cache_path}"
+        )
+
+    if jax.process_index() != 0:
+        return True
+
+    if cache_path.exists():
+        if not cache_path.is_dir():
+            raise ValueError(
+                "Configured compilation cache path is not a directory: "
+                f"{cache_path}"
+            )
+        shutil.rmtree(cache_path)
+        print(
+            "[train_tpu_optimized] cleared compilation cache:\n"
+            f"  {cache_path}",
+            flush=True,
+        )
+    else:
+        print(
+            "[train_tpu_optimized] compilation cache already clean:\n"
+            f"  {cache_path}",
+            flush=True,
+        )
+
+    return True
 
 
 def parse_args():
@@ -128,6 +176,15 @@ def parse_args():
         "--fresh",
         action="store_true",
         help="Delete checkpoint_dir before training.",
+    )
+
+    parser.add_argument(
+        "--clear-compilation-cache",
+        action="store_true",
+        help=(
+            "Delete optimizations.compilation_cache_dir before training and "
+            "record an explicit cold-cache run in the manifest."
+        ),
     )
 
     parser.add_argument(
@@ -438,6 +495,10 @@ def main():
         override_config=args.override_config,
     )
 
+    cache_cleared = False
+    if args.clear_compilation_cache:
+        cache_cleared = _clear_compilation_cache(config)
+
     data_cfg = config.data
     _apply_data_source_overrides(data_cfg, args)
     train_start = int(data_cfg.train_shard_start)
@@ -521,7 +582,10 @@ def main():
         else []
     )
 
-    compilation_cache = _compilation_cache_snapshot(config)
+    compilation_cache = _compilation_cache_snapshot(
+        config,
+        cleared_before_run=cache_cleared,
+    )
     _configure_persistent_compilation_cache(config)
 
     # Single-VM TPU mode relies on JAX runtime discovery; do not call jax.distributed.initialize().
