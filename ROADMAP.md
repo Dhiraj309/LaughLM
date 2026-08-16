@@ -261,6 +261,8 @@ validation and performance comparison remain pending.
   keep the production MHA baseline unchanged until the TPU comparison.
 - [x] Provide an isolated GQA override config and launcher overlay support so
   the MHA baseline is not copied or overwritten.
+- [x] Provide a complete isolated MHA comparison config with the validated
+  2-train/3-validation-shard geometry.
 - [x] Add a dependency-light config-matrix audit for attention labels and
   Q/KV head geometry before TPU allocation.
 - [x] Record the requested attention implementation, fallback policy, head
