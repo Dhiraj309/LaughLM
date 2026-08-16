@@ -583,6 +583,24 @@ class TrainingLogger:
                 )
             ),
 
+            # Optional one-shot device memory snapshot. These fields are
+            # present only on the configured profile step.
+            "device_memory_bytes_in_use": (
+                None
+                if "device_memory_bytes_in_use" not in timing_breakdown
+                else int(timing_breakdown["device_memory_bytes_in_use"])
+            ),
+            "device_memory_peak_bytes_in_use": (
+                None
+                if "device_memory_peak_bytes_in_use" not in timing_breakdown
+                else int(timing_breakdown["device_memory_peak_bytes_in_use"])
+            ),
+            "device_memory_bytes_limit": (
+                None
+                if "device_memory_bytes_limit" not in timing_breakdown
+                else int(timing_breakdown["device_memory_bytes_limit"])
+            ),
+
             # Derived overheads.
             "host_overhead_time": float(
                 max(

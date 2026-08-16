@@ -49,6 +49,7 @@ from LaughLM.distributed.sharding import device_put_replicated
 from LaughLM.profiling.core.profiler import Profiler
 from LaughLM.utils.rng import create_rng
 from LaughLM.utils.prefetch import prefetch_to_device
+from LaughLM.utils.profiler import get_device_memory_stats
 
 
 def _scalar(x):
@@ -409,15 +410,17 @@ class Trainer:
     # Train loop
     # ========================================================
 
-    def _maybe_capture_device_memory_profile(self, *, step: int) -> None:
-        """Save one memory snapshot after a completed TPU step when configured."""
+    def _maybe_capture_device_memory_profile(self, *, step: int):
+        """Save and return one memory snapshot after a completed TPU step."""
         profiling = self.config.profiling
         if (
             self._device_memory_profile_captured
             or not getattr(profiling, "capture_device_memory_profile", False)
             or step != getattr(profiling, "memory_profile_step", 10)
         ):
-            return
+            return None
+
+        memory_stats = get_device_memory_stats()
 
         output_dir = Path(getattr(profiling, "output_dir", "profiles"))
         profile_path = output_dir / "memory" / f"device_memory_step_{step:05d}.prof"
@@ -439,6 +442,8 @@ class Trainer:
             )
         finally:
             self._device_memory_profile_captured = True
+
+        return memory_stats
 
 
     def train(
@@ -644,9 +649,11 @@ class Trainer:
                     )
 
                     current_step += 1
-                    self._maybe_capture_device_memory_profile(
+                    memory_stats = self._maybe_capture_device_memory_profile(
                         step=current_step,
                     )
+                    if memory_stats is not None:
+                        timing_breakdown.update(memory_stats)
                     host_tokens_seen += tokens_per_step
 
                     if self.profiler.should_profile_step(current_step):

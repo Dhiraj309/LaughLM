@@ -1,0 +1,7 @@
+# M6 one-shot TPU memory capture overlay for the MHA comparison run.
+# Apply on top of v5e_pmap_true135m_mha_compare.yaml.
+
+profiling:
+  capture_device_memory_profile: true
+  memory_profile_step: 10
+  output_dir: profiles/135M_mha_memory

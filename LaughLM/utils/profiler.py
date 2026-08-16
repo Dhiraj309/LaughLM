@@ -92,18 +92,47 @@ def measure_compile_time(label=""):
     print(f"{prefix}{elapsed:.2f}s")
 
 
+def get_device_memory_stats():
+    """Return JSON-safe memory counters for the first local device.
+
+    Device memory statistics are backend/runtime-specific. An unavailable
+    stats API is represented by ``None`` so observability never becomes a
+    hard training dependency.
+    """
+    try:
+        devices = jax.local_devices()[:1]
+        if not devices:
+            return None
+
+        stats = devices[0].memory_stats()
+        if not stats:
+            return None
+
+        return {
+            "device_memory_bytes_in_use": int(
+                stats.get("bytes_in_use", 0)
+            ),
+            "device_memory_peak_bytes_in_use": int(
+                stats.get("peak_bytes_in_use", 0)
+            ),
+            "device_memory_bytes_limit": int(
+                stats.get("bytes_limit", 0)
+            ),
+        }
+    except Exception:
+        return None
+
+
 def log_memory_usage(label=""):
     """Log current JAX memory usage (peak and live)."""
-    try:
-        for device in jax.local_devices()[:1]:  # Just first device
-            stats = device.memory_stats()
-            if stats:
-                peak = stats.get("peak_bytes_in_use", 0) / 1e9
-                live = stats.get("bytes_in_use", 0) / 1e9
-                limit = stats.get("bytes_limit", 0) / 1e9
-                prefix = f"[memory] {label}: " if label else "[memory] "
-                print(f"{prefix}live={live:.2f}GB peak={peak:.2f}GB limit={limit:.2f}GB")
-                return
-    except Exception:
-        pass
+    memory_stats = get_device_memory_stats()
+    if memory_stats is not None:
+        live = memory_stats["device_memory_bytes_in_use"] / 1e9
+        peak = memory_stats["device_memory_peak_bytes_in_use"] / 1e9
+        limit = memory_stats["device_memory_bytes_limit"] / 1e9
+        prefix = f"[memory] {label}: " if label else "[memory] "
+        print(f"{prefix}live={live:.2f}GB peak={peak:.2f}GB limit={limit:.2f}GB")
+        return memory_stats
+
     print(f"[memory] {label}: unavailable (device stats not supported)")
+    return None
