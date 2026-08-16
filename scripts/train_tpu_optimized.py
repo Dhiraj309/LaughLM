@@ -310,6 +310,46 @@ def _report_backend_contract(config) -> None:
         )
 
 
+def _loss_dispatch_contract(config) -> dict:
+    """Describe optional loss/kernel dispatch and its documented fallback."""
+    loss_backend = str(config.loss.backend)
+    kernel_backend = str(config.optimizations.kernel_backend)
+    tokamax_requested = (
+        loss_backend == "tokamax_linear_ce"
+        or kernel_backend == "tokamax"
+    )
+
+    fallback_reasons = []
+    if loss_backend == "tokamax_linear_ce" and float(config.loss.z_loss) != 0.0:
+        fallback_reasons.append("nonzero z_loss")
+
+    if loss_backend == "tokamax_linear_ce":
+        fallback_policy = "native CE on unsupported/error"
+    elif kernel_backend == "tokamax":
+        fallback_policy = "native fused-op path on unavailable/error"
+    else:
+        fallback_policy = "none requested"
+
+    tied = bool(config.architecture.weight_tying)
+    return {
+        "loss_backend_requested": loss_backend,
+        "kernel_backend_requested": kernel_backend,
+        "tokamax_requested": tokamax_requested,
+        "tokamax_implementation": str(config.loss.tokamax_implementation),
+        "fallback_policy": fallback_policy,
+        "fallback_expected_reasons": fallback_reasons,
+        "lm_head_layout": (
+            "tied embedding [vocab, hidden]"
+            if tied
+            else "untied lm_head [hidden, vocab]"
+        ),
+        "untied_layout_normalization": (
+            "loss dispatcher accepts [hidden, vocab] and normalizes internally"
+        ),
+        "dispatch_confirmation": "startup/log evidence required",
+    }
+
+
 def _fresh_checkpoint_dir(config) -> None:
     ckpt_dir = Path(
         config.runtime.checkpoint_dir
@@ -378,6 +418,7 @@ def _write_run_manifest(
     validation_files,
     num_devices: int,
     compilation_cache: dict,
+    loss_contract: dict,
 ) -> None:
     """Persist the resolved inputs needed to compare TPU runs later."""
     if jax.process_index() != 0:
@@ -446,6 +487,7 @@ def _write_run_manifest(
             ),
             "dispatch_confirmation": "startup/log evidence required",
         },
+        "loss_contract": loss_contract,
         "compilation_cache": compilation_cache,
         "data": {
             "train_local_paths": [str(path) for path in train_paths],
@@ -603,6 +645,7 @@ def main():
         )
 
     _report_backend_contract(config)
+    loss_contract = _loss_dispatch_contract(config)
 
     global_batch_size = (
         config.runtime.micro_batch_per_device
@@ -642,6 +685,8 @@ def main():
         f"  logits_chunk_size={config.loss.logits_chunk_size}\n"
         f"  loss_backend={config.loss.backend}\n"
         f"  tokamax_implementation={config.loss.tokamax_implementation}\n"
+        f"  loss_fallback_policy={loss_contract['fallback_policy']}\n"
+        f"  lm_head_layout={loss_contract['lm_head_layout']}\n"
         f"  compilation_cache_dir={config.optimizations.compilation_cache_dir}\n"
         f"  tokens_per_step={tokens_per_step:,}\n"
         f"  total_tokens={int(config.runtime.total_tokens):,}\n"
@@ -658,6 +703,7 @@ def main():
         validation_files=validation_files,
         num_devices=num_devices,
         compilation_cache=compilation_cache,
+        loss_contract=loss_contract,
     )
 
     # --- UPDATED DATA LOADER CREATION ---

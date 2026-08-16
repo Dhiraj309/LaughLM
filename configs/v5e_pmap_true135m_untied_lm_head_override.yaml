@@ -1,0 +1,12 @@
+# M7 untied LM-head layout experiment.
+# Base: v5e_pmap_true135m_production.yaml
+# Use a fresh checkpoint; tied and untied parameter trees are incompatible.
+
+architecture:
+  weight_tying: false
+
+runtime:
+  checkpoint_dir: checkpoints/experiments/135M_untied_lm_head
+
+optimizations:
+  compilation_cache_dir: jax_cache/v5e_true135m_untied_lm_head

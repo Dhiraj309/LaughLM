@@ -1,0 +1,12 @@
+# M7 scanned-layer experiment overlay.
+# Base: v5e_pmap_true135m_production.yaml
+
+spmd:
+  remat:
+    scan_layers: true
+
+runtime:
+  checkpoint_dir: checkpoints/experiments/135M_scan_layers
+
+optimizations:
+  compilation_cache_dir: jax_cache/v5e_true135m_scan_layers
