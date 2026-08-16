@@ -345,17 +345,24 @@ implemented; TPU validation remains pending.
 **Goal:** Evaluate higher-risk optimizations only after the native PMAP path is
 stable and measured.
 
-**Status:** [ ] Not started
+**Status:** [~] Optional dispatch contracts and fallback documentation are
+implemented; TPU kernel validation remains pending.
 
 ### Features
 
-- [ ] Validate Tokamax linear CE and SwiGLU only on the target TPU stack.
-- [ ] Fix and test untied LM-head layout handling before enabling fused CE.
-- [ ] Compare native XLA, chunked CE, and Tokamax with identical inputs and
-  parameters.
-- [ ] Revisit scanned LLaMA layers only after the unscanned production path is
-  stable.
-- [ ] Revisit Grain only if native memmap remains the measured bottleneck.
+- [~] Validate Tokamax linear CE and SwiGLU only on the target TPU stack. The
+  launcher now records requested loss/kernel backends and fallback policy;
+  target-TPU validation remains pending.
+- [~] Fix and test untied LM-head layout handling before enabling fused CE. The
+  loss dispatcher records tied/untied layout and normalizes untied
+  `[hidden, vocab]` weights; parity validation remains pending.
+- [~] Compare native XLA, chunked CE, and Tokamax with identical inputs and
+  parameters. Isolated native dense, Tokamax CE, and Tokamax kernel overlays
+  plus manifest dispatch contracts are implemented; TPU evidence is pending.
+- [~] Revisit scanned LLaMA layers only after the unscanned production path is
+  stable. An isolated scan overlay is prepared; TPU validation is pending.
+- [~] Revisit Grain only if native memmap remains the measured bottleneck. An
+  isolated Grain overlay is prepared; TPU validation is pending.
 - [ ] Develop FSDP all-gather overlap, sequence parallelism, and 3D mesh support as
   separate future tracks; do not mix them into PMAP production changes.
 
