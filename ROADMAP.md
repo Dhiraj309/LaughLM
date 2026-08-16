@@ -330,6 +330,9 @@ implemented; TPU validation remains pending.
   comparison remains pending.
 - [~] Checkpoint interval and asynchronous-versus-synchronous checkpoint
   overlays are isolated; TPU checkpoint-overhead evidence remains pending.
+- [x] Audit overlay artifact isolation before TPU allocation. The preflight
+  rejects shared checkpoint/cache/profile paths; the prefetch overlays now use
+  dedicated compilation caches.
 
 ### Exit gate
 

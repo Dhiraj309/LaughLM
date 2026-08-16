@@ -8,6 +8,15 @@ Each overlay changes one measured variable and uses an isolated checkpoint and
 compilation-cache path. Keep the dataset, model geometry, shard selection,
 effective token count, and step window constant for an A/B comparison.
 
+Before allocating TPU time, audit the isolation contract:
+
+```bash
+python -u scripts/audit_experiment_isolation.py \
+  --base-config configs/v5e_pmap_true135m_production.yaml \
+  --overlay-dir configs \
+  --output reports/m6_experiment_isolation.json
+```
+
 | Variable | Overlay | Baseline value | Candidate value |
 |---|---|---:|---:|
 | Splash block size | `v5e_pmap_true135m_splash256_override.yaml` | 512 | 256 |
