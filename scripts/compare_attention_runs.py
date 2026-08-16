@@ -66,6 +66,19 @@ def _cache_state(manifest: dict[str, Any]) -> str:
     return "warm candidate" if file_count > 0 else "cold candidate"
 
 
+def _cache_comparable(
+    mha_manifest: dict[str, Any],
+    gqa_manifest: dict[str, Any],
+) -> bool:
+    """Require the same known cold/warm cache state for compile deltas."""
+    mha_state = _cache_state(mha_manifest)
+    gqa_state = _cache_state(gqa_manifest)
+    return (
+        mha_state != "unknown"
+        and mha_state == gqa_state
+    )
+
+
 def build_report(
     *,
     mha_path: Path,
@@ -82,7 +95,7 @@ def build_report(
         ("Median device tokens/sec", "device_tokens_per_sec_median", 1),
         ("Median non-embedding MFU (%)", "mfu_non_embedding_median", 2),
         (
-            "First-step compile+execute (sec)",
+            "First-step compile+execute (sec; raw)",
             "first_step_compile_plus_execute_time",
             3,
         ),
@@ -110,6 +123,11 @@ def build_report(
         f"- GQA dispatch contract: `{_dispatch_contract(gqa_manifest)}`",
         f"- MHA cache: `{_cache_state(mha_manifest)}`",
         f"- GQA cache: `{_cache_state(gqa_manifest)}`",
+        (
+            "- Compile comparison: `eligible; cache states match`"
+            if _cache_comparable(mha_manifest, gqa_manifest)
+            else "- Compile comparison: `blocked; cache states differ or are unknown`"
+        ),
         "",
         "## Comparison",
         "",
@@ -125,6 +143,11 @@ def build_report(
             if mha_value is None or gqa_value is None
             else float(gqa_value) - float(mha_value)
         )
+        if key == "first_step_compile_plus_execute_time" and not _cache_comparable(
+            mha_manifest,
+            gqa_manifest,
+        ):
+            delta = None
         lines.append(
             f"| {label} | {_fmt(mha_value, digits)} | "
             f"{_fmt(gqa_value, digits)} | {_fmt(delta, digits)} |"

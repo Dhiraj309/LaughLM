@@ -314,6 +314,8 @@ implemented; TPU validation remains pending.
   alongside the `.prof` artifact; TPU peak-memory evidence remains pending.
 - [~] The saved-artifact comparison report now includes input wait, input
   pipeline, and captured peak-memory comparisons; TPU validation remains.
+- [~] Compile deltas are now blocked when MHA/GQA cache states differ; a
+  cache-matched cold/warm TPU comparison is still required.
 - [ ] microbatch/gradient-accumulation pairs with constant effective tokens;
 - [ ] compilation cache cold versus warm;
 - [ ] checkpoint interval and async checkpoint overhead.
