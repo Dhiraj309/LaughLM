@@ -405,7 +405,8 @@ documentation are implemented; checkpoint/export validation remains pending.
 - [x] Publish the exact launch, resume, export, and shard-selection commands.
 - [~] Archive the final config, dependency versions, git revision, HF revision, and
   benchmark report. A static checksummed bundle builder and verifier are
-  implemented; final artifact collection remains pending.
+  implemented, and a final readiness aggregator is available; artifact
+  collection and TPU validation remain pending.
 
 ### Exit gate
 

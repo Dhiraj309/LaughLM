@@ -117,3 +117,19 @@ Verification must report `PASS`. It detects missing or modified files, stale
 files left by a forced rebuild, missing checkpoint metadata, missing export
 artifacts, incomplete dependency/HF provenance, and a missing or failed
 release audit.
+
+## 8. Release readiness summary
+
+Aggregate the completed reports into one final static readiness decision:
+
+```bash
+python -u scripts/audit_release_readiness.py \
+  --checkpoint-audit reports/production_checkpoint_audit.json \
+  --run-audit reports/production_run_audit.json \
+  --release-audit releases/laughlm-135m/release_audit.json \
+  --bundle-verification reports/laughlm-135m-bundle-verification.json \
+  --output reports/laughlm-135m-release-readiness.json
+```
+
+When this reports `PASS`, the remaining work is TPU validation and the
+operational handoff—not additional local runtime testing.
