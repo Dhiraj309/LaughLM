@@ -189,7 +189,8 @@ deliberate incompatible-config rejection remain pending.
 - [x] Preserve the existing atomic metadata write and save-completion ordering.
 - [~] Verify retention behavior with `checkpoint_max_to_keep: 1`.
   Native sidecar metadata now follows Orbax-retained steps, including for
-  state-only saves; TPU validation of both native and async managers is pending.
+  state-only saves; a dependency-light artifact audit is available, but TPU
+  validation of both native and async managers is pending.
 
 ### Exit gate
 
