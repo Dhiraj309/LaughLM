@@ -76,3 +76,20 @@ the final config, resolved run manifest, checkpoint metadata, export directory,
 release audit JSON, metrics, benchmark report, selected TPU logs/profiles, and
 the exact source git revision. SHA-256 checksums and dataset provenance are
 written to `release_manifest.json`.
+
+## 6. Verify the archive
+
+Run the verifier against the completed bundle. Keep its report outside the
+bundle so it does not become an unchecksummed extra file:
+
+```bash
+python -u scripts/verify_release_bundle.py \
+  --bundle-dir releases/laughlm-135m-bundle \
+  --require-audit \
+  --output reports/laughlm-135m-bundle-verification.json
+```
+
+Verification must report `PASS`. It detects missing or modified files, stale
+files left by a forced rebuild, missing checkpoint metadata, missing export
+artifacts, incomplete dependency/HF provenance, and a missing or failed
+release audit.
