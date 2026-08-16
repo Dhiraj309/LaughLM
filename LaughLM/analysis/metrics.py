@@ -119,6 +119,13 @@ def _median(values: list[float]) -> float | None:
     return float(statistics.median(values))
 
 
+def _max(values: list[float]) -> float | None:
+    if not values:
+        return None
+
+    return float(max(values))
+
+
 def _last(values: list[float]) -> float | None:
     if not values:
         return None
@@ -281,6 +288,17 @@ def summarize_metrics(
             "first_step_compile_plus_execute_time",
         ),
 
+        # Optional one-shot device memory snapshot.
+        "device_memory_peak_bytes_in_use_max": _max(
+            _values(rows, "device_memory_peak_bytes_in_use")
+        ),
+        "device_memory_bytes_limit_last": _last(
+            _values(rows, "device_memory_bytes_limit")
+        ),
+        "device_memory_snapshot_count": len(
+            _values(rows, "device_memory_peak_bytes_in_use")
+        ),
+
         # Raw sync/debug timing.
         "raw_sync_step_time_mean": _mean(_values(rows, "raw_sync_step_time")),
         "raw_device_step_time_mean": _mean(_values(rows, "raw_device_step_time")),
@@ -345,6 +363,11 @@ def print_metrics_summary(
     print(f"  host prep mean:    {fmt(summary['host_batch_prepare_time_mean'], 's')}")
     print(f"  device put mean:   {fmt(summary['device_put_time_mean'], 's')}")
     print(f"  host overhead mean:{fmt(summary['host_overhead_time_mean'], 's')}")
+    if summary.get("device_memory_snapshot_count", 0):
+        print(
+            "  device memory peak: "
+            f"{fmt(summary.get('device_memory_peak_bytes_in_use_max') / 1e9, 'GB')}"
+        )
     print(
         "  first step compile+execute: "
         f"{fmt(summary['first_step_compile_plus_execute_time'], 's')}"

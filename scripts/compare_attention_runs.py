@@ -88,6 +88,8 @@ def build_report(
         ),
         ("Mean total step time (sec)", "total_step_time_mean", 3),
         ("Mean device step time (sec)", "device_step_time_mean", 3),
+        ("Mean input wait (sec)", "data_wait_time_mean", 3),
+        ("Mean input pipeline (sec)", "input_pipeline_time_mean", 3),
         ("Final loss", "loss_last", 5),
     ]
 
@@ -128,6 +130,44 @@ def build_report(
             f"{_fmt(gqa_value, digits)} | {_fmt(delta, digits)} |"
         )
 
+    def _memory_gb(summary: dict[str, Any], key: str) -> float | None:
+        value = summary.get(key)
+        return None if value is None else float(value) / 1e9
+
+    lines.extend(
+        [
+            "",
+            "## Memory observations",
+            "",
+            "| Metric | MHA | GQA | GQA - MHA |",
+            "|---|---:|---:|---:|",
+        ]
+    )
+
+    for label, key in (
+        ("Peak device memory (GB)", "device_memory_peak_bytes_in_use_max"),
+        ("Device memory limit (GB)", "device_memory_bytes_limit_last"),
+    ):
+        mha_value = _memory_gb(mha_summary, key)
+        gqa_value = _memory_gb(gqa_summary, key)
+        delta = (
+            None
+            if mha_value is None or gqa_value is None
+            else gqa_value - mha_value
+        )
+        lines.append(
+            f"| {label} | {_fmt(mha_value, 3)} | "
+            f"{_fmt(gqa_value, 3)} | {_fmt(delta, 3)} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            f"- MHA memory snapshots: `{mha_summary.get('device_memory_snapshot_count', 0)}`",
+            f"- GQA memory snapshots: `{gqa_summary.get('device_memory_snapshot_count', 0)}`",
+        ]
+    )
+
     lines.extend(
         [
             "",
@@ -137,8 +177,9 @@ def build_report(
             "  shard selection, step window, and comparable cache state.",
             "- Confirm the GQA manifest and TPU logs show Splash dispatch with",
             "  no fallback before treating throughput or loss as comparable.",
-            "- Memory outcome and fallback/error details require TPU logs or",
-            "  profiler artifacts; they cannot be inferred from this table.",
+            "- Memory rows are populated only when the opt-in snapshot exists;",
+            "  profiler artifacts and TPU logs remain the source for deeper",
+            "  allocation/fallback details.",
             "",
         ]
     )
