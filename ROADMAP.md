@@ -377,18 +377,24 @@ implemented; TPU kernel validation remains pending.
 
 **Goal:** Make the trained checkpoint operationally useful and reproducible.
 
-**Status:** [ ] Not started
+**Status:** [~] Static release contract, audit tooling, and operational command
+documentation are implemented; checkpoint/export validation remains pending.
 
 ### Features
 
-- [ ] Validate HF export with the same vocabulary size and special-token contract.
-- [ ] Verify tied embeddings and real GQA configuration in exported metadata.
+- [~] Validate HF export with the same vocabulary size and special-token contract.
+  A read-only release auditor now checks the exported JSON contract; runtime
+  export validation remains pending.
+- [~] Verify tied embeddings and real GQA configuration in exported metadata.
+  The auditor checks both HF config and source-checkpoint metadata; TPU/export
+  evidence remains pending.
 - [ ] Run checkpoint-to-HF parity checks on a manually selected TPU-produced
   checkpoint or approved CPU/HF validation environment outside this local TPU
   development workflow.
-- [ ] Publish the exact launch, resume, export, and shard-selection commands.
-- [ ] Archive the final config, dependency versions, git revision, HF revision, and
-  benchmark report.
+- [x] Publish the exact launch, resume, export, and shard-selection commands.
+- [~] Archive the final config, dependency versions, git revision, HF revision, and
+  benchmark report. The release checklist and audit artifact define the bundle;
+  final artifact collection remains pending.
 
 ### Exit gate
 
