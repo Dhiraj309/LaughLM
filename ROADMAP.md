@@ -55,8 +55,8 @@ tracked as an M5 TPU experiment.
 | [~] | M2 | Make configuration and architecture intent authoritative; current MHA baseline passed, real GQA pending | Blocking |
 | [~] | M3 | Make token accounting and checkpoint resume durable; PMAP save/resume gate passed | Blocking |
 | [~] | M4 | Establish a measured PMAP performance baseline; timing instrumentation added | High |
-| [ ] | M5 | Validate and optimize real GQA + SplashAttention | High |
-| [ ] | M6 | Tune memory, input pipeline, and compilation behavior | High |
+| [~] | M5 | Validate and optimize real GQA + SplashAttention | High |
+| [~] | M6 | Tune memory, input pipeline, and compilation behavior | High |
 | [ ] | M7 | Evaluate optional fused kernels and advanced execution paths | Future |
 | [ ] | M8 | Release, export, and long-run operational gate | Final |
 
@@ -252,8 +252,8 @@ warm-cache TPU validation remains pending.
 
 **Goal:** Move from the current MHA-equivalent setup to validated GQA.
 
-**Status:** [~] Maintained LLaMA GQA/Splash implementation started; TPU
-validation and performance comparison remain pending.
+**Status:** [~] TPU smoke and warm comparison passed; longer stability and
+peak-memory evidence remain pending.
 
 ### Features
 
@@ -268,37 +268,39 @@ validation and performance comparison remain pending.
 - [x] Record the requested attention implementation, fallback policy, head
   geometry, and expected Splash GQA expansion in each run manifest; actual
   dispatch still requires TPU log confirmation.
-- [~] Verify Q/K/V projection shapes and KV-head broadcasting. Compact K/V
-  projections and caches are preserved; Splash receives an explicit expanded
-  head layout. TPU shape validation remains pending.
-- [~] Verify SplashAttention supports the selected GQA shape on the target JAX/TPU
-  stack. The maintained path now expands compact KV heads at the Splash
-  boundary; TPU kernel validation remains pending.
+- [x] Verify Q/K/V projection shapes and KV-head broadcasting. Compact K/V
+  projections and caches are preserved; the TPU smoke run confirmed the
+  expected 4-to-8 Splash boundary expansion.
+- [x] Verify SplashAttention supports the selected GQA shape on the target JAX/TPU
+  stack. The 5-step smoke and 50-step warm comparison completed without
+  fallback or attention-shape errors.
 - [~] Compare GQA against the current MHA-equivalent baseline for loss, memory,
-  compile time, and tokens/sec. A static MHA-vs-GQA report is implemented;
-  TPU artifacts and memory/fallback evidence remain pending.
+  compile time, and tokens/sec. The 50-step comparison reports about 3.8%
+  higher GQA throughput and finite loss; peak-memory artifacts and a longer
+  stability window remain pending.
 - [x] Keep `attention_fallback: error` for production so an unintended XLA fallback
   cannot masquerade as a Splash benchmark.
 
 ### Exit gate
 
-- [ ] Real GQA runs with SplashAttention, produces finite loss, and has an
-  explicit performance/memory comparison against the baseline.
+- [~] Real GQA runs with SplashAttention produce finite loss and an explicit
+  performance comparison; peak-memory evidence and longer stability remain.
 
 ### TPU gate for changes in M5
 
-- [ ] Run baseline MHA-equivalent and real-GQA configurations for the same short
-  workload.
-- [ ] Report attention dispatch, compile time, step time, memory outcome, loss,
-  and any fallback/error.
+- [x] Run baseline MHA-equivalent and real-GQA configurations for the same
+  50-step workload.
+- [~] Report attention dispatch, compile time, step time, memory outcome, loss,
+  and any fallback/error. Dispatch, timing, loss, and fallback evidence are
+  recorded; actual peak-memory capture remains.
 
 ## M6 — Memory, input, and compilation tuning
 
 **Goal:** Optimize the measured bottleneck without changing multiple variables
 at once.
 
-**Status:** [~] Controlled tuning overlays are being prepared; TPU
-validation remains pending.
+**Status:** [~] Controlled tuning overlays and opt-in memory capture are
+implemented; TPU validation remains pending.
 
 ### Experiment matrix
 
@@ -308,6 +310,8 @@ validation remains pending.
 - [~] Host prefetch depth is now configurable through
   `runtime.prefetch_size`, with `4` and `16` A/B overlays; device-transfer
   scheduling still requires TPU evidence.
+- [~] Opt-in one-shot device-memory snapshots are persisted in `metrics.jsonl`
+  alongside the `.prof` artifact; TPU peak-memory evidence remains pending.
 - [ ] microbatch/gradient-accumulation pairs with constant effective tokens;
 - [ ] compilation cache cold versus warm;
 - [ ] checkpoint interval and async checkpoint overhead.
