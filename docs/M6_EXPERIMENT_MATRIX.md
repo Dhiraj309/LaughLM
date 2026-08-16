@@ -40,3 +40,18 @@ timings, memory snapshot when enabled, and comparison report. A candidate is
 not accepted from static inspection alone; the M6 TPU gate still requires
 throughput, peak memory, compile time, input wait, loss, and checkpoint-time
 evidence.
+
+After collecting two comparable run directories, generate a static candidate
+gate report:
+
+```bash
+python -u scripts/evaluate_run_candidate.py \
+  --baseline checkpoints/production/135M_true_h128 \
+  --candidate checkpoints/experiments/135M_prefetch4 \
+  --require-memory \
+  --output reports/m6_prefetch4_candidate.json
+```
+
+The report blocks mismatched model/data/batch identities and records whether
+cache states make compile-time deltas eligible. Thresholds are review guards,
+not a replacement for TPU fallback, dispatch, or stability evidence.
