@@ -198,7 +198,8 @@ deliberate incompatible-config rejection remain pending.
   step and token counts.
 - [~] A deliberately incompatible config is rejected before training resumes.
   Model, optimizer/scheduler, layout/dtype, and execution-contract mismatches
-  now fail before restore; TPU confirmation remains pending.
+  now fail before restore; a static compatibility preflight is also available,
+  but TPU confirmation remains pending.
 
 ### TPU gate for changes in M3
 
