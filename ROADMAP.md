@@ -333,6 +333,9 @@ implemented; TPU validation remains pending.
 - [x] Audit overlay artifact isolation before TPU allocation. The preflight
   rejects shared checkpoint/cache/profile paths; the prefetch overlays now use
   dedicated compilation caches.
+- [~] Evaluate saved baseline/candidate metrics with explicit throughput, loss,
+  memory, identity, and cache-state guards; TPU dispatch and stability evidence
+  remain required.
 
 ### Exit gate
 
