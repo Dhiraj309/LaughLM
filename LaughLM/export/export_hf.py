@@ -285,6 +285,24 @@ def copy_tokenizer_files(
                 filename
             )
 
+    special_tokens_path = output_dir / "special_tokens_map.json"
+    if not special_tokens_path.is_file():
+        tokenizer_config_path = output_dir / "tokenizer_config.json"
+        tokenizer_config = {}
+        if tokenizer_config_path.is_file():
+            with tokenizer_config_path.open("r", encoding="utf-8") as handle:
+                tokenizer_config = json.load(handle)
+
+        special_tokens = {
+            name: tokenizer_config[name]
+            for name in ("bos_token", "eos_token", "pad_token")
+            if tokenizer_config.get(name) is not None
+        }
+        if special_tokens:
+            with special_tokens_path.open("w", encoding="utf-8") as handle:
+                json.dump(special_tokens, handle, indent=2, sort_keys=True)
+            copied.append("special_tokens_map.json (from tokenizer_config.json)")
+
     if not copied:
         raise RuntimeError(
             "No tokenizer files found.\n"
