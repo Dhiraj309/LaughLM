@@ -342,7 +342,8 @@ implemented; TPU validation remains pending.
   selected shards, HF revision, batch geometry, and device topology, and
   compile-sensitive comparisons can require a known matching cache state.
   Candidate acceptance can also require a real throughput or peak-memory
-  improvement. TPU dispatch and stability evidence remain required.
+  improvement and an explicit loss-spread bound. TPU dispatch and stability
+  evidence remain required.
 
 ### Exit gate
 
