@@ -424,6 +424,30 @@ def _write_run_manifest(
     if jax.process_index() != 0:
         return
 
+    token_dtype = "uint16" if int(config.model.vocab_size) <= 65535 else "uint64"
+    token_itemsize = 2 if token_dtype == "uint16" else 8
+
+    def shard_details(paths):
+        details = []
+        for path in paths:
+            detail = {
+                "path": str(path),
+                "filename": Path(path).name,
+                "dtype": token_dtype,
+                "itemsize_bytes": token_itemsize,
+            }
+            try:
+                byte_size = int(Path(path).stat().st_size)
+                detail["byte_size"] = byte_size
+                detail["size_aligned"] = byte_size % token_itemsize == 0
+                detail["token_count"] = byte_size // token_itemsize
+                if not detail["size_aligned"]:
+                    detail["error"] = "byte size is not aligned to token dtype"
+            except OSError as exc:
+                detail["error"] = f"stat failed: {type(exc).__name__}: {exc}"
+            details.append(detail)
+        return details
+
     package_names = (
         "jax",
         "jaxlib",
@@ -490,12 +514,16 @@ def _write_run_manifest(
         "loss_contract": loss_contract,
         "compilation_cache": compilation_cache,
         "data": {
+            "token_dtype": token_dtype,
+            "token_itemsize_bytes": token_itemsize,
             "train_local_paths": [str(path) for path in train_paths],
             "validation_local_paths": [
                 str(path) for path in validation_paths
             ],
             "train_files": train_files,
             "validation_files": validation_files,
+            "train_shard_details": shard_details(train_paths),
+            "validation_shard_details": shard_details(validation_paths),
         },
     }
 

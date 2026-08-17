@@ -26,10 +26,10 @@ python -u -m scripts.train_tpu_optimized \
   --clear-compilation-cache 2>&1 | tee reports/tpu_gate1_cold.log
 ```
 
-Capture the following from the log: resolved model/dtype/head geometry,
-shard paths and dtype, process topology, first-step compile-plus-execute time,
-steady-state throughput, loss, timing breakdown, fallback messages, and final
-checkpoint completion.
+Capture the following from the log and manifest: resolved model/dtype/head
+geometry, shard paths and dtype, byte sizes, token counts, process topology,
+first-step compile-plus-execute time, steady-state throughput, loss, timing
+breakdown, fallback messages, and final checkpoint completion.
 
 ## Gate 2: checkpoint and run audits
 
