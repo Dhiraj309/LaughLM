@@ -284,8 +284,20 @@ def main():
         step
     )
 
-    tokens_processed = _to_jsonable(
+    # Splash-compatible PMAP checkpoints keep the device-side token counter
+    # disabled, so the restored TrainState field can legitimately be zero.
+    # The checkpoint metadata sidecar is the authoritative host-side counter
+    # and must be propagated into the native export contract.
+    state_tokens_processed = _to_jsonable(
         state.tokens_processed
+    )
+    metadata_tokens_processed = source_metadata.get(
+        "tokens_processed"
+    )
+    tokens_processed = (
+        int(metadata_tokens_processed)
+        if metadata_tokens_processed is not None
+        else int(state_tokens_processed)
     )
 
     print(
