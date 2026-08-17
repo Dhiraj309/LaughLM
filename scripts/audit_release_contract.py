@@ -206,6 +206,11 @@ def audit_release(
             actual=exported_config.get(name),
         )
 
+    generation_checks = {
+        name: expected
+        for name, expected in SPECIAL_TOKEN_CONTRACT.items()
+    }
+    for name, expected in generation_checks.items():
         _record(
             checks,
             f"generation config {name}",
