@@ -722,18 +722,6 @@ def main():
         flush=True,
     )
 
-    _write_run_manifest(
-        args=args,
-        config=config,
-        train_paths=paths,
-        validation_paths=validation_paths,
-        train_files=train_files,
-        validation_files=validation_files,
-        num_devices=num_devices,
-        compilation_cache=compilation_cache,
-        loss_contract=loss_contract,
-    )
-
     # --- UPDATED DATA LOADER CREATION ---
     dataset = create_dataloader(
         config=config,
@@ -747,6 +735,21 @@ def main():
     trainer = Trainer(
         config=config,
         resume_dir=config.runtime.checkpoint_dir,
+    )
+
+    # Restore compatibility is validated by Trainer initialization. Write the
+    # run manifest only after that succeeds so a deliberately failed resume
+    # cannot overwrite the last valid production provenance artifact.
+    _write_run_manifest(
+        args=args,
+        config=config,
+        train_paths=paths,
+        validation_paths=validation_paths,
+        train_files=train_files,
+        validation_files=validation_files,
+        num_devices=num_devices,
+        compilation_cache=compilation_cache,
+        loss_contract=loss_contract,
     )
 
     eval_dataset = (
