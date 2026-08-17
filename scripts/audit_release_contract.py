@@ -220,7 +220,6 @@ def audit_release(
         ("vocab_size", vocab_size),
         ("num_heads", num_heads),
         ("num_kv_heads", num_kv_heads),
-        ("attention_variant", attention_variant),
     ):
         _record(
             checks,
@@ -234,6 +233,19 @@ def audit_release(
                 else None
             ),
         )
+
+    _record(
+        checks,
+        "source metadata architecture.attention_variant",
+        passed=isinstance(source_architecture, dict)
+        and source_architecture.get("attention_variant") == attention_variant,
+        expected=attention_variant,
+        actual=(
+            source_architecture.get("attention_variant")
+            if isinstance(source_architecture, dict)
+            else None
+        ),
+    )
 
     expected_tying = bool(_nested(config, "architecture", "weight_tying"))
     _record(
