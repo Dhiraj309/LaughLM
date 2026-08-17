@@ -403,6 +403,8 @@ documentation are implemented; checkpoint/export validation remains pending.
   parity path and can persist logits/generation results as JSON; TPU evidence is
   still pending.
 - [x] Publish the exact launch, resume, export, and shard-selection commands.
+- [x] Publish the consolidated TPU validation runbook and artifact-return
+  contract; full TPU gate execution remains pending.
 - [~] Archive the final config, dependency versions, git revision, HF revision, and
   benchmark report. A static checksummed bundle builder and verifier are
   implemented, and a final readiness aggregator is available; artifact
