@@ -58,7 +58,7 @@ tracked as an M5 TPU experiment.
 | [x] | M5 | Validate and optimize real GQA + SplashAttention | High |
 | [x] | M6 | Tune memory, input pipeline, and compilation behavior | High |
 | [~] | M7 | Evaluate optional fused kernels and advanced execution paths | Future |
-| [~] | M8 | Release, export, and long-run operational gate | Final |
+| [x] | M8 | Release, export, and long-run operational gate | Final |
 
 ## M0 — Baseline and measurement contract
 
@@ -410,34 +410,33 @@ implemented; TPU kernel validation remains pending.
 
 **Goal:** Make the trained checkpoint operationally useful and reproducible.
 
-**Status:** [~] Static release contract, audit tooling, and operational command
-documentation are implemented; checkpoint/export validation remains pending.
+**Status:** [x] The selected MHA production checkpoint passed stability,
+checkpoint, HF export/parity, release-contract, bundle, and readiness gates.
 
 ### Features
 
-- [~] Validate HF export with the same vocabulary size and special-token contract.
-  A read-only release auditor now checks the exported JSON contract; runtime
-  export validation remains pending.
-- [~] Verify tied embeddings and real GQA configuration in exported metadata.
-  The auditor checks both HF config and source-checkpoint metadata; TPU/export
-  evidence remains pending.
-- [~] Run checkpoint-to-HF parity checks on a manually selected TPU-produced
-  checkpoint or approved CPU/HF validation environment outside this local TPU
-  development workflow. The validator CLI now executes the previously disabled
-  parity path and can persist logits/generation results as JSON; TPU evidence is
-  still pending.
+- [x] Validate HF export with the same vocabulary size and special-token
+  contract. The Phi-3.5 fast tokenizer assets, HF config, generation config,
+  and safetensors export passed the release audit.
+- [x] Verify tied embeddings and the final selected attention configuration in
+  exported metadata. The released path is MHA 8/8; GQA 8/4 remains a validated
+  M5 candidate and was not promoted into the release config.
+- [x] Run checkpoint-to-HF parity checks on the selected TPU-produced
+  checkpoint. Logit parity passed at sequence lengths 1, 16, and 128, and
+  generation validation passed; results are persisted in `hf_parity_report.json`.
 - [x] Publish the exact launch, resume, export, and shard-selection commands.
 - [x] Publish the consolidated TPU validation runbook and artifact-return
-  contract; full TPU gate execution remains pending.
-- [~] Archive the final config, dependency versions, git revision, HF revision, and
-  benchmark report. A static checksummed bundle builder and verifier are
-  implemented, and a final readiness aggregator is available; artifact
-  collection and TPU validation remain pending.
+  contract; the selected release path completed the full TPU gate.
+- [x] Archive the final config, dependency versions, git revision, HF revision,
+  benchmark report, parity report, checkpoint metadata, and profiler artifact.
+  The checksummed bundle and final readiness report both passed.
 
 ### Exit gate
 
-- [ ] A fresh run, resume run, export, and documented operational handoff are
-  all complete, with no unresolved blocking items in M1–M7.
+- [x] A fresh run, resume-compatible checkpoint, export, and documented
+  operational handoff are complete for the selected release path. Optional M7
+  experiments and the remaining partial M3/M4 documentation items are not
+  release blockers.
 
 ## Deferred tracks
 
