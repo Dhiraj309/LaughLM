@@ -625,6 +625,7 @@ def export_hf_checkpoint(
                 hf_dir=output_dir,
                 config_path=config_path,
                 params=params,
+                report_path=output_dir / "hf_parity_report.json",
             )
 
         print(
