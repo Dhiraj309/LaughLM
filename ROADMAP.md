@@ -202,7 +202,9 @@ deliberate incompatible-config rejection remain pending.
 - [~] A deliberately incompatible config is rejected before training resumes.
   Model, optimizer/scheduler, layout/dtype, and execution-contract mismatches
   now fail before restore; the static compatibility preflight now reports the
-  exact mismatch paths, but TPU confirmation remains pending.
+  exact mismatch paths, normalizes numeric YAML/JSON values, and permits the
+  documented stage-level `runtime.total_tokens` change. TPU confirmation
+  remains pending.
 
 ### TPU gate for changes in M3
 

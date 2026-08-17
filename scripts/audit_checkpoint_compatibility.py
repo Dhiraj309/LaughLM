@@ -215,10 +215,26 @@ def _compare(
     expected: Any,
     actual: Any,
 ) -> None:
+    equivalent = expected == actual
+    if not equivalent:
+        numeric_values = (int, float)
+        if (
+            isinstance(expected, numeric_values)
+            and not isinstance(expected, bool)
+            and isinstance(actual, str)
+        ) or (
+            isinstance(actual, numeric_values)
+            and not isinstance(actual, bool)
+            and isinstance(expected, str)
+        ):
+            try:
+                equivalent = float(expected) == float(actual)
+            except (TypeError, ValueError):
+                equivalent = False
     checks.append(
         {
             "name": name,
-            "passed": expected == actual,
+            "passed": equivalent,
             "expected": expected,
             "actual": actual,
         }
@@ -230,12 +246,32 @@ def _compare_mapping(
     name: str,
     expected: Any,
     actual: Any,
+    *,
+    allowed_mismatches: set[str] | None = None,
 ) -> None:
     if not isinstance(expected, dict) or not isinstance(actual, dict):
         _compare(checks, name, expected, actual)
         return
     for key, expected_value in expected.items():
-        _compare(checks, f"{name}.{key}", expected_value, actual.get(key))
+        actual_value = actual.get(key)
+        if (
+            allowed_mismatches
+            and key in allowed_mismatches
+            and actual_value is not None
+            and expected_value != actual_value
+        ):
+            checks.append(
+                {
+                    "name": f"{name}.{key}",
+                    "passed": True,
+                    "expected": expected_value,
+                    "actual": actual_value,
+                    "allowed_mismatch": True,
+                    "note": "stage target may change between resumptions",
+                }
+            )
+            continue
+        _compare(checks, f"{name}.{key}", expected_value, actual_value)
 
 
 def audit_compatibility(
@@ -270,7 +306,15 @@ def audit_compatibility(
         "dtype_policy",
         "execution_contract",
     ):
-        _compare_mapping(checks, section, expected[section], actual[section])
+        _compare_mapping(
+            checks,
+            section,
+            expected[section],
+            actual[section],
+            allowed_mismatches={"total_tokens"}
+            if section == "runtime"
+            else None,
+        )
 
     if expected_num_devices is not None:
         _compare(
