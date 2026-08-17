@@ -122,8 +122,9 @@ shard run.
   and `--fresh`.
 - [~] Report shard paths, dtype, token counts, batch shapes, process index/count,
   first-step loss, and whether any fallback was used. Run manifests now persist
-  shard paths, byte sizes, inferred dtype, alignment, and token counts; batch,
-  process, loss, and fallback evidence still requires the TPU log.
+  shard paths, byte sizes, inferred dtype, alignment, and token counts, and the
+  static run audit now verifies that shard contract; batch, process, loss, and
+  fallback evidence still requires the TPU log.
 
 ## M2 — Configuration and architecture contract
 

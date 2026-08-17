@@ -11,6 +11,10 @@ from typing import Any
 
 
 CORE_PACKAGES = ("jax", "jaxlib", "flax", "optax", "orbax-checkpoint")
+TOKEN_STORAGE = {
+    "uint16": 2,
+    "uint64": 8,
+}
 REQUIRED_TIMING_FIELDS = (
     "total_step_time",
     "data_wait_time",
@@ -153,6 +157,91 @@ def audit_run(
         ),
         expected="loss backend, fallback policy, and LM-head layout",
         actual=loss_contract,
+    )
+
+    data_contract = manifest.get("data")
+    token_dtype = (
+        data_contract.get("token_dtype")
+        if isinstance(data_contract, dict)
+        else None
+    )
+    token_itemsize = (
+        data_contract.get("token_itemsize_bytes")
+        if isinstance(data_contract, dict)
+        else None
+    )
+    expected_itemsize = TOKEN_STORAGE.get(token_dtype)
+    _record(
+        checks,
+        "token storage contract",
+        passed=(
+            isinstance(data_contract, dict)
+            and expected_itemsize is not None
+            and token_itemsize == expected_itemsize
+        ),
+        expected="token_dtype is uint16/uint64 with matching itemsize",
+        actual={"dtype": token_dtype, "itemsize_bytes": token_itemsize},
+    )
+
+    shard_errors: list[str] = []
+    for split in ("train", "validation"):
+        details = (
+            data_contract.get(f"{split}_shard_details")
+            if isinstance(data_contract, dict)
+            else None
+        )
+        if not isinstance(details, list) or not details:
+            shard_errors.append(f"{split}: missing shard details")
+            continue
+        for index, detail in enumerate(details):
+            prefix = f"{split}[{index}]"
+            if not isinstance(detail, dict):
+                shard_errors.append(f"{prefix}: expected object")
+                continue
+            if not detail.get("path") or not detail.get("filename"):
+                shard_errors.append(f"{prefix}: missing path or filename")
+            if detail.get("dtype") != token_dtype:
+                shard_errors.append(f"{prefix}: dtype does not match manifest")
+            if detail.get("itemsize_bytes") != token_itemsize:
+                shard_errors.append(f"{prefix}: itemsize does not match manifest")
+            if detail.get("size_aligned") is not True:
+                shard_errors.append(f"{prefix}: shard size is not aligned")
+            byte_size = detail.get("byte_size")
+            token_count = detail.get("token_count")
+            if (
+                not isinstance(byte_size, int)
+                or isinstance(byte_size, bool)
+                or byte_size <= 0
+            ):
+                shard_errors.append(f"{prefix}: invalid byte_size")
+            if (
+                not isinstance(token_count, int)
+                or isinstance(token_count, bool)
+                or token_count <= 0
+            ):
+                shard_errors.append(f"{prefix}: invalid token_count")
+            if (
+                isinstance(byte_size, int)
+                and not isinstance(byte_size, bool)
+                and isinstance(token_itemsize, int)
+                and byte_size % token_itemsize != 0
+            ):
+                shard_errors.append(f"{prefix}: byte_size/itemsize mismatch")
+            if (
+                isinstance(byte_size, int)
+                and not isinstance(byte_size, bool)
+                and isinstance(token_count, int)
+                and not isinstance(token_count, bool)
+                and isinstance(token_itemsize, int)
+                and byte_size != token_count * token_itemsize
+            ):
+                shard_errors.append(f"{prefix}: token_count does not match byte_size")
+    _record(
+        checks,
+        "shard manifest integrity",
+        passed=not shard_errors,
+        expected="non-empty aligned train/validation shard details with consistent counts",
+        actual=shard_errors[:20] or "valid",
     )
 
     cache = manifest.get("compilation_cache")
