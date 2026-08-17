@@ -191,9 +191,9 @@ deliberate incompatible-config rejection remain pending.
   before continuing to step 60.
 - [x] Preserve the existing atomic metadata write and save-completion ordering.
 - [~] Verify retention behavior with `checkpoint_max_to_keep: 1`.
-  Native sidecar metadata now follows Orbax-retained steps, including for
-  state-only saves; a dependency-light artifact audit is available, but TPU
-  validation of both native and async managers is pending.
+  Native and async managers now materialize sidecar metadata only after
+  completed Orbax writes and prune it to the retained steps; a dependency-light
+  artifact audit is available, but TPU validation of both managers is pending.
 
 ### Exit gate
 

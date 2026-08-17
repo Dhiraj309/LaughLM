@@ -15,7 +15,9 @@ Features:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -61,8 +63,11 @@ class OrbaxCompositeCheckpointManager:
     ):
         self.directory = Path(directory).expanduser().resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
+        self.metadata_dir = self.directory / "checkpoint_metadata"
+        self.metadata_dir.mkdir(parents=True, exist_ok=True)
         self.max_to_keep = max_to_keep
         self.async_checkpointing = async_checkpointing
+        self._pending_metadata: dict[int, Dict[str, Any]] = {}
 
         if _ORBAX_AVAILABLE and ocp is not None:
             self._init_orbax_manager()
@@ -71,6 +76,68 @@ class OrbaxCompositeCheckpointManager:
                 directory=str(self.directory),
                 max_to_keep=max_to_keep,
             )
+
+    def _metadata_path(self, step: int) -> Path:
+        return self.metadata_dir / f"step_{step:08d}.json"
+
+    def _write_metadata_sidecar(
+        self,
+        *,
+        step: int,
+        metadata: Dict[str, Any],
+    ) -> None:
+        """Write the compatibility-audit metadata after Orbax completion."""
+        path = self._metadata_path(step)
+        temp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+        try:
+            with temp_path.open("w", encoding="utf-8") as handle:
+                json.dump(metadata, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+
+    def _prune_metadata_sidecars(self, saved_steps: set[int]) -> None:
+        for path in self.metadata_dir.glob("step_*.json"):
+            try:
+                step = int(path.stem.removeprefix("step_"))
+            except ValueError:
+                continue
+            if step not in saved_steps:
+                path.unlink()
+
+    def _flush_completed_metadata(self) -> None:
+        if not self._pending_metadata:
+            return
+
+        saved_steps: set[int] | None = None
+        if hasattr(self.manager, "all_steps"):
+            saved_steps = {
+                int(step) for step in self.manager.all_steps(read=True)
+            }
+            missing_steps = sorted(
+                step
+                for step in self._pending_metadata
+                if step not in saved_steps
+            )
+            if missing_steps:
+                raise RuntimeError(
+                    "Orbax completed without registering checkpoint steps "
+                    f"for metadata sidecars: {missing_steps}"
+                )
+
+        for step, metadata in sorted(self._pending_metadata.items()):
+            self._write_metadata_sidecar(step=step, metadata=metadata)
+            logger.info(
+                "[checkpoint_factory] metadata sidecar committed at step %s.",
+                step,
+            )
+        self._pending_metadata.clear()
+
+        if saved_steps is not None:
+            self._prune_metadata_sidecars(saved_steps)
 
     def _init_orbax_manager(self):
         """Build Orbax CheckpointManager with AsyncOptions if enabled."""
@@ -206,6 +273,8 @@ class OrbaxCompositeCheckpointManager:
                         },
                     )
 
+                if metadata is not None:
+                    self._pending_metadata[int(step)] = dict(metadata)
                 logger.info(f"[checkpoint_factory] Composite checkpoint saved at step {step}.")
                 return True
         except Exception as e:
@@ -357,6 +426,7 @@ class OrbaxCompositeCheckpointManager:
         """Flush background async writes before shutdown."""
         if hasattr(self.manager, "wait_until_finished"):
             self.manager.wait_until_finished()
+        self._flush_completed_metadata()
 
 
 # ------------------------------------------------------------
