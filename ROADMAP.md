@@ -338,8 +338,9 @@ implemented; TPU validation remains pending.
   rejects shared checkpoint/cache/profile paths; the prefetch overlays now use
   dedicated compilation caches.
 - [~] Evaluate saved baseline/candidate metrics with explicit throughput, loss,
-  memory, identity, and cache-state guards; TPU dispatch and stability evidence
-  remain required.
+  memory, workload identity, and cache-state guards; identity now includes
+  selected shards, HF revision, batch geometry, and device topology. TPU
+  dispatch and stability evidence remain required.
 
 ### Exit gate
 
