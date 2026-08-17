@@ -51,6 +51,7 @@ python -u scripts/evaluate_run_candidate.py \
   --require-memory \
   --require-cache-match \
   --require-improvement \
+  --max-loss-spread 1.0 \
   --output reports/m6_prefetch4_candidate.json
 ```
 
@@ -60,4 +61,5 @@ that state into a hard gate for compile-sensitive comparisons. Use
 `--require-improvement` when deciding whether to accept an optimization; it
 requires a real throughput gain or peak-memory reduction. Thresholds are
 review guards, not a replacement for TPU fallback, dispatch, or stability
-evidence.
+evidence. Set `--max-loss-spread` from the observed baseline window rather
+than treating the example value as a universal training threshold.

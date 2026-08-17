@@ -75,13 +75,19 @@ def _summary(rows: list[dict[str, Any]], skip_steps: int, last_n: int | None) ->
         selected,
         "device_memory_peak_bytes_in_use",
     )
+    loss_values = _values(selected, "loss")
     return {
         "rows_total": len(rows),
         "rows_selected": len(selected),
         "tokens_per_sec_median": statistic("tokens_per_sec", median),
         "device_tokens_per_sec_median": statistic("device_tokens_per_sec", median),
         "mfu_non_embedding_median": statistic("mfu_non_embedding", median),
-        "loss_last": _values(selected, "loss")[-1] if _values(selected, "loss") else None,
+        "loss_last": loss_values[-1] if loss_values else None,
+        "loss_min": min(loss_values) if loss_values else None,
+        "loss_max": max(loss_values) if loss_values else None,
+        "loss_spread": (
+            max(loss_values) - min(loss_values) if loss_values else None
+        ),
         "total_step_time_mean": statistic("total_step_time", mean),
         "device_step_time_mean": statistic("device_step_time", mean),
         "device_memory_peak_bytes_max": max(memory_values) if memory_values else None,
@@ -153,6 +159,7 @@ def evaluate_candidate(
     require_memory: bool,
     require_cache_match: bool,
     require_improvement: bool,
+    max_loss_spread: float | None,
 ) -> dict[str, Any]:
     baseline_manifest = _load_json(_run_file(baseline_dir, "run_manifest.json"))
     candidate_manifest = _load_json(_run_file(candidate_dir, "run_manifest.json"))
@@ -205,6 +212,14 @@ def evaluate_candidate(
         baseline_memory is not None
         and candidate_memory is not None
         and candidate_memory < baseline_memory
+    )
+    candidate_loss_spread = candidate["loss_spread"]
+    loss_stable = (
+        max_loss_spread is None
+        or (
+            candidate_loss_spread is not None
+            and candidate_loss_spread <= max_loss_spread
+        )
     )
     checks = [
         {
@@ -271,6 +286,16 @@ def evaluate_candidate(
                 "memory_improved": memory_improved,
             },
         },
+        {
+            "name": "candidate loss stability",
+            "passed": loss_stable,
+            "expected": (
+                f"candidate loss spread <= {max_loss_spread:.6f}"
+                if max_loss_spread is not None
+                else "optional"
+            ),
+            "actual": candidate_loss_spread,
+        },
     ]
     return {
         "evaluation": "LaughLM experiment candidate",
@@ -320,6 +345,12 @@ def main() -> int:
         action="store_true",
         help="Fail unless throughput or peak memory improves over baseline.",
     )
+    parser.add_argument(
+        "--max-loss-spread",
+        type=float,
+        default=None,
+        help="Fail if candidate max(loss)-min(loss) exceeds this threshold.",
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
@@ -334,6 +365,7 @@ def main() -> int:
         require_memory=args.require_memory,
         require_cache_match=args.require_cache_match,
         require_improvement=args.require_improvement,
+        max_loss_spread=args.max_loss_spread,
     )
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
