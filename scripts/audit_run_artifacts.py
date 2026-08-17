@@ -289,11 +289,42 @@ def audit_run(
         )
 
     non_finite: list[str] = []
+    invalid_steps: list[str] = []
+    negative_values: list[str] = []
+    invalid_mfu: list[str] = []
+    previous_step: int | None = None
     for row_index, row in enumerate(rows):
         for field in REQUIRED_METRIC_FIELDS[1:] + REQUIRED_TIMING_FIELDS:
             value = row.get(field)
             if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
                 non_finite.append(f"row {row_index} field {field}")
+        step = row.get("step")
+        if (
+            not isinstance(step, int)
+            or isinstance(step, bool)
+            or step < 0
+            or (previous_step is not None and step <= previous_step)
+        ):
+            invalid_steps.append(f"row {row_index} step {step!r}")
+        elif isinstance(step, int):
+            previous_step = step
+        for field in (
+            "tokens_per_sec",
+            "device_tokens_per_sec",
+            *REQUIRED_TIMING_FIELDS,
+        ):
+            value = row.get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if math.isfinite(float(value)) and float(value) < 0:
+                    negative_values.append(f"row {row_index} field {field}")
+        mfu = row.get("mfu_non_embedding")
+        if (
+            isinstance(mfu, (int, float))
+            and not isinstance(mfu, bool)
+            and math.isfinite(float(mfu))
+            and not 0 <= float(mfu) <= 100
+        ):
+            invalid_mfu.append(f"row {row_index} value {mfu!r}")
     _record(
         checks,
         "metrics numeric values",
@@ -301,9 +332,32 @@ def audit_run(
         expected="finite numeric metric/timing values",
         actual=non_finite[:20] or "finite",
     )
+    _record(
+        checks,
+        "metric step ordering",
+        passed=not invalid_steps,
+        expected="non-negative strictly increasing integer steps",
+        actual=invalid_steps[:20] or "valid",
+    )
+    _record(
+        checks,
+        "non-negative timing and throughput",
+        passed=not negative_values,
+        expected="timing and throughput values are non-negative",
+        actual=negative_values[:20] or "valid",
+    )
+    _record(
+        checks,
+        "MFU range",
+        passed=not invalid_mfu,
+        expected="mfu_non_embedding values between 0 and 100 percent",
+        actual=invalid_mfu[:20] or "valid",
+    )
 
     compile_evidence = any(
-        row.get("first_step_compile_plus_execute_time") is not None
+        isinstance(row.get("first_step_compile_plus_execute_time"), (int, float))
+        and not isinstance(row.get("first_step_compile_plus_execute_time"), bool)
+        and row.get("first_step_compile_plus_execute_time") > 0
         for row in rows
     )
     _record(

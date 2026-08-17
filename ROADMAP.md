@@ -238,8 +238,9 @@ warm-cache TPU validation remains pending.
   Splash reports its selected block size during model initialization.
 - [~] Verify compilation-cache reuse on a second run. The run manifest now
   records the cache directory and pre-run file count, allowing cold/warm TPU
-  runs to be compared; a static run-artifact audit now checks the required
-  provenance and timing fields, while TPU confirmation remains pending.
+  runs to be compared; a static run-artifact audit now checks provenance,
+  timing fields, metric ordering, and value ranges, while TPU confirmation
+  remains pending.
 
 ### Exit gate
 
