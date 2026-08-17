@@ -341,8 +341,9 @@ implemented; TPU selection is in progress.
   cache-matched cold/warm TPU comparison is still required.
 - [~] `--clear-compilation-cache` now provides an explicit cold-cache run
   control and records the reset in the run manifest.
-- [~] Constant-effective-token microbatch/gradient-accumulation overlays now
-  cover 1/64, 2/32, and 4/16; TPU selection remains pending.
+- [x] Constant-effective-token microbatch/gradient-accumulation overlays
+  covering 1/64, 2/32, and 4/16 were evaluated. Both alternatives failed the
+  candidate gate; 4/16 measured about 6.1% slower, so 2/32 remains selected.
 - [~] Compilation-cache cold versus warm control is implemented; matched TPU
   comparison remains pending.
 - [~] Checkpoint interval and asynchronous-versus-synchronous checkpoint
