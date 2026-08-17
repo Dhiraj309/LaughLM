@@ -50,11 +50,14 @@ python -u scripts/evaluate_run_candidate.py \
   --candidate checkpoints/experiments/135M_prefetch4 \
   --require-memory \
   --require-cache-match \
+  --require-improvement \
   --output reports/m6_prefetch4_candidate.json
 ```
 
 The report blocks mismatched model/data/batch identities and records whether
 cache states make compile-time deltas eligible. `--require-cache-match` turns
-that state into a hard gate for compile-sensitive comparisons. Thresholds are
+that state into a hard gate for compile-sensitive comparisons. Use
+`--require-improvement` when deciding whether to accept an optimization; it
+requires a real throughput gain or peak-memory reduction. Thresholds are
 review guards, not a replacement for TPU fallback, dispatch, or stability
 evidence.

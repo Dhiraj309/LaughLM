@@ -152,6 +152,7 @@ def evaluate_candidate(
     memory_tolerance: float,
     require_memory: bool,
     require_cache_match: bool,
+    require_improvement: bool,
 ) -> dict[str, Any]:
     baseline_manifest = _load_json(_run_file(baseline_dir, "run_manifest.json"))
     candidate_manifest = _load_json(_run_file(candidate_dir, "run_manifest.json"))
@@ -194,6 +195,16 @@ def evaluate_candidate(
         baseline_memory is not None
         and candidate_memory is not None
         and candidate_memory <= baseline_memory * (1.0 + memory_tolerance)
+    )
+    throughput_improved = (
+        baseline_tps is not None
+        and candidate_tps is not None
+        and candidate_tps > baseline_tps
+    )
+    memory_improved = (
+        baseline_memory is not None
+        and candidate_memory is not None
+        and candidate_memory < baseline_memory
     )
     checks = [
         {
@@ -243,6 +254,23 @@ def evaluate_candidate(
                 "candidate": cache_candidate,
             },
         },
+        {
+            "name": "measured improvement",
+            "passed": (
+                throughput_improved or memory_improved
+                if require_improvement
+                else True
+            ),
+            "expected": (
+                "throughput or peak memory improves"
+                if require_improvement
+                else "optional"
+            ),
+            "actual": {
+                "throughput_improved": throughput_improved,
+                "memory_improved": memory_improved,
+            },
+        },
     ]
     return {
         "evaluation": "LaughLM experiment candidate",
@@ -287,6 +315,11 @@ def main() -> int:
         action="store_true",
         help="Fail unless both runs have the same known compilation-cache state.",
     )
+    parser.add_argument(
+        "--require-improvement",
+        action="store_true",
+        help="Fail unless throughput or peak memory improves over baseline.",
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
@@ -300,6 +333,7 @@ def main() -> int:
         memory_tolerance=args.memory_tolerance,
         require_memory=args.require_memory,
         require_cache_match=args.require_cache_match,
+        require_improvement=args.require_improvement,
     )
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
