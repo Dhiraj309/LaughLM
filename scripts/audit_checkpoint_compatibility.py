@@ -280,7 +280,8 @@ def audit_compatibility(
             metadata.get("num_devices"),
         )
 
-    passed = all(check["passed"] for check in checks)
+    mismatches = [check["name"] for check in checks if not check["passed"]]
+    passed = not mismatches
     return {
         "audit": "LaughLM checkpoint/config compatibility",
         "status": "pass" if passed else "fail",
@@ -289,6 +290,8 @@ def audit_compatibility(
         "metadata_step": metadata.get("step"),
         "require_v3": require_v3,
         "expected_num_devices": expected_num_devices,
+        "mismatch_count": len(mismatches),
+        "mismatches": mismatches,
         "checks": checks,
     }
 
@@ -348,6 +351,11 @@ def main() -> int:
         )
         print(f"[checkpoint-compatibility] report written: {output}")
     print(f"[checkpoint-compatibility] {report['status'].upper()}")
+    if report["mismatches"]:
+        print(
+            "[checkpoint-compatibility] mismatches: "
+            + ", ".join(report["mismatches"])
+        )
     return 0 if report["status"] == "pass" else 1
 
 
