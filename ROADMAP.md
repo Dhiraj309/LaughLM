@@ -120,11 +120,10 @@ shard run.
 
 - [x] Run the two-train/three-validation-shard command with `--max_steps 2`
   and `--fresh`.
-- [~] Report shard paths, dtype, token counts, batch shapes, process index/count,
-  first-step loss, and whether any fallback was used. Run manifests now persist
-  shard paths, byte sizes, inferred dtype, alignment, and token counts, and the
-  static run audit now verifies that shard contract; batch, process, loss, and
-  fallback evidence still requires the TPU log.
+- [x] Report shard paths, dtype, token counts, batch shapes, process index/count,
+  first-step loss, and whether any fallback was used. Run manifests, TPU logs,
+  and the final run audit now provide the complete shard, batch, process, loss,
+  and fallback evidence.
 
 ## M2 — Configuration and architecture contract
 
