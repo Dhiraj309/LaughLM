@@ -57,8 +57,14 @@ def build_hf_config(config):
         # RoPE
         # --------------------------------------------------
 
+        # Keep the standard LaughLM RoPE contract explicit. Some config
+        # adapters expose rope_theta as None even though the model uses the
+        # default LLaMA value; emitting null makes Transformers omit it.
         "rope_theta":
-            config.rope_theta,
+            float(
+                getattr(config, "rope_theta", None)
+                or 10000.0
+            ),
 
         # --------------------------------------------------
         # Norms
