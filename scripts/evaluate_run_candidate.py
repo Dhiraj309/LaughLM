@@ -93,16 +93,52 @@ def _identity(manifest: dict[str, Any]) -> dict[str, Any]:
     model = config.get("model", {}) if isinstance(config, dict) else {}
     runtime = config.get("runtime", {}) if isinstance(config, dict) else {}
     data = config.get("data", {}) if isinstance(config, dict) else {}
-    return {
+    manifest_data = manifest.get("data", {})
+    if not isinstance(manifest_data, dict):
+        manifest_data = {}
+    jax_info = manifest.get("jax", {})
+    if not isinstance(jax_info, dict):
+        jax_info = {}
+    cli_args = manifest.get("cli_args", {})
+    if not isinstance(cli_args, dict):
+        cli_args = {}
+    identity = {
         key: model.get(key)
-        for key in ("vocab_size", "d_model", "num_layers", "num_heads", "num_kv_heads")
+        for key in (
+            "vocab_size",
+            "d_model",
+            "num_layers",
+            "num_heads",
+            "num_kv_heads",
+            "max_seq_len",
+        )
     } | {
         key: runtime.get(key)
-        for key in ("seq_len", "micro_batch_per_device", "gradient_accumulation")
+        for key in (
+            "seq_len",
+            "micro_batch_per_device",
+            "gradient_accumulation",
+        )
     } | {
-        "train_files": data.get("train_files"),
-        "validation_files": data.get("validation_files"),
+        "train_files": manifest_data.get("train_files") or data.get("train_files"),
+        "validation_files": manifest_data.get("validation_files")
+        or data.get("validation_files"),
+        "token_dtype": manifest_data.get("token_dtype"),
+        "hf_repo_id": cli_args.get("hf_repo_id") or data.get("hf_repo_id"),
+        "hf_revision": cli_args.get("hf_revision") or data.get("hf_revision"),
+        "train_shard_start": cli_args.get("train_shard_start")
+        or data.get("train_shard_start"),
+        "train_shard_count": cli_args.get("train_shard_count")
+        or data.get("train_shard_count"),
+        "validation_shard_start": cli_args.get("validation_shard_start")
+        or data.get("validation_shard_start"),
+        "validation_shard_count": cli_args.get("validation_shard_count")
+        or data.get("validation_shard_count"),
+        "process_count": jax_info.get("process_count"),
+        "local_device_count": jax_info.get("local_device_count"),
+        "devices": jax_info.get("devices"),
     }
+    return identity
 
 
 def evaluate_candidate(
