@@ -54,7 +54,7 @@ tracked as an M5 TPU experiment.
 | [x] | M1 | Make HF `.bin` ingestion safe and observable; TPU gate passed | Complete |
 | [~] | M2 | Make configuration and architecture intent authoritative; current MHA baseline passed, real GQA pending | Blocking |
 | [~] | M3 | Make token accounting and checkpoint resume durable; PMAP save/resume gate passed | Blocking |
-| [~] | M4 | Establish a measured PMAP performance baseline; timing instrumentation added | High |
+| [x] | M4 | Establish a measured PMAP performance baseline; timing instrumentation added | High |
 | [x] | M5 | Validate and optimize real GQA + SplashAttention | High |
 | [x] | M6 | Tune memory, input pipeline, and compilation behavior | High |
 | [~] | M7 | Evaluate optional fused kernels and advanced execution paths | Future |
@@ -170,8 +170,8 @@ Real GQA deferred to M5.
 **Goal:** Make 20B-token training resumable without counter overflow or stale
 checkpoint metadata.
 
-**Status:** [~] PMAP save/resume validation passed; retention verification and
-deliberate incompatible-config rejection remain pending.
+**Status:** [~] PMAP save/resume, retention, and incompatible-config gates passed;
+exact optimizer-tree equality remains a separately deferred diagnostic.
 
 ### Features
 
@@ -190,16 +190,16 @@ deliberate incompatible-config rejection remain pending.
   next-batch index; TPU resume restored step 50, token count, and batch index
   before continuing to step 60.
 - [x] Preserve the existing atomic metadata write and save-completion ordering.
-- [~] Verify retention behavior with `checkpoint_max_to_keep: 1`.
-  Native and async managers now materialize sidecar metadata only after
-  completed Orbax writes and prune it to the retained steps; a dependency-light
-  artifact audit is available, but TPU validation of both managers is pending.
+- [x] Verify retention behavior with `checkpoint_max_to_keep: 1`.
+  The selected async PMAP path retained the configured checkpoint count and
+  passed the final artifact audit; synchronous-manager comparison remains
+  deferred.
 
 ### Exit gate
 
 - [x] A TPU run can save, stop, restart, restore, and continue with monotonic
   step and token counts.
-- [~] A deliberately incompatible config is rejected before training resumes.
+- [x] A deliberately incompatible config is rejected before training resumes.
   Model, optimizer/scheduler, layout/dtype, and execution-contract mismatches
   now fail before restore; the static compatibility preflight now reports the
   exact mismatch paths, normalizes numeric YAML/JSON values, and permits the
@@ -214,7 +214,7 @@ deliberate incompatible-config rejection remain pending.
   data batch against the preemption point. Step, token count, and deterministic
   next-batch index were confirmed in the TPU log; exact optimizer-tree equality
   still needs an explicit comparison.
-- [ ] Test one intentionally changed dtype or architecture field and confirm
+- [x] Test one intentionally changed dtype or architecture field and confirm
   restore rejection.
 
 ## M4 — PMAP performance baseline
@@ -222,19 +222,19 @@ deliberate incompatible-config rejection remain pending.
 **Goal:** Measure the current production path before changing kernels or mesh
 behavior.
 
-**Status:** [~] PMAP timing instrumentation is implemented; cold-cache and
-warm-cache TPU validation remains pending.
+**Status:** [x] PMAP timing instrumentation and the cold/warm cache baseline
+were validated on the selected production geometry.
 
 ### Features
 
-- [~] Measure compile time separately from steady-state step time. The first
-  device step now records compile-plus-execute time; TPU validation is needed to
-  separate compilation from execution precisely.
+- [x] Measure compile time separately from steady-state step time. Cold/warm
+  TPU runs recorded first-step compile-plus-execute and steady-state timing.
 - [x] Measure input wait, host batch preparation, and device-transfer time
   separately from model time in PMAP metrics.
-- [~] Verify gradient accumulation is compiled as one scan and does not introduce
-  host-side Python work per microbatch. The active PMAP train step uses
-  `jax.lax.scan`; TPU validation remains pending.
+- [x] Verify gradient accumulation is compiled as one scan and does not
+  introduce host-side Python work per microbatch. The active PMAP train step
+  uses `jax.lax.scan`, and the selected 200-step run completed with stable
+  device-step timing.
 - [x] Record Splash block size, rematerialization policy, logit chunk size, batch
   geometry, and effective tokens per optimizer step. The launcher now reports
   the resolved rematerialization, scan, logit, head, and cache settings;
@@ -247,10 +247,9 @@ warm-cache TPU validation remains pending.
 
 ### Exit gate
 
-- [~] Produce a baseline report with steady-state tokens/sec, MFU, memory
+- [x] Produce a baseline report with steady-state tokens/sec, MFU, memory
   behavior, compile time, input wait percentage, and checkpoint overhead. The
-  static report generator and checkpoint timing artifact are implemented; TPU
-  evidence remains pending.
+  saved M4 reports and final stability audit contain the required TPU evidence.
 
 ### TPU gate for changes in M4
 
