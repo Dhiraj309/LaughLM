@@ -147,7 +147,10 @@ class OrbaxCompositeCheckpointManager:
                 create=True,
                 enable_async_checkpointing=self.async_checkpointing,
                 async_options=ocp.AsyncOptions() if self.async_checkpointing else None,
-                enable_background_delete=True,
+                # Keep retention visible to the post-run artifact audit as
+                # soon as Orbax reports the save complete. Checkpoint writes
+                # remain asynchronous; only deletion is synchronous.
+                enable_background_delete=False,
             )
 
             # The manager discovers handlers from the StandardSave/JsonSave
