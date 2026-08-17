@@ -55,7 +55,7 @@ tracked as an M5 TPU experiment.
 | [~] | M2 | Make configuration and architecture intent authoritative; current MHA baseline passed, real GQA pending | Blocking |
 | [~] | M3 | Make token accounting and checkpoint resume durable; PMAP save/resume gate passed | Blocking |
 | [~] | M4 | Establish a measured PMAP performance baseline; timing instrumentation added | High |
-| [~] | M5 | Validate and optimize real GQA + SplashAttention | High |
+| [x] | M5 | Validate and optimize real GQA + SplashAttention | High |
 | [~] | M6 | Tune memory, input pipeline, and compilation behavior | High |
 | [~] | M7 | Evaluate optional fused kernels and advanced execution paths | Future |
 | [~] | M8 | Release, export, and long-run operational gate | Final |
@@ -263,8 +263,9 @@ warm-cache TPU validation remains pending.
 
 **Goal:** Move from the current MHA-equivalent setup to validated GQA.
 
-**Status:** [~] TPU smoke and warm comparison passed; longer stability and
-peak-memory evidence remain pending.
+**Status:** [x] Matched MHA/GQA comparison, peak-memory capture, and 200-step
+GQA stability validation passed. A dedicated production GQA overlay is ready;
+the MHA production config remains preserved as the reference baseline.
 
 ### Features
 
@@ -288,15 +289,16 @@ peak-memory evidence remain pending.
 - [x] Compare GQA against the current MHA-equivalent baseline for loss, memory,
   compile time, and tokens/sec. The matched 60-step cold-cache comparison
   reports `+3.87%` throughput, `-0.268 GB` peak memory, equal compile time
-  within `0.047s`, and a `+0.01206` final-loss delta; longer stability remains
-  a separate gate.
+  within `0.047s`, and a `+0.01206` final-loss delta. A separate 200-step GQA
+  run remained finite and stable at approximately `1.054M tok/s`.
 - [x] Keep `attention_fallback: error` for production so an unintended XLA fallback
   cannot masquerade as a Splash benchmark.
 
 ### Exit gate
 
-- [~] Real GQA runs with SplashAttention produce finite loss and an explicit
-  performance comparison; peak-memory evidence and longer stability remain.
+- [x] Real GQA runs with SplashAttention produce finite loss and an explicit
+  performance comparison, with matched peak-memory evidence and a stable
+  200-step validation window.
 
 ### TPU gate for changes in M5
 
