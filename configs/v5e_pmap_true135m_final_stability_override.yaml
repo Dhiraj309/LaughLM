@@ -3,14 +3,16 @@
 
 runtime:
   eval_interval: 100
-  checkpoint_interval: 100
+  # Keep only the final stability checkpoint to avoid overlapping Orbax writes
+  # exhausting the limited /kaggle/working filesystem.
+  checkpoint_interval: 200
   checkpoint_max_to_keep: 1
-  checkpoint_dir: checkpoints/experiments/135M_final_prefetch16_stability
+  checkpoint_dir: /tmp/laughlm_checkpoints/135M_final_prefetch16_stability
 
 optimizations:
-  compilation_cache_dir: jax_cache/v5e_true135m_final_prefetch16_stability
+  compilation_cache_dir: /tmp/laughlm_jax_cache/v5e_true135m_final_prefetch16_stability
 
 profiling:
   capture_device_memory_profile: true
   memory_profile_step: 10
-  output_dir: profiles/135M_final_prefetch16_stability
+  output_dir: /tmp/laughlm_profiles/135M_final_prefetch16_stability
