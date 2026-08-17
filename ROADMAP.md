@@ -285,10 +285,11 @@ peak-memory evidence remain pending.
 - [x] Verify SplashAttention supports the selected GQA shape on the target JAX/TPU
   stack. The 5-step smoke and 50-step warm comparison completed without
   fallback or attention-shape errors.
-- [~] Compare GQA against the current MHA-equivalent baseline for loss, memory,
-  compile time, and tokens/sec. The 50-step comparison reports about 3.8%
-  higher GQA throughput and finite loss; peak-memory artifacts and a longer
-  stability window remain pending.
+- [x] Compare GQA against the current MHA-equivalent baseline for loss, memory,
+  compile time, and tokens/sec. The matched 60-step cold-cache comparison
+  reports `+3.87%` throughput, `-0.268 GB` peak memory, equal compile time
+  within `0.047s`, and a `+0.01206` final-loss delta; longer stability remains
+  a separate gate.
 - [x] Keep `attention_fallback: error` for production so an unintended XLA fallback
   cannot masquerade as a Splash benchmark.
 
@@ -301,9 +302,10 @@ peak-memory evidence remain pending.
 
 - [x] Run baseline MHA-equivalent and real-GQA configurations for the same
   50-step workload.
-- [~] Report attention dispatch, compile time, step time, memory outcome, loss,
-  and any fallback/error. Dispatch, timing, loss, and fallback evidence are
-  recorded; actual peak-memory capture remains.
+- [x] Report attention dispatch, compile time, step time, memory outcome, loss,
+  and any fallback/error. Matched MHA/GQA manifests, TPU logs, metrics, and
+  memory snapshots now provide the complete bounded comparison with no
+  fallback evidence.
 
 ## M6 — Memory, input, and compilation tuning
 
