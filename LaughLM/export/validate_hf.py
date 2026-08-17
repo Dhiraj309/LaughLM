@@ -212,6 +212,14 @@ def validate_hf_config_values(hf_model, config):
             name,
             None,
         )
+        if name == "rope_theta" and actual is None:
+            rope_parameters = getattr(
+                hf_config,
+                "rope_parameters",
+                None,
+            )
+            if isinstance(rope_parameters, dict):
+                actual = rope_parameters.get("rope_theta")
 
         _assert(
             actual == expected,
