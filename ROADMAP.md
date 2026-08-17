@@ -328,9 +328,9 @@ implemented; TPU selection is in progress.
 - [x] Logit chunk sizes 2048, 4096, and 8192 were evaluated through controlled
   overlays. TPU results reject 8192 (about 2.6% slower) and 2048 (about 1.2%
   slower); 4096 remains selected as the baseline.
-- [~] Host prefetch depth is now configurable through
-  `runtime.prefetch_size`, with `4` and `16` A/B overlays; device-transfer
-  scheduling still requires TPU evidence.
+- [x] Host prefetch depth is configurable through `runtime.prefetch_size`.
+  Matched TPU A/B selected `16` over `4` and the former baseline: `16` measured
+  +0.20% throughput, -33.6 MB peak memory, and unchanged loss.
 - [x] Opt-in one-shot device-memory snapshots are persisted in `metrics.jsonl`
   alongside the `.prof` artifact; TPU candidates now provide peak-memory
   evidence.

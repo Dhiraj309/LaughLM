@@ -70,6 +70,8 @@ runtime:
   # this achieves the higher-memory-safe batch geometry used by the 470k tok/s run.
   micro_batch_per_device: 2
   gradient_accumulation: 32
+  # Selected from matched M6 prefetch A/B runs: +0.20% throughput and -33.6 MB peak memory.
+  prefetch_size: 16
   total_tokens: 20_000_000_000
   eval_interval: 1000
   eval_batches: 4
