@@ -239,11 +239,11 @@ warm-cache TPU validation remains pending.
   geometry, and effective tokens per optimizer step. The launcher now reports
   the resolved rematerialization, scan, logit, head, and cache settings;
   Splash reports its selected block size during model initialization.
-- [~] Verify compilation-cache reuse on a second run. The run manifest now
-  records the cache directory and pre-run file count, allowing cold/warm TPU
-  runs to be compared; a static run-artifact audit now checks provenance,
-  timing fields, metric ordering, and value ranges, while TPU confirmation
-  remains pending.
+- [x] Verify compilation-cache reuse on a second run. Cold versus warm TPU
+  runs confirmed cache states of `0` versus `150` files and reduced first-step
+  compile-plus-execute time from `17.411s` to `3.323s`; steady-state throughput
+  and loss remained comparable. The static run-artifact audit checks
+  provenance, timing fields, metric ordering, and value ranges.
 
 ### Exit gate
 
@@ -254,9 +254,10 @@ warm-cache TPU validation remains pending.
 
 ### TPU gate for changes in M4
 
-- [ ] Run the same bounded workload twice: once cold-cache and once warm-cache.
-- [ ] Provide the first-step compile time, steady-state tokens/sec, loss
-  stability, and input/device timing breakdown.
+- [x] Run the same bounded workload twice: once cold-cache and once warm-cache.
+- [x] Provide the first-step compile time, steady-state tokens/sec, loss
+  stability, and input/device timing breakdown. Warm steady-state throughput
+  was within `0.02%` of cold and final loss matched at `7.93394`.
 
 ## M5 — Real GQA and SplashAttention
 
