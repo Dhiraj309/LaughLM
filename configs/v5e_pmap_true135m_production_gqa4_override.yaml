@@ -1,0 +1,15 @@
+# Validated production GQA overlay for the 135M PMAP baseline.
+# Apply on top of v5e_pmap_true135m_production.yaml.
+# The MHA production config remains unchanged as the reference baseline.
+
+model:
+  num_kv_heads: 4
+
+architecture:
+  attention_variant: gqa
+
+runtime:
+  checkpoint_dir: checkpoints/production/135M_gqa4
+
+optimizations:
+  compilation_cache_dir: jax_cache/v5e_true135m_production_gqa4
