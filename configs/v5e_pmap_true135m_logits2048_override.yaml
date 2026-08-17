@@ -9,3 +9,8 @@ runtime:
 
 optimizations:
   compilation_cache_dir: jax_cache/v5e_true135m_logits2048
+
+profiling:
+  capture_device_memory_profile: true
+  memory_profile_step: 10
+  output_dir: profiles/135M_logits2048

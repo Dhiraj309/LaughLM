@@ -315,23 +315,28 @@ the MHA production config remains preserved as the reference baseline.
 at once.
 
 **Status:** [~] Controlled tuning overlays and opt-in memory capture are
-implemented; TPU validation remains pending.
+implemented; TPU selection is in progress.
 
 ### Experiment matrix
 
-- [~] `splash_block_size`: 256, 512, 1024 overlays are isolated in the M6
-  experiment matrix; TPU selection remains pending.
+- [~] `splash_block_size`: 256, 512, and 1024 overlays are isolated. TPU
+  results reject 256 (about 13.6% slower) and leave 1024 neutral (about 0.3%
+  faster with negligible memory change); 512 remains the baseline.
 - [~] `spmd.remat.policy`: `dots_saveable` versus controlled alternative
-  overlays; TPU memory/throughput selection remains pending.
+  overlays. TPU results leave `remat_nothing` neutral (about 0.04% faster and
+  about 0.6% lower peak memory); no policy change is selected.
 - [~] Logit chunk sizes 2048, 4096, and 8192 are represented by controlled
-  overlays; TPU memory/throughput selection remains pending.
+  overlays. TPU results reject 8192 (about 2.6% slower); 4096 remains the
+  baseline and 2048 still requires comparison.
 - [~] Host prefetch depth is now configurable through
   `runtime.prefetch_size`, with `4` and `16` A/B overlays; device-transfer
   scheduling still requires TPU evidence.
-- [~] Opt-in one-shot device-memory snapshots are persisted in `metrics.jsonl`
-  alongside the `.prof` artifact; TPU peak-memory evidence remains pending.
-- [~] The saved-artifact comparison report now includes input wait, input
-  pipeline, and captured peak-memory comparisons; TPU validation remains.
+- [x] Opt-in one-shot device-memory snapshots are persisted in `metrics.jsonl`
+  alongside the `.prof` artifact; TPU candidates now provide peak-memory
+  evidence.
+- [x] The saved-artifact comparison report includes input wait, input
+  pipeline, and captured peak-memory comparisons; the M6 candidate evaluator
+  enforces workload, cache, loss, throughput, and memory guards.
 - [~] Compile deltas are now blocked when MHA/GQA cache states differ; a
   cache-matched cold/warm TPU comparison is still required.
 - [~] `--clear-compilation-cache` now provides an explicit cold-cache run
