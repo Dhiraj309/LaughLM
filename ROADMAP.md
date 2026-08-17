@@ -339,7 +339,8 @@ implemented; TPU validation remains pending.
   dedicated compilation caches.
 - [~] Evaluate saved baseline/candidate metrics with explicit throughput, loss,
   memory, workload identity, and cache-state guards; identity now includes
-  selected shards, HF revision, batch geometry, and device topology. TPU
+  selected shards, HF revision, batch geometry, and device topology, and
+  compile-sensitive comparisons can require a known matching cache state. TPU
   dispatch and stability evidence remain required.
 
 ### Exit gate

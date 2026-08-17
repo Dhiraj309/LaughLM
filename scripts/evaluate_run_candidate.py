@@ -151,6 +151,7 @@ def evaluate_candidate(
     max_loss_delta: float,
     memory_tolerance: float,
     require_memory: bool,
+    require_cache_match: bool,
 ) -> dict[str, Any]:
     baseline_manifest = _load_json(_run_file(baseline_dir, "run_manifest.json"))
     candidate_manifest = _load_json(_run_file(candidate_dir, "run_manifest.json"))
@@ -224,6 +225,24 @@ def evaluate_candidate(
             ),
             "actual": memory_delta,
         },
+        {
+            "name": "cache comparability",
+            "passed": (
+                cache_baseline == cache_candidate
+                and cache_baseline != "unknown"
+                if require_cache_match
+                else True
+            ),
+            "expected": (
+                "same known cache state for compile comparison"
+                if require_cache_match
+                else "optional"
+            ),
+            "actual": {
+                "baseline": cache_baseline,
+                "candidate": cache_candidate,
+            },
+        },
     ]
     return {
         "evaluation": "LaughLM experiment candidate",
@@ -263,6 +282,11 @@ def main() -> int:
     parser.add_argument("--max-loss-delta", type=float, default=0.05)
     parser.add_argument("--memory-tolerance", type=float, default=0.02)
     parser.add_argument("--require-memory", action="store_true")
+    parser.add_argument(
+        "--require-cache-match",
+        action="store_true",
+        help="Fail unless both runs have the same known compilation-cache state.",
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
@@ -275,6 +299,7 @@ def main() -> int:
         max_loss_delta=args.max_loss_delta,
         memory_tolerance=args.memory_tolerance,
         require_memory=args.require_memory,
+        require_cache_match=args.require_cache_match,
     )
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
