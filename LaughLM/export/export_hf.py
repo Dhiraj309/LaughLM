@@ -553,6 +553,11 @@ def export_hf_checkpoint(
         hf_config = build_hf_config(
             llama_config
         )
+        # Keep the serialized field explicit for Transformers releases that
+        # normalize RoPE settings into rope_parameters during config loading.
+        hf_config["rope_theta"] = float(
+            hf_config.get("rope_theta") or 10000.0
+        )
 
         save_hf_config(
             output_dir,
