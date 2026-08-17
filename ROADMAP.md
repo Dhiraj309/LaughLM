@@ -203,8 +203,9 @@ deliberate incompatible-config rejection remain pending.
   Model, optimizer/scheduler, layout/dtype, and execution-contract mismatches
   now fail before restore; the static compatibility preflight now reports the
   exact mismatch paths, normalizes numeric YAML/JSON values, and permits the
-  documented stage-level `runtime.total_tokens` change. TPU confirmation
-  remains pending.
+  documented stage-level `runtime.total_tokens` change. The TPU negative gate
+  rejected `d_model=960` against the `d_model=1024` checkpoint before training;
+  manifest protection for failed attempts is now implemented.
 
 ### TPU gate for changes in M3
 
