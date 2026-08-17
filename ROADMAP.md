@@ -325,9 +325,9 @@ implemented; TPU selection is in progress.
 - [~] `spmd.remat.policy`: `dots_saveable` versus controlled alternative
   overlays. TPU results leave `remat_nothing` neutral (about 0.04% faster and
   about 0.6% lower peak memory); no policy change is selected.
-- [~] Logit chunk sizes 2048, 4096, and 8192 are represented by controlled
-  overlays. TPU results reject 8192 (about 2.6% slower); 4096 remains the
-  baseline and 2048 still requires comparison.
+- [x] Logit chunk sizes 2048, 4096, and 8192 were evaluated through controlled
+  overlays. TPU results reject 8192 (about 2.6% slower) and 2048 (about 1.2%
+  slower); 4096 remains selected as the baseline.
 - [~] Host prefetch depth is now configurable through
   `runtime.prefetch_size`, with `4` and `16` A/B overlays; device-transfer
   scheduling still requires TPU evidence.
