@@ -56,7 +56,7 @@ tracked as an M5 TPU experiment.
 | [~] | M3 | Make token accounting and checkpoint resume durable; PMAP save/resume gate passed | Blocking |
 | [~] | M4 | Establish a measured PMAP performance baseline; timing instrumentation added | High |
 | [x] | M5 | Validate and optimize real GQA + SplashAttention | High |
-| [~] | M6 | Tune memory, input pipeline, and compilation behavior | High |
+| [x] | M6 | Tune memory, input pipeline, and compilation behavior | High |
 | [~] | M7 | Evaluate optional fused kernels and advanced execution paths | Future |
 | [~] | M8 | Release, export, and long-run operational gate | Final |
 
@@ -314,8 +314,8 @@ the MHA production config remains preserved as the reference baseline.
 **Goal:** Optimize the measured bottleneck without changing multiple variables
 at once.
 
-**Status:** [~] Controlled tuning overlays and opt-in memory capture are
-implemented; TPU selection is in progress.
+**Status:** [x] Selected PMAP production settings were validated through
+controlled TPU comparisons and a 200-step final stability/checkpoint gate.
 
 ### Experiment matrix
 
@@ -337,38 +337,40 @@ implemented; TPU selection is in progress.
 - [x] The saved-artifact comparison report includes input wait, input
   pipeline, and captured peak-memory comparisons; the M6 candidate evaluator
   enforces workload, cache, loss, throughput, and memory guards.
-- [~] Compile deltas are now blocked when MHA/GQA cache states differ; a
-  cache-matched cold/warm TPU comparison is still required.
-- [~] `--clear-compilation-cache` now provides an explicit cold-cache run
-  control and records the reset in the run manifest.
+- [x] Compile deltas are blocked when MHA/GQA cache states differ; matched
+  cold/warm TPU comparisons completed with cache-state evidence.
+- [x] `--clear-compilation-cache` provides an explicit cold-cache run control
+  and records the reset in the run manifest.
 - [x] Constant-effective-token microbatch/gradient-accumulation overlays
   covering 1/64, 2/32, and 4/16 were evaluated. Both alternatives failed the
   candidate gate; 4/16 measured about 6.1% slower, so 2/32 remains selected.
-- [~] Compilation-cache cold versus warm control is implemented; matched TPU
-  comparison remains pending.
-- [~] Checkpoint interval and asynchronous-versus-synchronous checkpoint
-  overlays are isolated; TPU checkpoint-overhead evidence remains pending.
+- [x] Compilation-cache cold versus warm control is implemented and validated
+  with matched TPU comparisons.
+- [x] Final async checkpointing completed at step 200 with checkpoint timing,
+  compatibility, and artifact audits passing. Alternate checkpoint intervals
+  and synchronous mode remain deferred because no production change is being
+  selected for them.
 - [x] Audit overlay artifact isolation before TPU allocation. The preflight
   rejects shared checkpoint/cache/profile paths; the prefetch overlays now use
   dedicated compilation caches.
-- [~] Evaluate saved baseline/candidate metrics with explicit throughput, loss,
+- [x] Evaluate saved baseline/candidate metrics with explicit throughput, loss,
   memory, workload identity, and cache-state guards; identity now includes
   selected shards, HF revision, batch geometry, and device topology, and
   compile-sensitive comparisons can require a known matching cache state.
   Candidate acceptance can also require a real throughput or peak-memory
   improvement and an explicit loss-spread bound. TPU dispatch and stability
-  evidence remain required.
+  evidence passed for the selected configuration.
 
 ### Exit gate
 
-- [ ] Select changes only when they improve steady-state throughput or memory
+- [x] Select changes only when they improve steady-state throughput or memory
   while preserving loss and resume behavior.
-- [ ] Every accepted setting has a recorded TPU comparison.
+- [x] Every accepted setting has a recorded TPU comparison.
 
 ### TPU gate for changes in M6
 
-- [ ] Run one controlled A/B experiment per variable.
-- [ ] Report tokens/sec, peak memory, compile time, input wait, loss, and
+- [x] Run one controlled A/B experiment per variable.
+- [x] Report tokens/sec, peak memory, compile time, input wait, loss, and
   checkpoint time.
 
 ## M7 — Optional fused kernels and advanced execution
