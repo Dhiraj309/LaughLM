@@ -52,7 +52,7 @@ tracked as an M5 TPU experiment.
 |---|---|---|---|
 | [x] | M0 | Freeze the active baseline and measurement contract; TPU baseline recorded | Complete |
 | [x] | M1 | Make HF `.bin` ingestion safe and observable; TPU gate passed | Complete |
-| [~] | M2 | Make configuration and architecture intent authoritative; current MHA baseline passed, real GQA pending | Blocking |
+| [x] | M2 | Make configuration and architecture intent authoritative; MHA release and GQA candidate contracts validated | Blocking |
 | [~] | M3 | Make token accounting and checkpoint resume durable; PMAP save/resume gate passed | Blocking |
 | [x] | M4 | Establish a measured PMAP performance baseline; timing instrumentation added | High |
 | [x] | M5 | Validate and optimize real GQA + SplashAttention | High |
@@ -131,8 +131,8 @@ shard run.
 **Goal:** Ensure configuration values describe the model and execution that
 actually run.
 
-**Status:** [~] Dtype and current MHA architecture validation passed on TPU.
-Real GQA deferred to M5.
+**Status:** [x] Dtype, MHA release, and real-GQA candidate architecture
+contracts were validated on TPU; MHA remains the selected release path.
 
 ### Features
 
@@ -150,14 +150,14 @@ Real GQA deferred to M5.
 - [x] Validate all architecture options used by the active LLaMA implementation;
   unsupported variants fail during config loading rather than silently no-op.
 - [x] Keep `fused_qkv`, tied embeddings, SwiGLU, pre-norm, RoPE, and Splash as
-  explicit supported production choices; label the current 8-Q/8-KV setup as
-  MHA until real GQA is available.
+  explicit supported choices; label the selected 8-Q/8-KV release as MHA and
+  retain the validated 8-Q/4-KV GQA configuration as an isolated candidate.
 
 ### Exit gate
 
-- [~] The resolved configuration, model factory, checkpoint metadata, and
-  startup logs now share an explicit execution contract. TPU validation and
-  migration coverage for older v3 checkpoints remain pending.
+- [x] The resolved configuration, model factory, checkpoint metadata, and
+  startup logs share an explicit execution contract, including the validated
+  MHA release and GQA candidate paths.
 
 ### TPU gate for changes in M2
 
