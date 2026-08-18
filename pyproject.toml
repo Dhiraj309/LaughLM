@@ -20,18 +20,16 @@ dependencies = [
     "jax==0.4.38",
     "jaxlib==0.4.38",
     "flax==0.10.2",
-    "optax>=0.1.7",
+    "optax==0.2.4",
     "pydantic>=2.0",
     "PyYAML>=6.0",
     "numpy>=1.24",
     "tqdm>=4.65",
     "tokenizers>=0.15",
     "datasets>=2.14",
-    "orbax-checkpoint>=0.4.0",
+    "orbax-checkpoint==0.11.4",
     "huggingface_hub>=0.16",
     "transformers>=4.30",
-    "tokamax",
-    "grain",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +38,12 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.0",
     "pytest>=7.0",
+]
+kernels = [
+    "tokamax",
+]
+data = [
+    "grain",
 ]
 
 [tool.setuptools]
