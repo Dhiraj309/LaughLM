@@ -5,6 +5,10 @@
 **Dataset path:** Hugging Face pre-tokenized raw `.bin` shards
 **Current production config:** `configs/v5e_pmap_true135m_production.yaml`
 
+For a concise handoff of explored optimizations, measured decisions, rejected
+settings, and deferred tracks, see
+[`docs/optimization/DECISION_LOG.md`](docs/optimization/DECISION_LOG.md).
+
 ## Scope and operating rules
 
 This roadmap covers the maintained training and export path. The following are

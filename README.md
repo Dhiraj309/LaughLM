@@ -1,17 +1,44 @@
 # LaughLM
 
-A high-performance **decoder-only transformer training system** built with **JAX + Flax** and optimized for **TPU training**.
+LaughLM is a JAX/Flax decoder-only transformer training system designed for
+TPU workloads. The maintained path is a reproducible PMAP trainer using
+Hugging Face pre-tokenized binary shards, explicit configuration contracts, and
+Orbax checkpointing.
 
-LaughLM is designed as a **research-friendly yet production-capable framework** for experimenting with modern transformer architectures while maintaining high training throughput.
+## Current status
 
-The system emphasizes:
+- Primary trainer: `scripts/train_tpu_optimized.py`
+- Primary hardware target: single TPU v5e-8 VM
+- Current 135M reference config: `configs/v5e_pmap_true135m_production.yaml`
+- Reference attention path: MHA `8/8` with SplashAttention
+- Validated fresh-training candidate: GQA `8/4`
+- Deferred until larger models: MaxText-style 3D tensor/sequence parallelism
+- Deferred optional experiments: Tokamax kernels, Grain, scanned layers, and
+  advanced FSDP execution paths
 
-- clean modular architecture
-- hardware-efficient training
-- reproducible experiments
-- flexible configuration
-- large-scale dataset streaming
-- high MFU optimization on TPUs
+The MHA reference and GQA candidate must use separate runs. An MHA checkpoint
+must not be resumed with GQA settings, or vice versa.
+
+## Documentation handoff
+
+- [`ROADMAP.md`](ROADMAP.md) - milestone status and acceptance gates
+- [`docs/optimization/DECISION_LOG.md`](docs/optimization/DECISION_LOG.md) -
+  selected, rejected, and deferred optimization decisions
+- [`docs/TPU_VALIDATION_RUNBOOK.md`](docs/TPU_VALIDATION_RUNBOOK.md) - TPU-only
+  commands and artifact-return contract
+- [`docs/M6_EXPERIMENT_MATRIX.md`](docs/M6_EXPERIMENT_MATRIX.md) - completed
+  memory, input, and geometry experiments
+- [`docs/M7_EXPERIMENT_MATRIX.md`](docs/M7_EXPERIMENT_MATRIX.md) - deferred
+  kernel and execution experiments
+- [`docs/M8_RELEASE_CHECKLIST.md`](docs/M8_RELEASE_CHECKLIST.md) - export and
+  release gates
+
+The FSDP 1.3B benchmark remains available at
+[`docs/benchmarks/v5e_fsdp_1p3b_optimized.md`](docs/benchmarks/v5e_fsdp_1p3b_optimized.md).
+
+Training, model code, JAX, profiling, and benchmarks must run only in the
+Linux TPU environment. Static inspection and documentation work are performed
+in the Windows development environment.
 
 ---
 
@@ -41,52 +68,17 @@ Supported architecture features:
 
 ---
 
-# Project Structure:
+# Project structure
+
 ```text
-.
-├── configs
-│   ├── gpu_test.yaml
-│   └── test.yaml
-├── LaughLM
-│   ├── config
-│   │   ├── loader.py
-│   │   ├── schema.py
-│   │   └── validation.py
-│   ├── data
-│   │   ├── domain_sampler.py
-│   │   ├── memmap_loader.py
-│   │   ├── shard_writer.py
-│   │   ├── tokenizer.py
-│   │   └── tokenizer_train.py
-│   ├── model
-│   │   ├── gpt.py
-│   │   ├── layers
-│   │   │   ├── attention.py
-│   │   │   ├── mlp.py
-│   │   │   ├── normalization.py
-│   │   │   ├── positional.py
-│   │   │   └── residual.py
-│   │   ├── parameter_utils.py
-│   │   └── transformer_block.py
-│   ├── training
-│   │   ├── checkpoint.py
-│   │   ├── logger.py
-│   │   ├── loss.py
-│   │   ├── optimizer.py
-│   │   ├── scheduler.py
-│   │   ├── trainer.py
-│   │   ├── train_state.py
-│   │   └── train_step.py
-│   └── utils
-│       └── rng.py
-├── LICENSE
-├── log.txt
-├── pyproject.toml
-├── README.md
-├── requirements.txt
-└── scripts
-    ├── build_shard.py
-    └── train_gpu_test.py
+configs/                 YAML model and experiment configurations
+LaughLM/config/          schema, loading, and validation
+LaughLM/data/            maintained shard loading and data utilities
+LaughLM/model/llama/     maintained LLaMA model implementation
+LaughLM/training/        PMAP/FSDP trainers, loss, optimizer, checkpoints
+LaughLM/profiling/       opt-in profiling infrastructure
+scripts/                 TPU launchers and static artifact audits
+docs/                    roadmap, runbooks, matrices, and handoff notes
 ```
 
 ---
@@ -182,11 +174,11 @@ scalable to large datasets
 
 ---
 
-Step 1 — Train Tokenizer
+Step 1 — Dataset and tokenizer assets
 
-Train a tokenizer using streaming datasets.
+The active dataset is already tokenized; tokenizer training is not required.
 ```bash
-python -m LaughLM.data.tokenizer_train
+No tokenizer-training command is required for the active dataset.
 ```
 Output:
 
@@ -195,11 +187,11 @@ tokenizer.json
 
 ---
 
-Step 2 — Build Token Shards
+Step 2 — Shard source
 
-Convert raw text into token shards.
+Training downloads selected pre-tokenized `.bin` shards from Hugging Face.
 ```bash
-python scripts/build_shard.py
+See the TPU validation runbook for the maintained shard-selection command.
 ```
 Output:
 
@@ -216,7 +208,8 @@ Step 3 — Training
 
 Run training:
 ```bash
-python scripts/train_gpu_test.py
+python -u -m scripts.train_tpu_optimized \
+  --config configs/v5e_pmap_true135m_production.yaml
 ```
 Training automatically handles:
 
@@ -249,28 +242,12 @@ Resume training automatically if checkpoints exist.
 
 ---
 
-Benchmarking Performance
+Benchmarking and validation
 
-Benchmark raw training throughput:
-
-python scripts/benchmark_train_step.py
-
-This measures:
-
-compile time
-
-step time
-
-tokens/sec
-
-MFU
-
-
-Example output:
-
-Compile time: 18.2s
-Step time: 0.048s
-Tokens/sec: 430000
+Performance measurements are TPU-only. Use
+[`docs/TPU_VALIDATION_RUNBOOK.md`](docs/TPU_VALIDATION_RUNBOOK.md) and keep
+each candidate isolated with its own checkpoint and compilation-cache paths.
+Do not interpret a local benchmark as evidence for TPU performance.
 
 
 ---
@@ -299,23 +276,10 @@ STEP  PROGRESS │ LOSS │ LR │ TOK/S │ MFU │ ETA
 
 ---
 
-Optimization Roadmap
+Optimization history
 
-LaughLM is designed to progressively reach high TPU utilization.
-
-Target MFU:
-
-50–60% MFU on TPU v5e
-
-Optimization phases:
-
-Phase	Goal
-
-Baseline	establish benchmark
-Data pipeline	remove input bottlenecks
-Graph optimization	eliminate Python overhead
-Kernel fusion	maximize MXU utilization
-Flash attention	reduce memory traffic
+The measured optimization decisions and current priorities are maintained in
+[`docs/optimization/DECISION_LOG.md`](docs/optimization/DECISION_LOG.md).
 
 
 
@@ -379,36 +343,12 @@ and the JAX / Flax ecosystem.
 
 ---
 
-Future Work
+Future work
 
-Planned improvements:
+See the root [`ROADMAP.md`](ROADMAP.md) and the optimization decision log.
+Current future tracks are optional fused kernels, advanced FSDP execution,
+frontier profiling, and 3D tensor/sequence parallelism for larger models.
 
-Flash Attention
+## License
 
-Activation checkpointing
-
-MoE layers
-
-PJIT sharding
-
-distributed training
-
-<!-- ml-intern-provenance -->
-## Generated by ML Intern
-
-This model repository was generated by [ML Intern](https://github.com/huggingface/ml-intern), an agent for machine learning research and development on the Hugging Face Hub.
-
-- Try ML Intern: https://smolagents-ml-intern.hf.space
-- Source code: https://github.com/huggingface/ml-intern
-
-## Usage
-
-```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-model_id = 'dignity045/LaughLM'
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-model = AutoModelForCausalLM.from_pretrained(model_id)
-```
-
-For non-causal architectures, replace `AutoModelForCausalLM` with the appropriate `AutoModel` class.
+MIT License. See [`LICENSE`](LICENSE).
