@@ -110,6 +110,13 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
+Optional integrations are not installed by the default environment because
+the production PMAP path uses native XLA loss and native memmap data loading:
+
+```bash
+pip install -e ".[kernels,data]"
+```
+
 For TPU environments install JAX:
 
 ```bash
