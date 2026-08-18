@@ -36,6 +36,26 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
+      - name: Verify JAX and Flax compatibility
+        run: |
+          python - <<'PY'
+          import importlib.metadata as metadata
+
+          expected = {
+              "jax": "0.4.38",
+              "jaxlib": "0.4.38",
+              "flax": "0.10.2",
+          }
+          for package, expected_version in expected.items():
+              version = metadata.version(package)
+              if version != expected_version:
+                  raise SystemExit(
+                      f"{package}={version} != expected {expected_version}"
+                  )
+              print(f"{package}=={version}")
+          PY
+          python -m pip check
+
       - name: Run stable test gate
         run: |
           pytest tests/test_backend_config.py \
