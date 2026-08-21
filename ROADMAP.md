@@ -9,6 +9,10 @@ For a concise handoff of explored optimizations, measured decisions, rejected
 settings, and deferred tracks, see
 [`docs/optimization/DECISION_LOG.md`](docs/optimization/DECISION_LOG.md).
 
+For the cross-repository data-pipeline, dataset-contract, and learning-integrity
+work, see
+[`docs/data_pipeline/ROADMAP.md`](docs/data_pipeline/ROADMAP.md).
+
 ## Scope and operating rules
 
 This roadmap covers the maintained training and export path. The following are

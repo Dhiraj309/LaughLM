@@ -104,6 +104,9 @@ data:
   validation_shard_count: 2
   # The Kaggle writable mount is limited; use the large ephemeral root overlay for downloaded source shards.
   hf_cache_dir: "/tmp/laughlm_hf_cache"
+  # Disabled for normal throughput; enable only for an evidence run.
+  record_exposure_stats: false
+  exposure_chunk_tokens: 1000000
 
 
 tokenizer:
@@ -159,6 +162,9 @@ spmd:
 monitoring:
   tensorboard: false
   rich_terminal: true
+  # Disabled for normal throughput; enable sparsely for training-integrity gates.
+  training_integrity: false
+  integrity_interval: 100
 
 
 hardware:

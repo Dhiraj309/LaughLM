@@ -550,6 +550,15 @@ class DataConfig(BaseModel):
         default=None,
         description="Optional Hugging Face cache directory for tokenized shard files.",
     )
+    record_exposure_stats: bool = Field(
+        default=False,
+        description="Opt-in exact streaming token exposure statistics for provenance.",
+    )
+    exposure_chunk_tokens: int = Field(
+        default=1_000_000,
+        ge=1,
+        description="Bounded token count per exposure-statistics read.",
+    )
 
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -598,6 +607,8 @@ class HardwareConfig(BaseModel):
 class MonitoringConfig(BaseModel):
     tensorboard: bool
     rich_terminal: bool
+    training_integrity: bool = False
+    integrity_interval: int = Field(default=0, ge=0)
 
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•

@@ -159,6 +159,51 @@ def audit_run(
         actual=loss_contract,
     )
 
+    integrity_policy = manifest.get("training_integrity")
+    integrity_enabled = (
+        isinstance(integrity_policy, dict)
+        and bool(integrity_policy.get("enabled", False))
+    )
+    integrity_interval = (
+        int(integrity_policy.get("interval", 0))
+        if isinstance(integrity_policy, dict)
+        and isinstance(integrity_policy.get("interval", 0), int)
+        else 0
+    )
+    integrity_fields = (
+        "integrity_parameter_checksum",
+        "integrity_parameter_l2_norm",
+        "integrity_optimizer_state_checksum",
+        "integrity_optimizer_state_l2_norm",
+    )
+    integrity_rows = [
+        row for row in rows
+        if integrity_interval > 0
+        and isinstance(row.get("step"), int)
+        and row["step"] % integrity_interval == 0
+    ]
+    integrity_missing = [
+        field for field in integrity_fields
+        if any(field not in row for row in integrity_rows)
+    ]
+    _record(
+        checks,
+        "training integrity diagnostics",
+        passed=(
+            (not integrity_enabled)
+            or (integrity_interval > 0 and bool(integrity_rows) and not integrity_missing)
+        ),
+        expected=(
+            "disabled, or enabled with interval-aligned parameter and optimizer diagnostics"
+        ),
+        actual={
+            "enabled": integrity_enabled,
+            "interval": integrity_interval,
+            "rows_checked": len(integrity_rows),
+            "missing_fields": integrity_missing,
+        },
+    )
+
     data_contract = manifest.get("data")
     token_dtype = (
         data_contract.get("token_dtype")

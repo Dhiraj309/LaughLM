@@ -90,6 +90,40 @@ evaluator before accepting a change. Perform export, HF parity, release audit,
 bundle creation, and readiness aggregation only after the final configuration
 has been selected.
 
+## Deferred M6 gate: training-integrity evidence
+
+Training-integrity diagnostics and exposure scans are disabled in the
+production configuration. They are opt-in because they periodically
+materialize state or scan token shards on the host. After the static roadmap
+work is complete, enable them only for a short, explicitly labeled evidence
+run:
+
+```yaml
+data:
+  record_exposure_stats: true
+monitoring:
+  training_integrity: true
+  integrity_interval: 10
+```
+
+For the fixed-batch smoke gate, add `--overfit-smoke` and use
+`--max_steps 20 --fresh`. Preserve the run manifest and metrics, then run:
+
+```bash
+python -u scripts/audit_dataset_contract.py \
+  --manifest checkpoints/experiments/m6_integrity/run_manifest.json \
+  --output reports/m6_dataset_contract.json
+
+python -u scripts/audit_overfit_smoke.py \
+  --manifest checkpoints/experiments/m6_integrity/run_manifest.json \
+  --metrics checkpoints/experiments/m6_integrity/metrics.jsonl \
+  --output reports/m6_overfit_smoke.json
+```
+
+Do not use this diagnostic mode for throughput comparisons or production
+training. Return `record_exposure_stats: false` and `training_integrity: false`
+before any performance run.
+
 ## What to send back
 
 Send the Gate 1 log plus the three Gate 1 audit JSON files first. That is enough

@@ -30,7 +30,7 @@ import threading
 import time
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import jax
 
@@ -426,6 +426,7 @@ class TrainingLogger:
         tokens_in_step: int,
         step_time: float,
         timing_breakdown: Optional[Dict[str, float]] = None,
+        integrity: Optional[Dict[str, Any]] = None,
         update_ema: bool = True,
     ):
         loss = _scalar(
@@ -532,7 +533,7 @@ class TrainingLogger:
             min(loss, math.log(9_999_999))
         )
 
-        return {
+        event = {
             "step": int(step),
             "loss": float(loss),
             "ppl": float(ppl),
@@ -673,6 +674,9 @@ class TrainingLogger:
 
             "wall_time": float(time.time()),
         }
+        if integrity:
+            event.update({f"integrity_{key}": value for key, value in integrity.items()})
+        return event
 
     # ========================================================
     # Async queue logging
@@ -689,6 +693,7 @@ class TrainingLogger:
         tokens_in_step: int,
         step_time: float,
         timing_breakdown: Optional[Dict[str, float]] = None,
+        integrity: Optional[Dict[str, Any]] = None,
     ):
         if not self._is_writer:
             return
@@ -702,6 +707,7 @@ class TrainingLogger:
             tokens_in_step=tokens_in_step,
             step_time=step_time,
             timing_breakdown=timing_breakdown,
+            integrity=integrity,
             update_ema=True,
         )
 
@@ -727,6 +733,7 @@ class TrainingLogger:
         tokens_in_step: Optional[int] = None,
         step_time: Optional[float] = None,
         timing_breakdown: Optional[Dict[str, float]] = None,
+        integrity: Optional[Dict[str, Any]] = None,
     ):
         if step % self.config.runtime.log_interval != 0:
             return
@@ -745,6 +752,7 @@ class TrainingLogger:
             tokens_in_step=tokens_in_step,
             step_time=step_time,
             timing_breakdown=timing_breakdown,
+            integrity=integrity,
             update_ema=False,
         )
 

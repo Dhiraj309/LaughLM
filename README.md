@@ -22,6 +22,8 @@ must not be resumed with GQA settings, or vice versa.
 ## Documentation handoff
 
 - [`ROADMAP.md`](ROADMAP.md) - milestone status and acceptance gates
+- [`docs/data_pipeline/ROADMAP.md`](docs/data_pipeline/ROADMAP.md) - shared
+  data-pipeline and learning-integrity roadmap
 - [`docs/optimization/DECISION_LOG.md`](docs/optimization/DECISION_LOG.md) -
   selected, rejected, and deferred optimization decisions
 - [`docs/TPU_VALIDATION_RUNBOOK.md`](docs/TPU_VALIDATION_RUNBOOK.md) - TPU-only

@@ -44,6 +44,7 @@ from LaughLM.training.train_step import (
 from LaughLM.training.logger import TrainingLogger
 from LaughLM.utils.checkpoint_factory import create_checkpoint_manager
 from LaughLM.training.train_state import TrainState
+from LaughLM.training.integrity import state_integrity
 
 from LaughLM.distributed.sharding import device_put_replicated
 from LaughLM.profiling.core.profiler import Profiler
@@ -76,6 +77,17 @@ class Trainer:
         self.config = config
         self.profiler = profiler or Profiler.from_config(config)
         self._device_memory_profile_captured = False
+        self._training_integrity_enabled = bool(
+            getattr(config.monitoring, "training_integrity", False)
+        )
+        configured_integrity_interval = int(
+            getattr(config.monitoring, "integrity_interval", 0)
+        )
+        self._training_integrity_interval = max(
+            1,
+            configured_integrity_interval or int(config.runtime.log_interval),
+        )
+        self._previous_integrity = None
 
         self.num_devices = jax.local_device_count()
         self.devices = jax.local_devices()
@@ -445,6 +457,30 @@ class Trainer:
 
         return memory_stats
 
+    def _maybe_capture_training_integrity(self, *, step: int):
+        """Capture sparse host-side state evidence when explicitly enabled."""
+        if (
+            not self._training_integrity_enabled
+            or step % self._training_integrity_interval != 0
+        ):
+            return None
+        host_state = _unreplicate(self.state)
+        diagnostics = state_integrity(host_state.params, host_state.opt_state)
+        previous = self._previous_integrity
+        diagnostics["parameter_changed_since_capture"] = (
+            None
+            if previous is None
+            else diagnostics["parameter_checksum"] != previous["parameter_checksum"]
+        )
+        diagnostics["optimizer_state_changed_since_capture"] = (
+            None
+            if previous is None
+            else diagnostics["optimizer_state_checksum"]
+            != previous["optimizer_state_checksum"]
+        )
+        self._previous_integrity = diagnostics
+        return diagnostics
+
 
     def train(
         self,
@@ -649,6 +685,9 @@ class Trainer:
                     )
 
                     current_step += 1
+                    integrity_metrics = self._maybe_capture_training_integrity(
+                        step=current_step,
+                    )
                     memory_stats = self._maybe_capture_device_memory_profile(
                         step=current_step,
                     )
@@ -679,6 +718,7 @@ class Trainer:
                         tokens_in_step=tokens_per_step,
                         step_time=step_time,
                         timing_breakdown=timing_breakdown,
+                        integrity=integrity_metrics,
                     )
 
                     if (
@@ -697,6 +737,7 @@ class Trainer:
                             tokens_in_step=tokens_per_step,
                             step_time=step_time,
                             timing_breakdown=timing_breakdown,
+                            integrity=integrity_metrics,
                         )
 
                     # ============================================

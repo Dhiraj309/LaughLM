@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "laughlm://schemas/dataset-artifact/v1",
+  "title": "LaughLM dataset artifact contract v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["name", "version", "artifact_type", "stage", "dataset_id", "run_id", "config_hash", "source_refs", "attributes"],
+  "properties": {
+    "name": {"const": "laughlm_dataset_artifact"},
+    "version": {"const": 1},
+    "artifact_type": {"enum": ["dataset_stage", "training_run"]},
+    "stage": {"enum": ["stage1", "stage2", "stage3", "stage4", "training"]},
+    "dataset_id": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "config_hash": {"type": "string", "minLength": 1},
+    "source_refs": {"type": "array", "items": {"type": "object"}},
+    "attributes": {"type": "object"}
+  }
+}

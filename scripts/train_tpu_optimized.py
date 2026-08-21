@@ -31,6 +31,9 @@ import jax
 from huggingface_hub import hf_hub_download
 
 from LaughLM.config.loader import load_config
+from LaughLM.data.exposure import summarize_token_paths
+from LaughLM.data.fixed_batch import FixedBatchDataLoader
+from LaughLM.data.manifest_contract import build_artifact_contract, canonical_hash
 from LaughLM.training.trainer import Trainer
 # --- NEW IMPORTS ---
 from LaughLM.utils.data_factory import create_dataloader
@@ -185,6 +188,11 @@ def parse_args():
             "Delete optimizations.compilation_cache_dir before training and "
             "record an explicit cold-cache run in the manifest."
         ),
+    )
+    parser.add_argument(
+        "--overfit-smoke",
+        action="store_true",
+        help="Repeat one captured training batch for the fixed-batch smoke gate.",
     )
 
     parser.add_argument(
@@ -419,6 +427,7 @@ def _write_run_manifest(
     num_devices: int,
     compilation_cache: dict,
     loss_contract: dict,
+    overfit_batch_checksum: str | None = None,
 ) -> None:
     """Persist the resolved inputs needed to compare TPU runs later."""
     if jax.process_index() != 0:
@@ -447,6 +456,32 @@ def _write_run_manifest(
                 detail["error"] = f"stat failed: {type(exc).__name__}: {exc}"
             details.append(detail)
         return details
+
+    exposure = {"enabled": False}
+    if bool(getattr(config.data, "record_exposure_stats", False)):
+        chunk_tokens = int(
+            getattr(config.data, "exposure_chunk_tokens", 1_000_000)
+        )
+        exposure = {
+            "enabled": True,
+            "chunk_tokens": chunk_tokens,
+            "train": summarize_token_paths(
+                train_paths,
+                dtype=token_dtype,
+                vocab_size=int(config.model.vocab_size),
+                chunk_tokens=chunk_tokens,
+            ),
+            "validation": (
+                summarize_token_paths(
+                    validation_paths,
+                    dtype=token_dtype,
+                    vocab_size=int(config.model.vocab_size),
+                    chunk_tokens=chunk_tokens,
+                )
+                if validation_paths
+                else None
+            ),
+        }
 
     package_names = (
         "jax",
@@ -478,7 +513,35 @@ def _write_run_manifest(
     except OSError:
         pass
 
+    dataset_id = str(getattr(config.data, "hf_repo_id", "unknown"))
+    dataset_revision = getattr(config.data, "hf_revision", None) or "main"
+    run_id = Path(config.runtime.checkpoint_dir).expanduser().name
+    resolved_config = config.model_dump(mode="json")
     manifest = {
+        "artifact_contract": build_artifact_contract(
+            artifact_type="training_run",
+            stage="training",
+            dataset_id=dataset_id,
+            run_id=run_id,
+            config_hash=canonical_hash(resolved_config),
+            source_refs=[
+                {
+                    "split": "train",
+                    "revision": dataset_revision,
+                    "paths": train_files,
+                },
+                {
+                    "split": "validation",
+                    "revision": dataset_revision,
+                    "paths": validation_files,
+                },
+            ],
+            attributes={
+                "dataset_revision": dataset_revision,
+                "tokenizer_vocab_size": int(config.model.vocab_size),
+                "token_dtype": token_dtype,
+            },
+        ),
         "manifest_version": 2,
         "python": sys.version,
         "platform": platform.platform(),
@@ -486,7 +549,7 @@ def _write_run_manifest(
         "git_revision": git_revision,
         "config_path": str(Path(args.config).expanduser().resolve()),
         "cli_args": vars(args),
-        "resolved_config": config.model_dump(mode="json"),
+        "resolved_config": resolved_config,
         "jax": {
             "devices": [str(device) for device in jax.devices()],
             "local_device_count": int(num_devices),
@@ -512,6 +575,29 @@ def _write_run_manifest(
             "dispatch_confirmation": "startup/log evidence required",
         },
         "loss_contract": loss_contract,
+        "training_integrity": {
+            "enabled": bool(
+                getattr(config.monitoring, "training_integrity", False)
+            ),
+            "interval": int(
+                getattr(config.monitoring, "integrity_interval", 0)
+            ),
+            "diagnostics": [
+                "parameter_checksum",
+                "parameter_l2_norm",
+                "optimizer_state_checksum",
+                "optimizer_state_l2_norm",
+                "parameter_changed_since_capture",
+                "optimizer_state_changed_since_capture",
+            ],
+        },
+        "training_gates": {
+            "overfit_smoke": {
+                "enabled": bool(getattr(args, "overfit_smoke", False)),
+                "mode": "fixed_batch_v1" if overfit_batch_checksum else None,
+                "batch_checksum": overfit_batch_checksum,
+            },
+        },
         "compilation_cache": compilation_cache,
         "data": {
             "token_dtype": token_dtype,
@@ -524,6 +610,7 @@ def _write_run_manifest(
             "validation_files": validation_files,
             "train_shard_details": shard_details(train_paths),
             "validation_shard_details": shard_details(validation_paths),
+            "exposure": exposure,
         },
     }
 
@@ -554,6 +641,9 @@ def _write_run_manifest(
 
 def main():
     args = parse_args()
+
+    if args.overfit_smoke and not args.fresh:
+        raise ValueError("--overfit-smoke requires --fresh for a clean gate run.")
 
     print(
         f"JAX devices: {jax.devices()}",
@@ -730,6 +820,10 @@ def main():
         process_index=jax.process_index(),
         process_count=jax.process_count(),
     )
+    overfit_batch_checksum = None
+    if args.overfit_smoke:
+        dataset = FixedBatchDataLoader(dataset)
+        overfit_batch_checksum = dataset.batch_checksum
     # ------------------------------------
 
     trainer = Trainer(
@@ -750,6 +844,7 @@ def main():
         num_devices=num_devices,
         compilation_cache=compilation_cache,
         loss_contract=loss_contract,
+        overfit_batch_checksum=overfit_batch_checksum,
     )
 
     eval_dataset = (
