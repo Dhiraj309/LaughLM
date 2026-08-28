@@ -70,7 +70,7 @@ documents, deduplication winners, split assignment, or token quotas.
 | [~] | M2 | `data_clean` | Provenance and resumable manifests | No |
 | [~] | M3 | `data_clean` | Global deduplication and deterministic splits | No |
 | [~] | M4 | `data_clean` | Decontamination and sealed evaluation | No |
-| [~] | M5 | `data_clean` | Deterministic mixing and tokenization | No |
+| [x] | M5 | `data_clean` | Deterministic mixing and tokenization | No |
 | [~] | M6 | LaughLM | Training-integrity ingestion | Small TPU gate |
 | [ ] | M7 | LaughLM | Transfer and capability evaluation | TPU checkpoint gate |
 | [ ] | M8 | LaughLM | Memorization and leakage audits | TPU checkpoint gate |
@@ -162,22 +162,22 @@ disallowed duplicate crosses a split boundary.
 **Exit gate:** a release manifest proves which evaluation items were excluded
 from every training mixture.
 
-## M5 — Deterministic mixing, tokenization, and packing `[~]`
+## M5 — Deterministic mixing, tokenization, and packing `[x]`
 
-- [~] Preserve deterministic source-quota mixing and exact token budgets.
-- [ ] Add source/domain/time quotas and exposure statistics.
-- [ ] Freeze tokenizer identity, revision, EOS, padding, and packing rules.
-- [ ] Validate token IDs against vocabulary bounds.
-- [ ] Select `uint16` or a wider dtype from vocabulary size.
-- [ ] Add resumable shard-level tokenization and upload.
-- [ ] Retain provenance from tokenized shards to source stages.
+- [x] Preserve deterministic source-quota mixing and exact token budgets.
+- [x] Add source/domain/time quotas and exposure statistics.
+- [x] Freeze tokenizer identity, revision, EOS, padding, and packing rules.
+- [x] Validate token IDs against vocabulary bounds.
+- [x] Select `uint16` or a wider dtype from vocabulary size.
+- [x] Add resumable shard-level tokenization and upload.
+- [x] Retain provenance from tokenized shards to source stages.
 
 **Exit gate:** the same mixture config produces manifest-equivalent output
 across supported VM profiles and LaughLM can validate the final `.bin` contract.
 
-## M6 — LaughLM dataset contract and training integrity `[ ]`
+## M6 — LaughLM dataset contract and training integrity `[~]`
 
-- [~] Validate dataset, tokenizer, dtype, shard, and split contracts before
+- [x] Validate dataset, tokenizer, dtype, shard, and split contracts before
   training.
 - [x] Record source and split identity in the training run manifest.
 - [x] Record unique-token and exposure statistics (opt-in evidence mode).

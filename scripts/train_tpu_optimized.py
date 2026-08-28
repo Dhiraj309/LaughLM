@@ -243,6 +243,23 @@ def parse_args():
         default=None,
         help="Number of consecutive held-out validation shard files to download.",
     )
+    parser.add_argument(
+        "--stage4-train-manifest",
+        type=str,
+        default=None,
+        help="Repository-relative Stage-4 train corpus_manifest.json. Overrides numbered shard selection.",
+    )
+    parser.add_argument(
+        "--stage4-validation-manifest",
+        type=str,
+        default=None,
+        help="Repository-relative Stage-4 validation corpus_manifest.json. Overrides numbered shard selection.",
+    )
+    parser.add_argument(
+        "--stage4-active",
+        action="store_true",
+        help="Resolve train and validation manifests from the dataset repository's ACTIVE.json.",
+    )
 
     return parser.parse_args()
 
@@ -416,6 +433,32 @@ def _apply_data_source_overrides(data_cfg, args) -> None:
     data_cfg.shard_directory = data_cfg.shard_directory.strip("/")
 
 
+def _resolve_stage4_manifest_shards(manifest_remote, label, download_kwargs, vocab_size):
+    """Download and validate one committed Stage-4 manifest, returning shard paths."""
+    local_manifest = hf_hub_download(filename=manifest_remote, **download_kwargs)
+    manifest = json.loads(Path(local_manifest).read_text(encoding="utf-8"))
+    if manifest.get("stage") != 4 or manifest.get("processing_status") != "committed":
+        raise ValueError(f"{label} Stage-4 manifest is not a committed stage=4 artifact: {manifest_remote}")
+    tokenizer_contract = manifest.get("tokenizer_contract") or {}
+    actual_vocab = tokenizer_contract.get("vocab_size")
+    if int(actual_vocab or -1) != int(vocab_size):
+        raise ValueError(
+            f"{label} Stage-4 tokenizer vocab mismatch: manifest={actual_vocab}, model={vocab_size}"
+        )
+    expected_dtype = "uint16" if int(vocab_size) <= 65_536 else "uint64"
+    if str(manifest.get("dtype")) != expected_dtype:
+        raise ValueError(
+            f"{label} Stage-4 dtype mismatch: manifest={manifest.get('dtype')}, expected={expected_dtype}"
+        )
+    shards = manifest.get("shards") or []
+    paths = [str(item.get("path", "")) for item in shards]
+    if not paths or any(not path.endswith(".bin") for path in paths):
+        raise ValueError(f"{label} Stage-4 manifest has no valid .bin shards: {manifest_remote}")
+    if len(paths) != len(set(paths)):
+        raise ValueError(f"{label} Stage-4 manifest lists duplicate shard paths: {manifest_remote}")
+    return paths
+
+
 def _write_run_manifest(
     *,
     args,
@@ -433,7 +476,7 @@ def _write_run_manifest(
     if jax.process_index() != 0:
         return
 
-    token_dtype = "uint16" if int(config.model.vocab_size) <= 65535 else "uint64"
+    token_dtype = "uint16" if int(config.model.vocab_size) <= 65536 else "uint64"
     token_itemsize = 2 if token_dtype == "uint16" else 8
 
     def shard_details(paths):
@@ -661,27 +704,34 @@ def main():
 
     data_cfg = config.data
     _apply_data_source_overrides(data_cfg, args)
+    manifest_mode = bool(args.stage4_active or args.stage4_train_manifest or args.stage4_validation_manifest)
+    if args.stage4_active and (args.stage4_train_manifest or args.stage4_validation_manifest):
+        raise ValueError("--stage4-active cannot be combined with explicit Stage-4 manifest paths")
+    if manifest_mode and not args.stage4_active and not args.stage4_train_manifest:
+        raise ValueError("--stage4-validation-manifest requires --stage4-train-manifest")
     train_start = int(data_cfg.train_shard_start)
     train_count = int(data_cfg.train_shard_count)
     validation_count = int(data_cfg.validation_shard_count)
     validation_start = data_cfg.validation_shard_start
 
-    if validation_count and validation_start is None:
-        raise ValueError(
-            "data.validation_shard_start is required when validation_shard_count > 0"
+    if not manifest_mode:
+        if validation_count and validation_start is None:
+            raise ValueError(
+                "data.validation_shard_start is required when validation_shard_count > 0"
+            )
+        train_ids = list(range(train_start, train_start + train_count))
+        validation_ids = (
+            list(range(int(validation_start), int(validation_start) + validation_count))
+            if validation_count
+            else []
         )
-
-    train_ids = list(range(train_start, train_start + train_count))
-    validation_ids = (
-        list(range(int(validation_start), int(validation_start) + validation_count))
-        if validation_count
-        else []
-    )
-    overlap = set(train_ids).intersection(validation_ids)
-    if overlap:
-        raise ValueError(
-            f"Train/validation shard overlap is not allowed: {sorted(overlap)}"
-        )
+        overlap = set(train_ids).intersection(validation_ids)
+        if overlap:
+            raise ValueError(
+                f"Train/validation shard overlap is not allowed: {sorted(overlap)}"
+            )
+    else:
+        train_ids, validation_ids = [], []
 
     def _shard_name(shard_id: int) -> str:
         return (
@@ -690,9 +740,7 @@ def main():
         )
 
     train_files = [_shard_name(shard_id) for shard_id in train_ids]
-    validation_files = [
-        _shard_name(shard_id) for shard_id in validation_ids
-    ]
+    validation_files = [_shard_name(shard_id) for shard_id in validation_ids]
 
     cache_dir = data_cfg.hf_cache_dir
     download_kwargs = {
@@ -705,13 +753,21 @@ def main():
         f"{data_cfg.hf_repo_id} @ {resolved_revision}",
         flush=True,
     )
-    print(
-        "[data] shard selector: "
-        f"folder={data_cfg.shard_directory}, "
-        f"prefix={data_cfg.shard_filename_prefix}, "
-        f"train={train_start}:{train_start + train_count - 1}",
-        flush=True,
-    )
+    if manifest_mode:
+        print(
+            "[data] Stage-4 manifest selector: "
+            f"train={args.stage4_train_manifest or ('ACTIVE.json' if args.stage4_active else 'missing')}, "
+            f"validation={args.stage4_validation_manifest or ('ACTIVE.json' if args.stage4_active else 'none')}",
+            flush=True,
+        )
+    else:
+        print(
+            "[data] shard selector: "
+            f"folder={data_cfg.shard_directory}, "
+            f"prefix={data_cfg.shard_filename_prefix}, "
+            f"train={train_start}:{train_start + train_count - 1}",
+            flush=True,
+        )
     if data_cfg.hf_revision:
         download_kwargs["revision"] = data_cfg.hf_revision
     if cache_dir:
@@ -722,6 +778,37 @@ def main():
             f"[data] Hugging Face cache directory: {cache_path}",
             flush=True,
         )
+
+    if manifest_mode:
+        train_manifest_remote = args.stage4_train_manifest
+        validation_manifest_remote = args.stage4_validation_manifest
+        if args.stage4_active:
+            active_local = hf_hub_download(filename="ACTIVE.json", **download_kwargs)
+            active = json.loads(Path(active_local).read_text(encoding="utf-8"))
+            outputs = active.get("outputs") or {}
+            train_manifest_remote = (outputs.get("train") or {}).get("manifest")
+            validation_manifest_remote = (outputs.get("validation") or {}).get("manifest")
+            if not train_manifest_remote:
+                raise ValueError("Stage-4 ACTIVE.json does not define a train output manifest")
+        train_files = _resolve_stage4_manifest_shards(
+            train_manifest_remote,
+            "train",
+            download_kwargs,
+            config.model.vocab_size,
+        )
+        validation_files = (
+            _resolve_stage4_manifest_shards(
+                validation_manifest_remote,
+                "validation",
+                download_kwargs,
+                config.model.vocab_size,
+            )
+            if validation_manifest_remote
+            else []
+        )
+        overlap = set(train_files).intersection(validation_files)
+        if overlap:
+            raise ValueError(f"Stage-4 train/validation shard overlap is not allowed: {sorted(overlap)}")
 
     def _download(files, label: str):
         print(

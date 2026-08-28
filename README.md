@@ -195,6 +195,22 @@ Training downloads selected pre-tokenized `.bin` shards from Hugging Face.
 ```bash
 See the TPU validation runbook for the maintained shard-selection command.
 ```
+
+For a split-aware Stage-4 corpus produced by `data_clean`, point the trainer at
+the dataset repository and resolve its committed `ACTIVE.json` rather than
+manually counting shard IDs:
+
+```bash
+python -u -m scripts.train_tpu_optimized \
+  --config configs/v5e_pmap_true135m_production.yaml \
+  --hf-repo-id YOUR_STAGE4_TOKEN_REPO \
+  --hf-revision main \
+  --stage4-active
+```
+
+This validates the Stage-4 manifest vocabulary and storage dtype, downloads
+the exact train/validation shard lists, and records those paths in the run
+manifest. Build both `train` and `validation` Stage-4 outputs before using it.
 Output:
 
 dataset_shard.bin

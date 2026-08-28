@@ -1,0 +1,62 @@
+# LaughLM-v1 135M production stage: 4B tokens.
+# Apply on top of configs/v5e_pmap_true135m_production.yaml.
+
+model:
+  vocab_size: 32064
+  d_model: 1024
+  num_layers: 8
+  num_heads: 8
+  num_kv_heads: 8
+
+architecture:
+  positional: rope
+  normalization: rms_norm
+  norm_placement: pre
+  attention_variant: mha
+  attention_impl: splash
+  attention_fallback: error
+  fused_qkv: true
+  ffn_type: swiglu
+  residual: standard
+  embeddings: standard
+  bias: false
+  weight_tying: true
+  parallel_block: false
+
+scheduler:
+  horizon_tokens: 20_000_000_000
+
+runtime:
+  backend: pmap
+  seq_len: 2048
+  micro_batch_per_device: 2
+  gradient_accumulation: 32
+  total_tokens: 4_000_000_000
+  eval_interval: 500
+  eval_batches: 4
+  log_interval: 10
+  checkpoint_interval: 500
+  checkpoint_max_to_keep: 2
+  checkpoint_dir: checkpoints/production/135M_smol_4b
+
+data:
+  sources:
+    - name: laughlm-v1-mixed
+      weight: 1.0
+      split: train
+  hf_repo_id: "LaughTaleAI/LaughLM-Tokenized-Fine"
+  hf_revision: null
+  shard_directory: "laughlm-v1"
+  shard_filename_prefix: "laughlm-v1_shard"
+  train_shard_start: 0
+  train_shard_count: 16
+  validation_shard_start: 16
+  validation_shard_count: 2
+
+optimizations:
+  compilation_cache_dir: jax_cache/v5e_smol_135m_4b
+  kernel_backend: native
+  data_backend: native
+  sharding_strategy: pmap
+  optimizer_mu_bf16: true
+  async_checkpointing: true

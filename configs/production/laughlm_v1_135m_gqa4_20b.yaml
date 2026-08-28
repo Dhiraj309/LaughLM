@@ -1,0 +1,67 @@
+# LaughLM-v1 135M production run: 20B tokens in five resumable 4B-token stages.
+#
+# Apply on top of:
+#   configs/v5e_pmap_true135m_production.yaml
+#
+# The base config supplies the validated 135M PMAP geometry and shared
+# optimizer/loss/dtype settings. This overlay selects the validated GQA 8/4
+# candidate and the mixed LaughLM-v1 tokenized corpus.
+
+model:
+  # 8 query heads / 4 KV heads: validated GQA candidate for this model size.
+  num_kv_heads: 4
+
+architecture:
+  attention_variant: gqa
+  attention_impl: splash
+  attention_fallback: error
+  fused_qkv: true
+  ffn_type: swiglu
+  normalization: rms_norm
+  norm_placement: pre
+  bias: false
+  weight_tying: true
+
+scheduler:
+  # Keep fixed across all stages so the WSD curve is not reshaped or restarted
+  # when runtime.total_tokens is increased on resume.
+  horizon_tokens: 20_000_000_000
+
+runtime:
+  backend: pmap
+  seq_len: 2048
+  micro_batch_per_device: 2
+  gradient_accumulation: 32
+  prefetch_size: 16
+  # Current cumulative stage stop target: 4B -> 8B -> 12B -> 16B -> 20B.
+  total_tokens: 4_000_000_000
+  eval_interval: 500
+  eval_batches: 4
+  log_interval: 10
+  checkpoint_interval: 500
+  checkpoint_max_to_keep: 2
+  checkpoint_dir: checkpoints/production/laughlm_v1_135m_gqa4_20b
+
+data:
+  sources:
+    - name: laughlm-v1-mixed
+      weight: 1.0
+      split: train
+  hf_repo_id: "LaughTaleAI/LaughLM-Tokenized-Fine"
+  hf_revision: null
+  shard_directory: "laughlm-v1"
+  shard_filename_prefix: "laughlm-v1_shard"
+  # Stage 3 uses 250M-token shards: 80 shards = 20B training tokens.
+  train_shard_start: 0
+  train_shard_count: 80
+  # No validation shards are claimed from the 20B training corpus.
+  validation_shard_start: null
+  validation_shard_count: 0
+
+optimizations:
+  compilation_cache_dir: jax_cache/laughlm_v1_135m_gqa4_20b
+  kernel_backend: native
+  data_backend: native
+  sharding_strategy: pmap
+  optimizer_mu_bf16: true
+  async_checkpointing: true
