@@ -1,4 +1,4 @@
-# LaughLM-v1 135M storage-safe Kaggle trial using eight training shards.
+# LaughLM-v1 135M production stage: 4B training tokens plus held-out validation.
 #
 # Apply on top of:
 #   configs/v5e_pmap_true135m_production.yaml
@@ -33,14 +33,14 @@ runtime:
   micro_batch_per_device: 2
   gradient_accumulation: 32
   prefetch_size: 16
-  # Eight 250M-token shards provide approximately 2B tokens for this trial.
-  total_tokens: 2_000_000_000
+  # Sixteen approximately 250M-token shards provide approximately 4B training tokens.
+  total_tokens: 4_000_000_000
   eval_interval: 500
   eval_batches: 4
   log_interval: 10
   checkpoint_interval: 500
   checkpoint_max_to_keep: 2
-  checkpoint_dir: checkpoints/testing/laughlm_v1_135m_8shards
+  checkpoint_dir: checkpoints/production/laughlm_v1_135m_4b
 
 data:
   sources:
@@ -49,14 +49,19 @@ data:
       split: train
   hf_repo_id: "LaughTaleAI/LaughLM-Tokenized-Fine"
   hf_revision: null
+  # Train and validation are stored in separate HF folders. Each shard is
+  # approximately 250M tokens (~500MB on disk).
+  train_shard_directory: "laughlm-v1/train"
+  validation_shard_directory: "laughlm-v1/validation"
+  validation_shard_filename_prefix: "laughlm-v1_shard"
+  # Legacy fallback fields retained for older tools.
   shard_directory: "laughlm-v1"
   shard_filename_prefix: "laughlm-v1_shard"
-  # Stage 3 uses approximately 250M-token shards: eight shards = approximately 2B tokens.
   train_shard_start: 0
-  train_shard_count: 8
-  # No validation shards are claimed from the 20B training corpus.
-  validation_shard_start: null
-  validation_shard_count: 0
+  train_shard_count: 16
+  # Validation files retain their original source IDs: 00016 and 00017.
+  validation_shard_start: 16
+  validation_shard_count: 2
 
 optimizations:
   compilation_cache_dir: jax_cache/laughlm_v1_135m_gqa4_20b

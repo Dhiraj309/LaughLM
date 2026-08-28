@@ -214,10 +214,28 @@ def parse_args():
         help="Override data.shard_directory, for example fineweb-edu.",
     )
     parser.add_argument(
+        "--train-shard-directory",
+        type=str,
+        default=None,
+        help="Override data.train_shard_directory for training files.",
+    )
+    parser.add_argument(
+        "--validation-shard-directory",
+        type=str,
+        default=None,
+        help="Override data.validation_shard_directory for validation files.",
+    )
+    parser.add_argument(
         "--shard-filename-prefix",
         type=str,
         default=None,
         help="Override data.shard_filename_prefix, for example fineweb-edu_shard.",
+    )
+    parser.add_argument(
+        "--validation-shard-filename-prefix",
+        type=str,
+        default=None,
+        help="Override data.validation_shard_filename_prefix.",
     )
     parser.add_argument(
         "--train-shard-start",
@@ -408,7 +426,10 @@ def _apply_data_source_overrides(data_cfg, args) -> None:
         "hf_repo_id": args.hf_repo_id,
         "hf_revision": args.hf_revision,
         "shard_directory": args.shard_directory,
+        "train_shard_directory": args.train_shard_directory,
+        "validation_shard_directory": args.validation_shard_directory,
         "shard_filename_prefix": args.shard_filename_prefix,
+        "validation_shard_filename_prefix": args.validation_shard_filename_prefix,
         "train_shard_start": args.train_shard_start,
         "train_shard_count": args.train_shard_count,
         "validation_shard_start": args.validation_shard_start,
@@ -431,6 +452,21 @@ def _apply_data_source_overrides(data_cfg, args) -> None:
 
     # Hugging Face filenames are repository-relative, never absolute paths.
     data_cfg.shard_directory = data_cfg.shard_directory.strip("/")
+    for field_name in ("train_shard_directory", "validation_shard_directory"):
+        value = getattr(data_cfg, field_name, None)
+        if value is not None:
+            value = value.strip("/")
+            if not value:
+                raise ValueError(f"data.{field_name} must be non-empty when provided.")
+            setattr(data_cfg, field_name, value)
+    validation_prefix = getattr(data_cfg, "validation_shard_filename_prefix", None)
+    if validation_prefix is not None:
+        validation_prefix = validation_prefix.strip()
+        if not validation_prefix:
+            raise ValueError(
+                "data.validation_shard_filename_prefix must be non-empty when provided."
+            )
+        data_cfg.validation_shard_filename_prefix = validation_prefix
 
 
 def _resolve_stage4_manifest_shards(manifest_remote, label, download_kwargs, vocab_size):
@@ -733,14 +769,31 @@ def main():
     else:
         train_ids, validation_ids = [], []
 
-    def _shard_name(shard_id: int) -> str:
+    train_directory = (
+        data_cfg.train_shard_directory or data_cfg.shard_directory
+    )
+    validation_directory = (
+        data_cfg.validation_shard_directory or data_cfg.shard_directory
+    )
+    validation_prefix = (
+        data_cfg.validation_shard_filename_prefix
+        or data_cfg.shard_filename_prefix
+    )
+
+    def _shard_name(directory: str, prefix: str, shard_id: int) -> str:
         return (
-            f"{data_cfg.shard_directory}/"
-            f"{data_cfg.shard_filename_prefix}_{shard_id:05d}.bin"
+            f"{directory}/"
+            f"{prefix}_{shard_id:05d}.bin"
         )
 
-    train_files = [_shard_name(shard_id) for shard_id in train_ids]
-    validation_files = [_shard_name(shard_id) for shard_id in validation_ids]
+    train_files = [
+        _shard_name(train_directory, data_cfg.shard_filename_prefix, shard_id)
+        for shard_id in train_ids
+    ]
+    validation_files = [
+        _shard_name(validation_directory, validation_prefix, shard_id)
+        for shard_id in validation_ids
+    ]
 
     cache_dir = data_cfg.hf_cache_dir
     download_kwargs = {
@@ -763,9 +816,20 @@ def main():
     else:
         print(
             "[data] shard selector: "
-            f"folder={data_cfg.shard_directory}, "
-            f"prefix={data_cfg.shard_filename_prefix}, "
-            f"train={train_start}:{train_start + train_count - 1}",
+            f"train_folder={train_directory}, "
+            f"train_prefix={data_cfg.shard_filename_prefix}, "
+            f"train={train_start}:{train_start + train_count - 1}, "
+            f"validation_folder={validation_directory}, "
+            f"validation_prefix={validation_prefix}, "
+            f"validation={validation_start}:{int(validation_start) + validation_count - 1}"
+            if validation_count
+            else (
+                "[data] shard selector: "
+                f"train_folder={train_directory}, "
+                f"train_prefix={data_cfg.shard_filename_prefix}, "
+                f"train={train_start}:{train_start + train_count - 1}, "
+                "validation=disabled"
+            ),
             flush=True,
         )
     if data_cfg.hf_revision:

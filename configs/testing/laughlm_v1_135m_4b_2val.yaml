@@ -1,0 +1,56 @@
+# LaughLM-v1 135M: 4B training-token test with two held-out validation shards.
+# Apply on top of configs/v5e_pmap_true135m_production.yaml.
+
+model:
+  num_kv_heads: 4
+
+architecture:
+  attention_variant: gqa
+  attention_impl: splash
+  attention_fallback: error
+  fused_qkv: true
+  ffn_type: swiglu
+  normalization: rms_norm
+  norm_placement: pre
+  bias: false
+  weight_tying: true
+
+runtime:
+  backend: pmap
+  seq_len: 2048
+  micro_batch_per_device: 2
+  gradient_accumulation: 32
+  prefetch_size: 16
+  total_tokens: 4_000_000_000
+  eval_interval: 500
+  eval_batches: 4
+  log_interval: 100
+  checkpoint_interval: 500
+  checkpoint_max_to_keep: 2
+  checkpoint_dir: checkpoints/testing/laughlm_v1_135m_4b_2val
+
+data:
+  sources:
+    - name: laughlm-v1-mixed
+      weight: 1.0
+      split: train
+  hf_repo_id: "LaughTaleAI/LaughLM-Tokenized-Fine"
+  hf_revision: null
+  train_shard_directory: "laughlm-v1/train"
+  validation_shard_directory: "laughlm-v1/validation"
+  shard_filename_prefix: "laughlm-v1_shard"
+  validation_shard_filename_prefix: "laughlm-v1_shard"
+  shard_directory: "laughlm-v1"
+  train_shard_start: 0
+  train_shard_count: 16
+  validation_shard_start: 16
+  validation_shard_count: 2
+  hf_cache_dir: "/tmp/laughlm_hf_cache"
+
+optimizations:
+  compilation_cache_dir: jax_cache/laughlm_v1_135m_4b_2val
+  kernel_backend: native
+  data_backend: native
+  sharding_strategy: pmap
+  optimizer_mu_bf16: true
+  async_checkpointing: true

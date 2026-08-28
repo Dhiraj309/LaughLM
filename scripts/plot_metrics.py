@@ -273,7 +273,14 @@ def maybe_display_dashboard(save_dir: Path, enable: bool):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Plot LaughLM metrics.")
-    parser.add_argument("--input", required=True)
+    parser.add_argument(
+        "--input",
+        required=True,
+        help=(
+            "Path to metrics.jsonl or to a run directory containing "
+            "metrics.jsonl. Do not pass a YAML training config."
+        ),
+    )
     parser.add_argument("--save-dir", type=str, default="plots")
     parser.add_argument(
         "--display",
@@ -292,6 +299,16 @@ def main() -> int:
 
     input_path = Path(args.input).expanduser().resolve()
     save_dir = Path(args.save_dir).expanduser().resolve()
+
+    # A YAML file is a model/training configuration, not a metrics stream.
+    # Reject it before load_metrics() attempts to parse every YAML line as JSON.
+    if input_path.is_file() and input_path.suffix.lower() in {".yaml", ".yml"}:
+        raise ValueError(
+            "--input must point to metrics.jsonl (or its run directory), "
+            f"not a YAML config: {input_path}\n"
+            "Example: --input checkpoints/testing/"
+            "laughlm_v1_135m_8shards/metrics.jsonl"
+        )
 
     rows = load_metrics(input_path)
     if not rows:

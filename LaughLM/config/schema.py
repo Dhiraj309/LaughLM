@@ -534,6 +534,11 @@ class DataConfig(BaseModel):
 
     shard_directory: str = Field(default="fineweb_edu_100bt")
     shard_filename_prefix: str = Field(default="fineweb_edu_100bt_shard")
+    # Optional independent directories for train/validation corpora. When
+    # unset, both roles fall back to shard_directory for backward compatibility.
+    train_shard_directory: Optional[str] = Field(default=None)
+    validation_shard_directory: Optional[str] = Field(default=None)
+    validation_shard_filename_prefix: Optional[str] = Field(default=None)
     hf_repo_id: str = Field(
         default="LaughTaleAI/LaughLM-Tokenized-Fine",
         description="Hugging Face dataset repository containing tokenized shards.",
