@@ -72,13 +72,14 @@ runtime:
   gradient_accumulation: 32
   # Selected from matched M6 prefetch A/B runs: +0.20% throughput and -33.6 MB peak memory.
   prefetch_size: 16
-  total_tokens: 20_000_000_000
+  # Storage-safe Kaggle trial: eight 250M-token shards are approximately 2B tokens.
+  total_tokens: 2_000_000_000
   eval_interval: 1000
   eval_batches: 4
   log_interval: 10
   checkpoint_interval: 1000
   checkpoint_max_to_keep: 1
-  checkpoint_dir: checkpoints/production/135M_true_h128
+  checkpoint_dir: checkpoints/testing/135M_laughlm_8shards
 
 
 data:
@@ -87,7 +88,7 @@ data:
   hf_repo_id: "LaughTaleAI/LaughLM-Tokenized-Fine"
   hf_revision: null  # null means the repository default branch.
   sources:
-    - name: fineweb-edu
+    - name: laughlm-v1-mixed
       weight: 1.0
       split: train
   max_seq_len: 2048
@@ -95,13 +96,13 @@ data:
   eos_between_docs: true
   pad_to_multiple: 128
 
-  # 28 available train shards plus two held-out validation shards from the 30-shard fineweb-edu corpus.
-  shard_directory: "fineweb-edu"
-  shard_filename_prefix: "fineweb-edu_shard"
+  # Storage-safe Kaggle trial: use only eight LaughLM-v1 training shards.
+  shard_directory: "laughlm-v1"
+  shard_filename_prefix: "laughlm-v1_shard"
   train_shard_start: 0
-  train_shard_count: 28
-  validation_shard_start: 28
-  validation_shard_count: 2
+  train_shard_count: 8
+  validation_shard_start: null
+  validation_shard_count: 0
   # The Kaggle writable mount is limited; use the large ephemeral root overlay for downloaded source shards.
   hf_cache_dir: "/tmp/laughlm_hf_cache"
   # Disabled for normal throughput; enable only for an evidence run.

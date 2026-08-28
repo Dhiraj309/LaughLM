@@ -1,4 +1,4 @@
-# LaughLM-v1 135M production run: 20B tokens in five resumable 4B-token stages.
+# LaughLM-v1 135M storage-safe Kaggle trial using eight training shards.
 #
 # Apply on top of:
 #   configs/v5e_pmap_true135m_production.yaml
@@ -33,14 +33,14 @@ runtime:
   micro_batch_per_device: 2
   gradient_accumulation: 32
   prefetch_size: 16
-  # Current cumulative stage stop target: 4B -> 8B -> 12B -> 16B -> 20B.
-  total_tokens: 4_000_000_000
+  # Eight 250M-token shards provide approximately 2B tokens for this trial.
+  total_tokens: 2_000_000_000
   eval_interval: 500
   eval_batches: 4
   log_interval: 10
   checkpoint_interval: 500
   checkpoint_max_to_keep: 2
-  checkpoint_dir: checkpoints/production/laughlm_v1_135m_gqa4_20b
+  checkpoint_dir: checkpoints/testing/laughlm_v1_135m_8shards
 
 data:
   sources:
@@ -51,9 +51,9 @@ data:
   hf_revision: null
   shard_directory: "laughlm-v1"
   shard_filename_prefix: "laughlm-v1_shard"
-  # Stage 3 uses 250M-token shards: 80 shards = 20B training tokens.
+  # Stage 3 uses approximately 250M-token shards: eight shards = approximately 2B tokens.
   train_shard_start: 0
-  train_shard_count: 80
+  train_shard_count: 8
   # No validation shards are claimed from the 20B training corpus.
   validation_shard_start: null
   validation_shard_count: 0
