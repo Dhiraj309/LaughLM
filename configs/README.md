@@ -1,24 +1,14 @@
-# LaughLM configuration layout
+# LaughLM configurations
 
-The original flat configuration files remain unchanged for backward compatibility.
-The folders below contain small YAML overlays applied on top of the validated
-135M PMAP production baseline:
+The production source of truth is:
 
 ```text
-configs/
-├── testing/       # 1–10 step correctness checks
-├── smoke/         # short end-to-end training runs
-├── benchmarks/    # repeatable throughput/compile measurements
-└── production/    # real training stages
+configs/production/laughlm_v1_127m_4b.yaml
 ```
 
-Use the optimized TPU entry point with an overlay:
+It is a standalone configuration—do not combine it with an override config.
+The current run stops at 4B cumulative tokens, while its WSD schedule remains
+fixed at 20B tokens for safe staged resume.
 
-```bash
-python -u scripts/train_tpu_optimized.py \
-  --config configs/v5e_pmap_true135m_production.yaml \
-  --override-config configs/production/smol_135m_4b.yaml
-```
-
-The Smol mixed corpus is already mixed in Stage 2, so the training config uses
-one source with weight `1.0` and points to the tokenized `laughlm-v1` folder.
+The remaining root YAML files are test or smoke fixtures retained for automated
+coverage and specialized developer scripts; they are not production options.

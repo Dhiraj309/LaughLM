@@ -2,7 +2,7 @@ from LaughLM.config.loader import load_config
 from LaughLM.training.checkpoint import CheckpointManager
 
 
-CONFIG_PATH = "configs/production/laughlm_v1_135m_fresh_4b.yaml"
+CONFIG_PATH = "configs/production/laughlm_v1_127m_4b.yaml"
 
 
 def test_fresh_production_config_is_standalone_and_exact():
@@ -19,7 +19,7 @@ def test_fresh_production_config_is_standalone_and_exact():
     assert cfg.runtime.total_tokens == 4_000_000_000
     assert cfg.scheduler.horizon_tokens == 20_000_000_000
     assert cfg.runtime.checkpoint_dir.endswith(
-        "laughlm_v1_135m_fresh_20b"
+        "laughlm_v1_127m_20b"
     )
     assert cfg.optimizations.async_checkpointing is False
 

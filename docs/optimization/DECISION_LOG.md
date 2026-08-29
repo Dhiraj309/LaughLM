@@ -7,7 +7,7 @@ the model shape, TPU software stack, workload, or implementation changed.
 ## Current locked direction
 
 - Primary trainer: PMAP on a single TPU v5e-8 VM.
-- Production reference: `configs/v5e_pmap_true135m_production.yaml`.
+- Production reference: `configs/production/laughlm_v1_127m_4b.yaml`.
 - Data: Hugging Face pre-tokenized flat `.bin` shards. Legacy tokenizer and
   domain-sampler maintenance is out of scope.
 - 135M geometry: `d_model=1024`, 8 layers, sequence length 2048, 8 query

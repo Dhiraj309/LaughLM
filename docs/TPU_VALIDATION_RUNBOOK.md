@@ -12,15 +12,15 @@ Use the selected two training and three validation shards:
 mkdir -p reports
 
 python -u -m scripts.train_tpu_optimized \
-  --config configs/v5e_pmap_true135m_production.yaml \
+  --config configs/production/laughlm_v1_127m_4b.yaml \
   --hf-repo-id LaughTaleAI/LaughLM-Tokenized-Fine \
   --hf-revision main \
-  --shard-directory fineweb-edu \
-  --shard-filename-prefix fineweb-edu_shard \
+  --shard-directory laughlm-v1 \
+  --shard-filename-prefix laughlm-v1_shard \
   --train-shard-start 0 \
   --train-shard-count 2 \
   --validation-shard-start 2 \
-  --validation-shard-count 3 \
+  --validation-shard-count 2 \
   --max_steps 60 \
   --fresh \
   --clear-compilation-cache 2>&1 | tee reports/tpu_gate1_cold.log
@@ -37,19 +37,19 @@ After Gate 1 completes, run these read-only audits:
 
 ```bash
 python -u scripts/audit_checkpoint_artifacts.py \
-  --checkpoint-dir checkpoints/production/135M_true_h128 \
-  --expected-max-to-keep 1 \
+  --checkpoint-dir checkpoints/production/laughlm_v1_127m_20b \
+  --expected-max-to-keep 2 \
   --require-run-manifest \
   --output reports/tpu_gate1_checkpoint_audit.json
 
 python -u scripts/audit_checkpoint_compatibility.py \
-  --config configs/v5e_pmap_true135m_production.yaml \
-  --checkpoint-dir checkpoints/production/135M_true_h128 \
+  --config configs/production/laughlm_v1_127m_4b.yaml \
+  --checkpoint-dir checkpoints/production/laughlm_v1_127m_20b \
   --expected-num-devices 8 \
   --output reports/tpu_gate1_compatibility.json
 
 python -u scripts/audit_run_artifacts.py \
-  --run-dir checkpoints/production/135M_true_h128 \
+  --run-dir checkpoints/production/laughlm_v1_127m_20b \
   --require-checkpoint-timings \
   --output reports/tpu_gate1_run_audit.json
 ```

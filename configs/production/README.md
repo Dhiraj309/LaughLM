@@ -1,15 +1,10 @@
-# Production configs
+# Production configuration
 
-Production overlays define real training stages and their checkpoint/data
-locations. The 4B Smol stage is based on the validated 135M PMAP architecture
-and uses the mixed `laughlm-v1` tokenized corpus.
+`laughlm_v1_127m_4b.yaml` is the single standalone production configuration
+for LaughLM-v1. It trains the 127M GQA model on the mixed `laughlm-v1` corpus.
 
-`laughlm_v1_135m_fresh_4b.yaml` is the standalone clean-restart config. It
-does not require an override and is also the source of truth for strict
-checkpoint restore, Hugging Face export, parity testing, and native generation.
-
-`laughlm_v3_138m_balanced_4b.yaml` is the selected balanced production
-candidate: 768 hidden units, 18 layers, 12 query heads, and 4 KV heads. It
-uses the same 1,048,576-token optimizer batch as the v1 configuration, but
-with a 4 microbatch x 16 accumulation geometry. It must start in its own
-checkpoint directory and must not resume from a v1/v2 checkpoint.
+It is the first cumulative 4B-token milestone of one fixed 20B WSD schedule.
+For later milestones, resume from its checkpoint and increase only
+`runtime.total_tokens` to `8_000_000_000`, `12_000_000_000`,
+`16_000_000_000`, and finally `20_000_000_000`. Keep every other model,
+optimizer, scheduler, data, and checkpoint-path setting unchanged.

@@ -3,7 +3,7 @@
 **Status:** Active planning baseline
 **Primary path:** LLaMA + PMAP + TPU v5e-8 single VM
 **Dataset path:** Hugging Face pre-tokenized raw `.bin` shards
-**Current production config:** `configs/v5e_pmap_true135m_production.yaml`
+**Current production config:** `configs/production/laughlm_v1_127m_4b.yaml`
 
 For a concise handoff of explored optimizations, measured decisions, rejected
 settings, and deferred tracks, see

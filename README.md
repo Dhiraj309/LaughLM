@@ -9,7 +9,7 @@ Orbax checkpointing.
 
 - Primary trainer: `scripts/train_tpu_optimized.py`
 - Primary hardware target: single TPU v5e-8 VM
-- Current 135M reference config: `configs/v5e_pmap_true135m_production.yaml`
+- Current production config: `configs/production/laughlm_v1_127m_4b.yaml`
 - Reference attention path: MHA `8/8` with SplashAttention
 - Validated fresh-training candidate: GQA `8/4`
 - Deferred until larger models: MaxText-style 3D tensor/sequence parallelism
@@ -202,7 +202,7 @@ manually counting shard IDs:
 
 ```bash
 python -u -m scripts.train_tpu_optimized \
-  --config configs/v5e_pmap_true135m_production.yaml \
+  --config configs/production/laughlm_v1_127m_4b.yaml \
   --hf-repo-id YOUR_STAGE4_TOKEN_REPO \
   --hf-revision main \
   --stage4-active
@@ -227,7 +227,7 @@ Step 3 — Training
 Run training:
 ```bash
 python -u -m scripts.train_tpu_optimized \
-  --config configs/v5e_pmap_true135m_production.yaml
+  --config configs/production/laughlm_v1_127m_4b.yaml
 ```
 Training automatically handles:
 

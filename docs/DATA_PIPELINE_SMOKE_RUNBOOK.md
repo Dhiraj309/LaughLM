@@ -120,7 +120,7 @@ TPU VM. Replace the repository and shard names with the smoke corpus values:
 
 ```bash
 python -u -m scripts.train_tpu_optimized \
-  --config configs/v5e_pmap_true135m_data_smoke.yaml \
+  --config configs/production/laughlm_v1_127m_4b.yaml \
   --hf-repo-id YOUR_SMOKE_TOKEN_REPO \
   --hf-revision main \
   --shard-directory YOUR_SMOKE_SHARD_DIRECTORY \

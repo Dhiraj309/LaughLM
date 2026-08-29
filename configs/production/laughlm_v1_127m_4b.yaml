@@ -1,22 +1,23 @@
-
-# Optimized configuration inheriting from v5e_pmap.yaml
-# Includes optimizations block for JAX AI Stack integration.
+# LaughLM-v1 127M: first 4B-token milestone of the fixed 20B schedule.
+# Resume this exact config after each milestone; only increase
+# runtime.total_tokens cumulatively (8B, 12B, 16B, then 20B).
 
 model:
   vocab_size: 32064
   d_model: 1024
-  num_layers: 12
-  num_heads: 16
-  num_kv_heads: 16
+  num_layers: 8
+  num_heads: 8
+  num_kv_heads: 4
   max_seq_len: 2048
 
 architecture:
   positional: rope
   normalization: rms_norm
   norm_placement: pre
-  attention_variant: mha
+  attention_variant: gqa
   attention_impl: splash
   attention_fallback: error
+  splash_block_size: 512
   fused_qkv: true
   ffn_type: swiglu
   residual: standard
@@ -33,17 +34,15 @@ initialization:
   mlp_std: 0.01
   residual_scale: 1.0
 
-
 optimizer:
   type: adamw
   learning_rate: 2.0e-4
   beta1: 0.9
   beta2: 0.95
-  eps: 1e-8
+  eps: 1.0e-8
   weight_decay: 0.1
   gradient_clip: 1.0
   mu_dtype: bfloat16
-
 
 scheduler:
   type: wsd
@@ -52,44 +51,48 @@ scheduler:
   stable_fraction: 0.95
   min_lr_ratio: 0.05
 
-
 loss:
-  # Experimental TPU loss-only backend. The native chunked path remains the fallback.
-  backend: tokamax_linear_ce
-  tokamax_implementation: mosaic_tpu
+  backend: native
   chunked_logits: true
   logits_chunk_size: 4096
   remat_logits_chunks: true
-  # Tokamax linear-softmax CE has no z-loss parameter; nonzero z-loss triggers native fallback.
-  z_loss: 0.0
+  z_loss: 1.0e-4
   ignore_index: -100
-
 
 runtime:
   backend: pmap
   seq_len: 2048
-  # Baseline-proven v5-lite throughput setting. With unscanned layers and SplashAttention,
-  # this achieves the higher-memory-safe batch geometry used by the 470k tok/s run.
-  micro_batch_per_device: 8
-  gradient_accumulation: 8
-  total_tokens: 100_000_000
-  eval_interval: 1000
-  log_interval: 10
-  checkpoint_interval: 1000
+  micro_batch_per_device: 2
+  gradient_accumulation: 32
+  prefetch_size: 16
+  total_tokens: 4_000_000_000
+  eval_interval: 500
+  eval_batches: 4
+  log_interval: 100
+  checkpoint_interval: 500
   checkpoint_max_to_keep: 2
-  checkpoint_dir: checkpoints/benchmarks/135M_tokamax_linear_ce
-
+  checkpoint_dir: checkpoints/production/laughlm_v1_127m_20b
 
 data:
+  hf_repo_id: LaughTaleAI/LaughLM-Tokenized-Fine
+  hf_revision: null
   sources:
-    - name: fineweb-edu
+    - name: laughlm-v1-mixed
       weight: 1.0
       split: train
   max_seq_len: 2048
   packing: true
   eos_between_docs: true
   pad_to_multiple: 128
-
+  shard_directory: laughlm-v1
+  shard_filename_prefix: laughlm-v1_shard
+  train_shard_start: 0
+  train_shard_count: 16
+  validation_shard_start: 16
+  validation_shard_count: 2
+  hf_cache_dir: /tmp/laughlm_hf_cache
+  record_exposure_stats: false
+  exposure_chunk_tokens: 1000000
 
 tokenizer:
   algorithm: bpe
@@ -98,13 +101,11 @@ tokenizer:
   number_tokenization: whole_number
   output_format: huggingface_fast
 
-
 parallelism:
   data_parallel: 8
   model_parallel: 1
   compute_dtype: bfloat16
   param_dtype: float32
-
 
 spmd:
   mesh:
@@ -129,33 +130,27 @@ spmd:
   remat:
     policy: dots_saveable
     granularity: block
-    # Layer scanning is retained in code for compile-time experiments, but the observed
-    # v5-lite high-throughput configuration is the unscanned stack.
     scan_layers: false
     prevent_cse: false
-
-
-dtype:
-  param_dtype: float32
-  compute_dtype: bfloat16
-  output_dtype: float32
-
+  dtype:
+    param_dtype: float32
+    compute_dtype: bfloat16
+    output_dtype: float32
 
 monitoring:
   tensorboard: false
   rich_terminal: true
-
+  training_integrity: false
+  integrity_interval: 100
 
 hardware:
   accelerator: tpu
   type: v5e-8
 
-# Optimization Overrides
 optimizations:
-  # Tokamax gated-linear-unit kernels are GPU-only; native XLA fuses this path on TPU v5 lite.
-  kernel_backend: "native"
-  # Native memmap is the throughput-proven v5-lite path; Grain remains optional.
-  data_backend: "native"
-  sharding_strategy: "fsdp"
+  compilation_cache_dir: jax_cache/laughlm_v1_127m_20b
+  kernel_backend: native
+  data_backend: native
+  sharding_strategy: pmap
   optimizer_mu_bf16: true
-  async_checkpointing: true
+  async_checkpointing: false

@@ -40,7 +40,7 @@ from LaughLM.utils.data_factory import create_dataloader
 # -------------------
 
 
-DEFAULT_CONFIG = "configs/v5e_pmap_optimized.yaml"
+DEFAULT_CONFIG = "configs/production/laughlm_v1_127m_4b.yaml"
 
 
 def _configure_persistent_compilation_cache(config) -> None:
