@@ -113,28 +113,39 @@ class OrbaxCompositeCheckpointManager:
             return
 
         saved_steps: set[int] | None = None
+        retained_pending_steps = set(self._pending_metadata)
+        pruned_pending_steps: set[int] = set()
         if hasattr(self.manager, "all_steps"):
             saved_steps = {
                 int(step) for step in self.manager.all_steps(read=True)
             }
-            missing_steps = sorted(
-                step
-                for step in self._pending_metadata
-                if step not in saved_steps
-            )
-            if missing_steps:
+            pending_steps = set(self._pending_metadata)
+            newest_pending_step = max(pending_steps)
+            if newest_pending_step not in saved_steps:
                 raise RuntimeError(
-                    "Orbax completed without registering checkpoint steps "
-                    f"for metadata sidecars: {missing_steps}"
+                    "Orbax completed without registering the newest checkpoint "
+                    "requested for metadata finalization: "
+                    f"{newest_pending_step}"
                 )
+            retained_pending_steps = pending_steps.intersection(saved_steps)
+            pruned_pending_steps = pending_steps.difference(saved_steps)
 
-        for step, metadata in sorted(self._pending_metadata.items()):
+        for step in sorted(retained_pending_steps):
+            metadata = self._pending_metadata[step]
             self._write_metadata_sidecar(step=step, metadata=metadata)
             logger.info(
                 "[checkpoint_factory] metadata sidecar committed at step %s.",
                 step,
             )
-        self._pending_metadata.clear()
+            self._pending_metadata.pop(step, None)
+
+        for step in sorted(pruned_pending_steps):
+            logger.info(
+                "[checkpoint_factory] skipping metadata sidecar for Orbax-"
+                "pruned checkpoint step %s.",
+                step,
+            )
+            self._pending_metadata.pop(step, None)
 
         if saved_steps is not None:
             self._prune_metadata_sidecars(saved_steps)

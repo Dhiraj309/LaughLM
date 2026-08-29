@@ -67,6 +67,51 @@ def _unreplicate(tree):
     )
 
 
+def _validate_checkpoint_sidecar(
+    *,
+    checkpoint_dir: str | Path,
+    expected_step: int,
+    expected_tokens: int,
+) -> dict:
+    """Require the final checkpoint metadata needed by strict HF export."""
+
+    sidecar_path = (
+        Path(checkpoint_dir).expanduser().resolve()
+        / "checkpoint_metadata"
+        / f"step_{int(expected_step):08d}.json"
+    )
+    if not sidecar_path.is_file():
+        raise RuntimeError(
+            "Final checkpoint is not export-ready: metadata sidecar missing.\n"
+            f"  expected: {sidecar_path}"
+        )
+
+    with sidecar_path.open("r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+
+    mismatches = []
+    if metadata.get("format") != "laughlm_checkpoint_v3":
+        mismatches.append(
+            f"format={metadata.get('format')!r}"
+        )
+    if int(metadata.get("step", -1)) != int(expected_step):
+        mismatches.append(
+            f"step={metadata.get('step')!r}"
+        )
+    if int(metadata.get("tokens_processed", -1)) != int(expected_tokens):
+        mismatches.append(
+            f"tokens_processed={metadata.get('tokens_processed')!r}"
+        )
+
+    if mismatches:
+        raise RuntimeError(
+            "Final checkpoint metadata is not export-ready.\n  "
+            + "\n  ".join(mismatches)
+        )
+
+    return metadata
+
+
 class Trainer:
     def __init__(
         self,
@@ -889,6 +934,30 @@ class Trainer:
             wait_start = time.perf_counter()
             self.checkpoints.wait()
             completion_wait_time = time.perf_counter() - wait_start
+
+            latest_step = self.checkpoints.latest_step()
+            if latest_step is None or int(latest_step) != int(final_step):
+                raise RuntimeError(
+                    "Final checkpoint is not export-ready: latest Orbax step "
+                    f"is {latest_step!r}, expected {final_step}."
+                )
+
+            if jax.process_index() == 0:
+                _validate_checkpoint_sidecar(
+                    checkpoint_dir=self.config.runtime.checkpoint_dir,
+                    expected_step=final_step,
+                    expected_tokens=final_tokens_seen,
+                )
+                print(
+                    "[trainer] final checkpoint is v3 metadata-complete and "
+                    "ready for strict Hugging Face export",
+                    flush=True,
+                )
+
+            jax.experimental.multihost_utils.sync_global_devices(
+                "checkpoint-final-export-ready"
+            )
+
             self.logger.log_checkpoint_timing(
                 step=final_step,
                 tokens_processed=final_tokens_seen,
