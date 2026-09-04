@@ -63,7 +63,7 @@ hash, summarized metrics, and decision.
 
 | State | Count |
 |---|---:|
-| 🟢 Ready | 0 |
+| 🟢 Ready | 1 |
 | ⬜ Planned | 108 |
 | 🟡 In progress | 0 |
 | 🟣 TPU validation pending | 0 |
