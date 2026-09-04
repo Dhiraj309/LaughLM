@@ -64,10 +64,10 @@ hash, summarized metrics, and decision.
 | State | Count |
 |---|---:|
 | 🟢 Ready | 1 |
-| ⬜ Planned | 108 |
+| ⬜ Planned | 107 |
 | 🟡 In progress | 0 |
 | 🟣 TPU validation pending | 0 |
-| ✅ Done | 1 |
+| ✅ Done | 2 |
 | ⛔ Blocked | 0 |
 | ↩️ Rolled back | 0 |
 | ❌ No-go | 0 |
@@ -171,8 +171,8 @@ reproducible Python 3.12 Gen-2 lane.
 | Status | ID | Gate | Exact commit subject | Deliverable and acceptance |
 |---|---|---|---|---|
 | ✅ | G2-001 | CPU | `build(gen2): capture immutable runtime manifests` | Add `scripts.capture_environment` and a versioned JSON schema covering Python, JAX, jaxlib, libtpu, Flax, Optax, Orbax, Tokamax, XProf, Grain, devices, Git SHA, dirty state, and config digest. A deterministic CPU fixture passes `tests/gen2/test_environment_manifest.py`. |
-| 🟢 | G2-002 | CPU | `build(gen2): add the legacy dependency lock lane` | Add legacy input/constraint files under `requirements/inputs` and `requirements/locks` without changing default package versions. A clean Python 3.12 CPU install passes `pip check` and the existing stable tests. |
-| ⬜ | G2-003 | CPU | `build(gen2): add the modern gen2 dependency input` | Add an opt-in Gen-2 input pinning the approved Python/JAX/Flax/Optax/Orbax/Tokamax/XProf/Grain/Pydantic line from the design plan. Importing LaughLM without the Gen-2 extra must still work. |
+| ✅ | G2-002 | CPU | `build(gen2): add the legacy dependency lock lane` | Add legacy input/constraint files under `requirements/inputs` and `requirements/locks` without changing default package versions. A clean Python 3.12 CPU install passes `pip check` and the existing stable tests. |
+| 🟢 | G2-003 | CPU | `build(gen2): add the modern gen2 dependency input` | Add an opt-in Gen-2 input pinning the approved Python/JAX/Flax/Optax/Orbax/Tokamax/XProf/Grain/Pydantic line from the design plan. Importing LaughLM without the Gen-2 extra must still work. |
 | ⬜ | G2-004 | CPU | `build(gen2): make hashed lock generation reproducible` | Add a documented lock-generation command or script that produces CPU and TPU-v5e locks with hashes, records the resolver version, and refuses an unpinned direct dependency. Two runs from the same input are byte-identical. |
 | ⬜ | G2-005 | CPU | `ci(gen2): test legacy and modern dependency lanes` | Extend CI with separate legacy and Gen-2 CPU jobs. Both run `pip check`, config loading, checkpoint metadata tests, and the stable suite. Gen-2 import/capability tests skip Tokamax cleanly when its extra is absent. |
 
