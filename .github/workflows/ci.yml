@@ -71,6 +71,7 @@ jobs:
                  tests/test_ci_dependency_lanes.py \
                  tests/test_gen2_dependency_input.py \
                  tests/test_gen2_tpu_dependency_config.py \
+                 tests/test_benchmark_result.py \
                  tests/test_optional_capabilities.py \
                  tests/test_profiling.py \
                  -q
@@ -135,6 +136,7 @@ jobs:
                  tests/test_ci_dependency_lanes.py \
                  tests/test_gen2_dependency_input.py \
                  tests/test_gen2_tpu_dependency_config.py \
+                 tests/test_benchmark_result.py \
                  tests/test_optional_capabilities.py \
                  tests/test_profiling.py \
                  -q

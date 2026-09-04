@@ -64,10 +64,10 @@ hash, summarized metrics, and decision.
 | State | Count |
 |---|---:|
 | 🟢 Ready | 1 |
-| ⬜ Planned | 103 |
+| ⬜ Planned | 102 |
 | 🟡 In progress | 0 |
 | 🟣 TPU validation pending | 0 |
-| ✅ Done | 6 |
+| ✅ Done | 7 |
 | ⛔ Blocked | 0 |
 | ↩️ Rolled back | 0 |
 | ❌ No-go | 0 |
@@ -194,8 +194,8 @@ Outcome: all later decisions use one safe benchmark contract and the maintained
 | Status | ID | Gate | Exact commit subject | Deliverable and acceptance |
 |---|---|---|---|---|
 | ✅ | G2-006 | CPU | `fix(profiling): make xprof capability detection explicit` | Repair the programmatic profiler so disabled, unavailable, and active states are distinct. CPU tests prove disabled mode is a no-op and requested-but-unavailable mode fails before training instead of silently pretending to profile. |
-| 🟢 | G2-007 | CPU | `feat(bench): define immutable benchmark result records` | Add result schemas for config/environment digests, compile time, warm-up, measured steps, throughput, HBM, collectives, requested/resolved kernels, and trial identity. Output directories must be new and production checkpoint roots are rejected. |
-| ⬜ | G2-008 | CPU | `feat(bench): add the canonical llama synthetic harness` | Implement `python -m scripts.benchmark_gen2` using the maintained LLaMA factory, seeded synthetic token IDs, fixed warm-up/measure phases, and no dataset or production checkpoint mutation. Tiny CPU execution produces a valid result record. |
+| ✅ | G2-007 | CPU | `feat(bench): define immutable benchmark result records` | Add result schemas for config/environment digests, compile time, warm-up, measured steps, throughput, HBM, collectives, requested/resolved kernels, and trial identity. Output directories must be new and production checkpoint roots are rejected. |
+| 🟢 | G2-008 | CPU | `feat(bench): add the canonical llama synthetic harness` | Implement `python -m scripts.benchmark_gen2` using the maintained LLaMA factory, seeded synthetic token IDs, fixed warm-up/measure phases, and no dataset or production checkpoint mutation. Tiny CPU execution produces a valid result record. |
 | ⬜ | G2-009 | CPU, TPU-C | `feat(bench): add compile and collective inspection tools` | Implement `scripts.compile_gen2` and `scripts.inspect_collectives` to lower/compile a train step, save HLO metadata, count expected collectives, and detect a reduction inside the accumulation scan. CPU lowering tests pass; a v5e compile artifact is the manual gate. |
 | ⬜ | G2-010 | CPU, TPU-C | `feat(bench): add exact-shape kernel and validation CLIs` | Implement `scripts.benchmark_kernels` and `scripts.validate_gen2` with seeded inputs, forward-and-VJP mode, native-reference comparison, and collision-safe artifact paths. Add the v5e command runbook without running heavy training. |
 
