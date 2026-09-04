@@ -19,6 +19,12 @@ from LaughLM.profiling.analysis.bottlenecks import BottleneckAnalyzer
 from LaughLM.profiling.reports.json import export_json_artifacts
 from LaughLM.profiling.reports.markdown import generate_markdown_report
 from LaughLM.profiling.reports.terminal import render_terminal_report
+from LaughLM.profiling.integrations import (
+    XProfCapability,
+    XProfState,
+    XProfUnavailableError,
+)
+import LaughLM.profiling.integrations.jax as jax_integration
 
 
 def test_event_creation_and_nesting():
@@ -54,6 +60,68 @@ def test_disabled_profiler():
     assert len(profiler.session.events) == 0
     artifacts = profiler.finish()
     assert artifacts == {}
+
+
+def test_disabled_xprof_is_a_no_op(monkeypatch):
+    def fail_if_started(_log_dir):
+        raise AssertionError("disabled profiling must not start XProf")
+
+    monkeypatch.setattr(jax_integration, "start_jax_trace", fail_if_started)
+    profiler = Profiler(enabled=False, level="off", xprof=True, run_id="no_xprof")
+
+    assert profiler.xprof_state is XProfState.DISABLED
+    assert profiler.finish() == {}
+
+
+def test_requested_unavailable_xprof_fails_before_training(monkeypatch):
+    def unavailable(_log_dir):
+        raise XProfUnavailableError("test ABI mismatch")
+
+    monkeypatch.setattr(jax_integration, "start_jax_trace", unavailable)
+
+    with pytest.raises(XProfUnavailableError, match="test ABI mismatch"):
+        Profiler(enabled=True, level="summary", xprof=True, run_id="bad_xprof")
+
+
+def test_xprof_state_transitions_to_active_and_back(monkeypatch, tmp_path):
+    calls = []
+    fake_jax = type(
+        "FakeJax",
+        (),
+        {
+            "profiler": type(
+                "FakeProfiler",
+                (),
+                {
+                    "start_trace": staticmethod(
+                        lambda path: calls.append(("start", path))
+                    ),
+                    "stop_trace": staticmethod(lambda: calls.append(("stop",))),
+                },
+            )()
+        },
+    )
+    monkeypatch.setitem(__import__("sys").modules, "jax", fake_jax)
+    monkeypatch.setattr(
+        jax_integration,
+        "detect_xprof_capability",
+        lambda: XProfCapability(XProfState.AVAILABLE),
+    )
+
+    profiler = Profiler(
+        enabled=True,
+        level="summary",
+        xprof=True,
+        output_dir=str(tmp_path),
+        run_id="active_xprof",
+    )
+    assert profiler.xprof_state is XProfState.ACTIVE
+    assert profiler._jax_trace_active
+    assert calls[0][0] == "start"
+
+    profiler.finish()
+    assert profiler.xprof_state is XProfState.AVAILABLE
+    assert calls[-1][0] == "stop"
 
 
 def test_aggregation():

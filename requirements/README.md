@@ -38,6 +38,12 @@ python -m pip install --no-deps -e .
 python -m pip check
 ```
 
+The requested TPU wheel source and exact `jax[tpu]`, Flax, and Optax pins are
+also recorded in `pyproject.toml` under
+`tool.laughlm.dependency-lanes.gen2-tpu`. That metadata is intentionally not a
+pip extra because the stable project dependencies remain mandatory; use the
+dedicated TPU input above for an installable, isolated lane.
+
 These inputs are candidate compatibility lanes, not production locks. Do not
 mix them with the legacy lane in one environment, and do not call them
 production-ready until G2-004 and the migration gates pass.

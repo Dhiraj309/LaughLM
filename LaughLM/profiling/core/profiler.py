@@ -13,6 +13,7 @@ from typing import Optional, Dict, Any, List
 from LaughLM.profiling.core.event import Event
 from LaughLM.profiling.core.scope import Scope, NullScope
 from LaughLM.profiling.core.session import ProfileSession
+from LaughLM.profiling.integrations.jax import XProfState
 
 
 class Profiler:
@@ -73,8 +74,9 @@ class Profiler:
         )
 
         self._jax_trace_active = False
+        self.xprof_state = XProfState.DISABLED
 
-        if self.enabled and self.xprof and self.level == "developer":
+        if self.enabled and self.xprof:
             self._start_xprof_if_requested()
 
     @classmethod
@@ -224,8 +226,10 @@ class Profiler:
 
     def _start_xprof_if_requested(self) -> None:
         from LaughLM.profiling.integrations.jax import start_jax_trace
+
         traces_dir = self.session.ensure_output_dirs() / "traces"
-        self._jax_trace_active = start_jax_trace(str(traces_dir))
+        self.xprof_state = start_jax_trace(str(traces_dir))
+        self._jax_trace_active = self.xprof_state is XProfState.ACTIVE
 
     def finish(self) -> Dict[str, Any]:
         """
@@ -239,8 +243,10 @@ class Profiler:
 
         if self._jax_trace_active:
             from LaughLM.profiling.integrations.jax import stop_jax_trace
+
             stop_jax_trace()
             self._jax_trace_active = False
+            self.xprof_state = XProfState.AVAILABLE
 
         from LaughLM.profiling.analysis.aggregation import aggregate_session
         from LaughLM.profiling.analysis.bottlenecks import BottleneckAnalyzer

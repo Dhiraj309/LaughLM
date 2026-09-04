@@ -46,6 +46,22 @@ data = [
     "grain",
 ]
 
+# Gen-2 TPU pins are intentionally a separate lane.  The stable project
+# dependencies above remain the default and must not be resolved together
+# with these mutually incompatible JAX/Flax versions.  The reproducible
+# installer consumes requirements/inputs/gen2-tpu-v5e-py312.in; this table
+# keeps the requested TPU wheel source and pins discoverable in project
+# metadata without pretending that ``pip install .[gen2-tpu]`` is safe.
+[tool.laughlm.dependency-lanes.gen2-tpu]
+find-links = [
+    "https://storage.googleapis.com/jax-releases/libtpu_releases.html",
+]
+packages = [
+    "jax[tpu]==0.11.1",
+    "flax==0.12.9",
+    "optax==0.2.8",
+]
+
 [tool.setuptools]
 include-package-data = true
 

@@ -70,7 +70,9 @@ jobs:
                  tests/test_train_state.py \
                  tests/test_ci_dependency_lanes.py \
                  tests/test_gen2_dependency_input.py \
+                 tests/test_gen2_tpu_dependency_config.py \
                  tests/test_optional_capabilities.py \
+                 tests/test_profiling.py \
                  -q
 
   gen2-cpu:
@@ -132,5 +134,7 @@ jobs:
                  tests/test_train_state.py \
                  tests/test_ci_dependency_lanes.py \
                  tests/test_gen2_dependency_input.py \
+                 tests/test_gen2_tpu_dependency_config.py \
                  tests/test_optional_capabilities.py \
+                 tests/test_profiling.py \
                  -q
