@@ -197,9 +197,18 @@ class Trainer:
         # Checkpoints
         # ====================================================
 
+        fork_requested = (
+            config.runtime.resume_mode == "scheduler_fork"
+        )
+
+        # The output directory is always config.runtime.checkpoint_dir. A
+        # scheduler fork restores once from runtime.resume_from, then writes
+        # only to the new output directory. Normal resumes retain the legacy
+        # resume_dir behavior used by existing scripts.
         ckpt_dir = (
-            resume_dir
-            or config.runtime.checkpoint_dir
+            config.runtime.checkpoint_dir
+            if fork_requested
+            else (resume_dir or config.runtime.checkpoint_dir)
         )
 
         self.checkpoints = create_checkpoint_manager(
@@ -212,11 +221,35 @@ class Trainer:
             config.runtime.checkpoint_interval
         )
 
-        resume_step = self.checkpoints.latest_step()
+        output_resume_step = self.checkpoints.latest_step()
+        self._scheduler_fork_initial = bool(
+            fork_requested and output_resume_step is None
+        )
+
+        if self._scheduler_fork_initial:
+            parent_dir = config.runtime.resume_from
+            if not parent_dir:
+                raise ValueError(
+                    "scheduler_fork requires runtime.resume_from."
+                )
+            self._restore_checkpoints = create_checkpoint_manager(
+                config,
+                parent_dir,
+                max_to_keep=config.runtime.checkpoint_max_to_keep,
+            )
+        else:
+            self._restore_checkpoints = self.checkpoints
+
+        resume_step = self._restore_checkpoints.latest_step()
+        if self._scheduler_fork_initial and resume_step is None:
+            raise RuntimeError(
+                "scheduler_fork parent checkpoint directory has no checkpoint: "
+                f"{config.runtime.resume_from}"
+            )
         resume_metadata = (
             None
             if resume_step is None
-            else self.checkpoints.load_metadata(resume_step)
+            else self._restore_checkpoints.load_metadata(resume_step)
         )
 
         # Checkpoints written before M3 stored this scalar as int32. Restore
@@ -323,13 +356,17 @@ class Trainer:
             rng_key=self.rng.key,
         )
 
-        restored = self.checkpoints.restore_latest(
+        restored = self._restore_checkpoints.restore_latest(
             target_state=state,
             config=config,
             num_devices=self.num_devices,
             require_metadata=True,
             require_v3=True,
-            purpose="pmap_resume",
+            purpose=(
+                "pmap_scheduler_fork"
+                if self._scheduler_fork_initial
+                else "pmap_resume"
+            ),
         )
 
         tokens_per_step_for_resume = (
@@ -344,7 +381,7 @@ class Trainer:
 
             self.start_step = int(state.step)
 
-            metadata = self.checkpoints.load_metadata(
+            metadata = self._restore_checkpoints.load_metadata(
                 restored_step
             )
 
@@ -360,15 +397,24 @@ class Trainer:
 
             self._resume_iterator_state = (
                 None
-                if metadata is None
+                if self._scheduler_fork_initial or metadata is None
                 else metadata.get("data_iterator")
             )
+
+            if self._scheduler_fork_initial:
+                print(
+                    "[trainer] scheduler fork: resetting data iterator for "
+                    "the continuation shard pool",
+                    flush=True,
+                )
 
             if self._resume_iterator_state is None:
                 self._resume_iterator_state = {
                     "mode": "deterministic_batch_index_v1",
                     "next_batch_index": (
-                        int(self.start_step) * int(self.grad_accum)
+                        0
+                        if self._scheduler_fork_initial
+                        else int(self.start_step) * int(self.grad_accum)
                     ),
                 }
                 print(
@@ -984,3 +1030,9 @@ class Trainer:
                 self.checkpoints.close()
             else:
                 self.checkpoints.wait()
+
+            if self._restore_checkpoints is not self.checkpoints:
+                if hasattr(self._restore_checkpoints, "close"):
+                    self._restore_checkpoints.close()
+                else:
+                    self._restore_checkpoints.wait()

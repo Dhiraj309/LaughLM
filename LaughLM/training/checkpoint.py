@@ -27,6 +27,7 @@ for a clean resume.
 from __future__ import annotations
 
 import json
+import math
 import os
 import traceback
 from pathlib import Path
@@ -279,6 +280,15 @@ class CheckpointManager:
     def _scheduler_horizon_tokens(
         config,
     ) -> int:
+        if getattr(config.scheduler, "type", None) == "continuation_decay":
+            end_tokens = getattr(
+                config.scheduler,
+                "continuation_end_tokens",
+                None,
+            )
+            if end_tokens is not None:
+                return int(end_tokens)
+
         horizon_tokens = getattr(
             config.scheduler,
             "horizon_tokens",
@@ -706,6 +716,29 @@ class CheckpointManager:
                 "min_lr_ratio": float(
                     config.scheduler.min_lr_ratio
                 ),
+                "continuation_start_tokens": (
+                    None
+                    if config.scheduler.continuation_start_tokens is None
+                    else int(config.scheduler.continuation_start_tokens)
+                ),
+                "continuation_end_tokens": (
+                    None
+                    if config.scheduler.continuation_end_tokens is None
+                    else int(config.scheduler.continuation_end_tokens)
+                ),
+                "continuation_start_lr": (
+                    None
+                    if config.scheduler.continuation_start_lr is None
+                    else float(config.scheduler.continuation_start_lr)
+                ),
+                "continuation_end_lr": (
+                    None
+                    if config.scheduler.continuation_end_lr is None
+                    else float(config.scheduler.continuation_end_lr)
+                ),
+                "continuation_decay_type": str(
+                    config.scheduler.continuation_decay_type
+                ),
             },
 
             "parallelism": {
@@ -786,6 +819,80 @@ class CheckpointManager:
             changed.append(
                 f"  {name}: checkpoint={old!r}, current={new!r}"
             )
+
+    @staticmethod
+    def _validate_scheduler_fork_parent(
+        *,
+        metadata: dict,
+        config,
+        num_devices: int,
+    ) -> list[str]:
+        """Validate the one deliberate WSD -> continuation transition."""
+
+        mismatches = []
+        parent_scheduler = metadata.get("scheduler") or {}
+        parent_optimizer = metadata.get("optimizer") or {}
+        continuation = config.scheduler
+
+        if parent_scheduler.get("type") != "wsd":
+            mismatches.append(
+                "  parent scheduler.type must be 'wsd' for a continuation fork"
+            )
+
+        start_tokens = continuation.continuation_start_tokens
+        start_lr = continuation.continuation_start_lr
+        parent_step = metadata.get("step")
+        parent_total_steps = parent_scheduler.get("total_steps")
+
+        tokens_per_step = CheckpointManager._tokens_per_step(
+            config=config,
+            num_devices=num_devices,
+        )
+        expected_start_step = int(start_tokens) // tokens_per_step
+
+        if parent_step is None or int(parent_step) != expected_start_step:
+            mismatches.append(
+                "  parent step: "
+                f"checkpoint={parent_step!r}, expected={expected_start_step!r}"
+            )
+
+        if parent_total_steps is None or int(parent_total_steps) != expected_start_step:
+            mismatches.append(
+                "  parent scheduler must end at continuation_start_tokens: "
+                f"scheduler_total_steps={parent_total_steps!r}, "
+                f"expected={expected_start_step!r}"
+            )
+
+        parent_lr = parent_optimizer.get("learning_rate")
+        min_ratio = parent_scheduler.get("min_lr_ratio")
+        if parent_lr is None or min_ratio is None:
+            mismatches.append(
+                "  parent metadata must include optimizer.learning_rate and "
+                "scheduler.min_lr_ratio"
+            )
+        elif not math.isclose(
+            float(start_lr),
+            float(parent_lr) * float(min_ratio),
+            rel_tol=1e-6,
+            abs_tol=1e-12,
+        ):
+            mismatches.append(
+                "  continuation_start_lr: "
+                f"current={float(start_lr)!r}, "
+                f"parent_final={float(parent_lr) * float(min_ratio)!r}"
+            )
+
+        parent_tokens = metadata.get("tokens_processed")
+        if parent_tokens is not None:
+            lower = expected_start_step * tokens_per_step
+            upper = (expected_start_step + 1) * tokens_per_step
+            if not lower <= int(parent_tokens) < upper:
+                mismatches.append(
+                    "  parent tokens_processed is inconsistent with "
+                    f"continuation_start_tokens: {parent_tokens!r}"
+                )
+
+        return mismatches
 
     # --------------------------------------------------------
     # Validate checkpoint compatibility
@@ -1172,6 +1279,8 @@ class CheckpointManager:
                 )
             )
 
+            is_scheduler_fork = purpose == "pmap_scheduler_fork"
+
             strict_lr_checks = {
                 "optimizer.type": (
                     meta_optimizer.get("type"),
@@ -1181,51 +1290,83 @@ class CheckpointManager:
                     meta_optimizer.get("learning_rate"),
                     float(config.optimizer.learning_rate),
                 ),
-                "scheduler.type": (
-                    meta_scheduler.get("type"),
-                    str(config.scheduler.type),
-                ),
-                "scheduler.horizon_tokens": (
-                    meta_scheduler.get("horizon_tokens"),
-                    int(current_scheduler_horizon),
-                ),
-                "scheduler.total_steps": (
-                    meta_scheduler.get("total_steps"),
-                    int(current_scheduler_total_steps),
-                ),
-                "scheduler.warmup_steps": (
-                    meta_scheduler.get("warmup_steps"),
-                    (
-                        None
-                        if config.scheduler.warmup_steps is None
-                        else int(config.scheduler.warmup_steps)
-                    ),
-                ),
-                "scheduler.warmup_fraction": (
-                    meta_scheduler.get("warmup_fraction"),
-                    (
-                        None
-                        if config.scheduler.warmup_fraction is None
-                        else float(config.scheduler.warmup_fraction)
-                    ),
-                ),
-                "scheduler.stable_fraction": (
-                    meta_scheduler.get("stable_fraction"),
-                    float(config.scheduler.stable_fraction),
-                ),
-                "scheduler.decay_steps": (
-                    meta_scheduler.get("decay_steps"),
-                    (
-                        None
-                        if config.scheduler.decay_steps is None
-                        else int(config.scheduler.decay_steps)
-                    ),
-                ),
-                "scheduler.min_lr_ratio": (
-                    meta_scheduler.get("min_lr_ratio"),
-                    float(config.scheduler.min_lr_ratio),
-                ),
             }
+
+            if not is_scheduler_fork:
+                strict_lr_checks.update(
+                    {
+                        "scheduler.type": (
+                            meta_scheduler.get("type"),
+                            str(config.scheduler.type),
+                        ),
+                        "scheduler.horizon_tokens": (
+                            meta_scheduler.get("horizon_tokens"),
+                            int(current_scheduler_horizon),
+                        ),
+                        "scheduler.total_steps": (
+                            meta_scheduler.get("total_steps"),
+                            int(current_scheduler_total_steps),
+                        ),
+                        "scheduler.warmup_steps": (
+                            meta_scheduler.get("warmup_steps"),
+                            (
+                                None
+                                if config.scheduler.warmup_steps is None
+                                else int(config.scheduler.warmup_steps)
+                            ),
+                        ),
+                        "scheduler.warmup_fraction": (
+                            meta_scheduler.get("warmup_fraction"),
+                            (
+                                None
+                                if config.scheduler.warmup_fraction is None
+                                else float(config.scheduler.warmup_fraction)
+                            ),
+                        ),
+                        "scheduler.stable_fraction": (
+                            meta_scheduler.get("stable_fraction"),
+                            float(config.scheduler.stable_fraction),
+                        ),
+                        "scheduler.decay_steps": (
+                            meta_scheduler.get("decay_steps"),
+                            (
+                                None
+                                if config.scheduler.decay_steps is None
+                                else int(config.scheduler.decay_steps)
+                            ),
+                        ),
+                        "scheduler.min_lr_ratio": (
+                            meta_scheduler.get("min_lr_ratio"),
+                            float(config.scheduler.min_lr_ratio),
+                        ),
+                    }
+                )
+
+                if config.scheduler.type == "continuation_decay":
+                    strict_lr_checks.update(
+                        {
+                            "scheduler.continuation_start_tokens": (
+                                meta_scheduler.get("continuation_start_tokens"),
+                                int(config.scheduler.continuation_start_tokens),
+                            ),
+                            "scheduler.continuation_end_tokens": (
+                                meta_scheduler.get("continuation_end_tokens"),
+                                int(config.scheduler.continuation_end_tokens),
+                            ),
+                            "scheduler.continuation_start_lr": (
+                                meta_scheduler.get("continuation_start_lr"),
+                                float(config.scheduler.continuation_start_lr),
+                            ),
+                            "scheduler.continuation_end_lr": (
+                                meta_scheduler.get("continuation_end_lr"),
+                                float(config.scheduler.continuation_end_lr),
+                            ),
+                            "scheduler.continuation_decay_type": (
+                                meta_scheduler.get("continuation_decay_type"),
+                                str(config.scheduler.continuation_decay_type),
+                            ),
+                        }
+                    )
 
             for name, (old, new) in strict_lr_checks.items():
                 CheckpointManager._compare_strict(
@@ -1233,6 +1374,15 @@ class CheckpointManager:
                     old=old,
                     new=new,
                     mismatches=lr_mismatches,
+                )
+
+            if is_scheduler_fork:
+                lr_mismatches.extend(
+                    CheckpointManager._validate_scheduler_fork_parent(
+                        metadata=metadata,
+                        config=config,
+                        num_devices=num_devices,
+                    )
                 )
 
             if lr_mismatches:

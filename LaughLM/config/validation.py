@@ -25,6 +25,7 @@ def validate_config(config: LaughLMConfig) -> None:
     _validate_gqa_kv_heads(config)
     _validate_scheduler_horizon(config)
     _validate_wsd_scheduler(config)
+    _validate_continuation_scheduler(config)
     _validate_optimizations(config)
 
 # ------------------------------------------------------------
@@ -125,6 +126,15 @@ def _scheduler_horizon_tokens(config: LaughLMConfig) -> int:
     - runtime.total_tokens = current stage stop target
     - scheduler.horizon_tokens = fixed LR schedule horizon
     """
+
+    if config.scheduler.type == "continuation_decay":
+        end_tokens = getattr(
+            config.scheduler,
+            "continuation_end_tokens",
+            None,
+        )
+        if end_tokens is not None:
+            return int(end_tokens)
 
     horizon = getattr(
         config.scheduler,
@@ -660,6 +670,58 @@ def _validate_wsd_scheduler(config: LaughLMConfig) -> None:
             f"  decay:                    {decay_steps:,}\n"
             "No room left for decay phase. "
             "Reduce warmup, reduce stable_fraction, or increase horizon_tokens."
+        )
+
+
+def _validate_continuation_scheduler(config: LaughLMConfig) -> None:
+    """Validate the explicit, opt-in checkpoint scheduler fork."""
+
+    if config.scheduler.type != "continuation_decay":
+        return
+
+    fields = {
+        "scheduler.continuation_start_tokens": config.scheduler.continuation_start_tokens,
+        "scheduler.continuation_end_tokens": config.scheduler.continuation_end_tokens,
+        "scheduler.continuation_start_lr": config.scheduler.continuation_start_lr,
+        "scheduler.continuation_end_lr": config.scheduler.continuation_end_lr,
+    }
+    missing = [name for name, value in fields.items() if value is None]
+    if missing:
+        raise ValueError(
+            "continuation_decay requires: " + ", ".join(missing)
+        )
+
+    start_tokens = int(config.scheduler.continuation_start_tokens)
+    end_tokens = int(config.scheduler.continuation_end_tokens)
+    if end_tokens <= start_tokens:
+        raise ValueError(
+            "scheduler.continuation_end_tokens must be greater than "
+            "scheduler.continuation_start_tokens."
+        )
+
+    if end_tokens != int(config.runtime.total_tokens):
+        raise ValueError(
+            "continuation_decay end_tokens must equal runtime.total_tokens "
+            "because it is the cumulative training stop target."
+        )
+
+    start_lr = float(config.scheduler.continuation_start_lr)
+    end_lr = float(config.scheduler.continuation_end_lr)
+    if end_lr > start_lr:
+        raise ValueError(
+            "continuation_decay requires continuation_end_lr <= "
+            "continuation_start_lr."
+        )
+
+    if config.runtime.resume_mode != "scheduler_fork":
+        raise ValueError(
+            "continuation_decay requires runtime.resume_mode='scheduler_fork'."
+        )
+
+    if not config.runtime.resume_from:
+        raise ValueError(
+            "continuation_decay requires runtime.resume_from to identify "
+            "the parent checkpoint directory."
         )
 
 def _validate_runtime_backend(config: LaughLMConfig) -> None:

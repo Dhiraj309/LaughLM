@@ -257,6 +257,7 @@ class SchedulerConfig(BaseModel):
         "linear",
         "rsqrt",
         "wsd",
+        "continuation_decay",
     ]
 
     horizon_tokens: Optional[int] = Field(
@@ -299,6 +300,53 @@ class SchedulerConfig(BaseModel):
     decay_steps: Optional[int] = Field(
         default=None,
         ge=1,
+    )
+
+    # Explicit continuation schedule. These fields are intentionally separate
+    # from WSD so an ordinary checkpoint resume cannot silently reshape its LR
+    # curve. The parent checkpoint is validated by the trainer/checkpoint path.
+    continuation_start_tokens: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Cumulative token position at which an explicit continuation "
+            "schedule begins. Required for continuation_decay."
+        ),
+    )
+
+    continuation_end_tokens: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Cumulative token position at which an explicit continuation "
+            "schedule ends. Required for continuation_decay."
+        ),
+    )
+
+    continuation_start_lr: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Learning rate at the first continuation update. Required for "
+            "continuation_decay."
+        ),
+    )
+
+    continuation_end_lr: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Learning rate at the final continuation update. Required for "
+            "continuation_decay."
+        ),
+    )
+
+    continuation_decay_type: Literal[
+        "linear",
+        "cosine",
+    ] = Field(
+        default="linear",
+        description="Interpolation used by continuation_decay.",
     )
 
 
@@ -453,6 +501,26 @@ class RuntimeConfig(BaseModel):
             "Current cumulative training stop target in tokens. "
             "For staged training this may increase from 1B -> 2B -> 5B. "
             "The LR horizon should be scheduler.horizon_tokens."
+        ),
+    )
+
+    resume_mode: Literal[
+        "normal",
+        "scheduler_fork",
+    ] = Field(
+        default="normal",
+        description=(
+            "normal resumes require exact scheduler compatibility; "
+            "scheduler_fork permits one explicit continuation schedule "
+            "from runtime.resume_from."
+        ),
+    )
+
+    resume_from: Optional[str] = Field(
+        default=None,
+        description=(
+            "Parent checkpoint directory for an explicit scheduler fork. "
+            "The current runtime.checkpoint_dir remains the output directory."
         ),
     )
 
