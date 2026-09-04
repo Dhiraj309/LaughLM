@@ -41,3 +41,20 @@ python -m pip check
 These inputs are candidate compatibility lanes, not production locks. Do not
 mix them with the legacy lane in one environment, and do not call them
 production-ready until G2-004 and the migration gates pass.
+
+After installing the pinned lock-tool input, generate the CPU and TPU locks
+from the repository root:
+
+```bash
+python -m pip install -r requirements/inputs/lock-tools-py312.in
+python -m scripts.generate_dependency_locks \
+  --input requirements/inputs/gen2-cpu-py312.in \
+  --output requirements/locks/gen2-cpu-py312.txt
+python -m scripts.generate_dependency_locks \
+  --input requirements/inputs/gen2-tpu-v5e-py312.in \
+  --output requirements/locks/gen2-tpu-v5e-py312.txt
+```
+
+The generator uses pip-tools backtracking resolution, requires a SHA-256 hash
+for every resolved package, records its exact version, and writes atomically.
+Use `--force` only when deliberately regenerating an existing lock.
