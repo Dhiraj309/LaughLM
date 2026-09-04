@@ -9,7 +9,7 @@ Orbax checkpointing.
 
 - Primary trainer: `scripts/train_tpu_optimized.py`
 - Primary hardware target: single TPU v5e-8 VM
-- Current 135M reference config: `configs/v5e_pmap_true135m_production.yaml`
+- Current production config: `configs/production/laughlm_v1_127m_4b.yaml`
 - Reference attention path: MHA `8/8` with SplashAttention
 - Validated fresh-training candidate: GQA `8/4`
 - Deferred until larger models: MaxText-style 3D tensor/sequence parallelism
@@ -22,6 +22,8 @@ must not be resumed with GQA settings, or vice versa.
 ## Documentation handoff
 
 - [`ROADMAP.md`](ROADMAP.md) - milestone status and acceptance gates
+- [`docs/data_pipeline/ROADMAP.md`](docs/data_pipeline/ROADMAP.md) - shared
+  data-pipeline and learning-integrity roadmap
 - [`docs/optimization/DECISION_LOG.md`](docs/optimization/DECISION_LOG.md) -
   selected, rejected, and deferred optimization decisions
 - [`docs/TPU_VALIDATION_RUNBOOK.md`](docs/TPU_VALIDATION_RUNBOOK.md) - TPU-only
@@ -193,6 +195,22 @@ Training downloads selected pre-tokenized `.bin` shards from Hugging Face.
 ```bash
 See the TPU validation runbook for the maintained shard-selection command.
 ```
+
+For a split-aware Stage-4 corpus produced by `data_clean`, point the trainer at
+the dataset repository and resolve its committed `ACTIVE.json` rather than
+manually counting shard IDs:
+
+```bash
+python -u -m scripts.train_tpu_optimized \
+  --config configs/production/laughlm_v1_127m_4b.yaml \
+  --hf-repo-id YOUR_STAGE4_TOKEN_REPO \
+  --hf-revision main \
+  --stage4-active
+```
+
+This validates the Stage-4 manifest vocabulary and storage dtype, downloads
+the exact train/validation shard lists, and records those paths in the run
+manifest. Build both `train` and `validation` Stage-4 outputs before using it.
 Output:
 
 dataset_shard.bin
@@ -209,7 +227,7 @@ Step 3 — Training
 Run training:
 ```bash
 python -u -m scripts.train_tpu_optimized \
-  --config configs/v5e_pmap_true135m_production.yaml
+  --config configs/production/laughlm_v1_127m_4b.yaml
 ```
 Training automatically handles:
 

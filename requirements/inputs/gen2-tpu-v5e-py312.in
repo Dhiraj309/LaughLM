@@ -1,0 +1,7 @@
+# LaughLM Gen-2 TPU v5e lane, Python 3.12+.
+#
+# The CPU input carries the common JAX/Flax/Optax/Orbax/Tokamax/XProf/Grain
+# stack. libtpu is deliberately TPU-lane-only and is not added to the stable
+# or Gen-2 CPU environment.
+-r gen2-cpu-py312.in
+libtpu==0.0.47

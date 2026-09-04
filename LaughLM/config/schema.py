@@ -257,6 +257,7 @@ class SchedulerConfig(BaseModel):
         "linear",
         "rsqrt",
         "wsd",
+        "continuation_decay",
     ]
 
     horizon_tokens: Optional[int] = Field(
@@ -299,6 +300,53 @@ class SchedulerConfig(BaseModel):
     decay_steps: Optional[int] = Field(
         default=None,
         ge=1,
+    )
+
+    # Explicit continuation schedule. These fields are intentionally separate
+    # from WSD so an ordinary checkpoint resume cannot silently reshape its LR
+    # curve. The parent checkpoint is validated by the trainer/checkpoint path.
+    continuation_start_tokens: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Cumulative token position at which an explicit continuation "
+            "schedule begins. Required for continuation_decay."
+        ),
+    )
+
+    continuation_end_tokens: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Cumulative token position at which an explicit continuation "
+            "schedule ends. Required for continuation_decay."
+        ),
+    )
+
+    continuation_start_lr: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Learning rate at the first continuation update. Required for "
+            "continuation_decay."
+        ),
+    )
+
+    continuation_end_lr: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Learning rate at the final continuation update. Required for "
+            "continuation_decay."
+        ),
+    )
+
+    continuation_decay_type: Literal[
+        "linear",
+        "cosine",
+    ] = Field(
+        default="linear",
+        description="Interpolation used by continuation_decay.",
     )
 
 
@@ -456,6 +504,26 @@ class RuntimeConfig(BaseModel):
         ),
     )
 
+    resume_mode: Literal[
+        "normal",
+        "scheduler_fork",
+    ] = Field(
+        default="normal",
+        description=(
+            "normal resumes require exact scheduler compatibility; "
+            "scheduler_fork permits one explicit continuation schedule "
+            "from runtime.resume_from."
+        ),
+    )
+
+    resume_from: Optional[str] = Field(
+        default=None,
+        description=(
+            "Parent checkpoint directory for an explicit scheduler fork. "
+            "The current runtime.checkpoint_dir remains the output directory."
+        ),
+    )
+
     eval_interval: int = Field(
         ...,
         ge=1,
@@ -534,6 +602,11 @@ class DataConfig(BaseModel):
 
     shard_directory: str = Field(default="fineweb_edu_100bt")
     shard_filename_prefix: str = Field(default="fineweb_edu_100bt_shard")
+    # Optional independent directories for train/validation corpora. When
+    # unset, both roles fall back to shard_directory for backward compatibility.
+    train_shard_directory: Optional[str] = Field(default=None)
+    validation_shard_directory: Optional[str] = Field(default=None)
+    validation_shard_filename_prefix: Optional[str] = Field(default=None)
     hf_repo_id: str = Field(
         default="LaughTaleAI/LaughLM-Tokenized-Fine",
         description="Hugging Face dataset repository containing tokenized shards.",
@@ -549,6 +622,15 @@ class DataConfig(BaseModel):
     hf_cache_dir: Optional[str] = Field(
         default=None,
         description="Optional Hugging Face cache directory for tokenized shard files.",
+    )
+    record_exposure_stats: bool = Field(
+        default=False,
+        description="Opt-in exact streaming token exposure statistics for provenance.",
+    )
+    exposure_chunk_tokens: int = Field(
+        default=1_000_000,
+        ge=1,
+        description="Bounded token count per exposure-statistics read.",
     )
 
 
@@ -598,6 +680,8 @@ class HardwareConfig(BaseModel):
 class MonitoringConfig(BaseModel):
     tensorboard: bool
     rich_terminal: bool
+    training_integrity: bool = False
+    integrity_interval: int = Field(default=0, ge=0)
 
 
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•

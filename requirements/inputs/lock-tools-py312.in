@@ -1,0 +1,4 @@
+# Build tooling for generating hash-complete dependency locks.
+# Keep this separate from the runtime inputs; pip-tools is not a LaughLM
+# runtime dependency.
+pip-tools==7.5.0

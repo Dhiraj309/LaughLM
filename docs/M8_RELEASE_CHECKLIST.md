@@ -7,14 +7,14 @@ environment and are not executed during local development.
 
 ```bash
 python -u -m scripts.train_tpu_optimized \
-  --config configs/v5e_pmap_true135m_production.yaml \
+  --config configs/production/laughlm_v1_127m_4b.yaml \
   --hf-repo-id LaughTaleAI/LaughLM-Tokenized-Fine \
   --hf-revision main \
-  --shard-directory fineweb-edu \
-  --shard-filename-prefix fineweb-edu_shard \
+  --shard-directory laughlm-v1 \
+  --shard-filename-prefix laughlm-v1_shard \
   --train-shard-start 0 \
-  --train-shard-count 28 \
-  --validation-shard-start 28 \
+  --train-shard-count 16 \
+  --validation-shard-start 16 \
   --validation-shard-count 2 \
   --fresh
 ```
@@ -28,8 +28,8 @@ latest checkpoint and native data-iterator state from the checkpoint directory.
 
 ```bash
 python -u -m LaughLM.export.export_hf \
-  --config configs/v5e_pmap_true135m_production.yaml \
-  --checkpoint_dir checkpoints/production/135M_true_h128 \
+  --config configs/production/laughlm_v1_127m_4b.yaml \
+  --checkpoint_dir checkpoints/production/laughlm_v1_127m_20b \
   --output_dir releases/laughlm-135m \
   --tokenizer_dir tokenizer
 ```
@@ -41,8 +41,8 @@ TPU-produced checkpoint or approved external CPU/HF validation environment.
 
 ```bash
 python -u scripts/audit_release_contract.py \
-  --config configs/v5e_pmap_true135m_production.yaml \
-  --checkpoint-dir checkpoints/production/135M_true_h128 \
+  --config configs/production/laughlm_v1_127m_4b.yaml \
+  --checkpoint-dir checkpoints/production/laughlm_v1_127m_20b \
   --export-dir releases/laughlm-135m \
   --benchmark-report reports/production_baseline.md \
   --parity-report reports/laughlm-135m-hf-parity.json \
@@ -64,8 +64,8 @@ Windows development environment:
 ```bash
 python -u -m LaughLM.export.validate_hf \
   --hf_dir releases/laughlm-135m \
-  --config configs/v5e_pmap_true135m_production.yaml \
-  --checkpoint_dir checkpoints/production/135M_true_h128 \
+  --config configs/production/laughlm_v1_127m_4b.yaml \
+  --checkpoint_dir checkpoints/production/laughlm_v1_127m_20b \
   --report reports/laughlm-135m-hf-parity.json
 ```
 
@@ -82,8 +82,8 @@ does not restore a checkpoint or import JAX:
 
 ```bash
 python -u scripts/build_release_bundle.py \
-  --config configs/v5e_pmap_true135m_production.yaml \
-  --checkpoint-dir checkpoints/production/135M_true_h128 \
+  --config configs/production/laughlm_v1_127m_4b.yaml \
+  --checkpoint-dir checkpoints/production/laughlm_v1_127m_20b \
   --export-dir releases/laughlm-135m \
   --audit-report releases/laughlm-135m/release_audit.json \
   --parity-report reports/laughlm-135m-hf-parity.json \

@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://laughtale.ai/schemas/runtime_manifest_v1.json",
+  "title": "LaughLM runtime environment manifest v1",
+  "type": "object",
+  "required": [
+    "manifest_schema",
+    "manifest_version",
+    "captured_at_utc",
+    "python",
+    "platform",
+    "package_versions",
+    "git_revision",
+    "git_dirty",
+    "config_path",
+    "config_sha256",
+    "jax"
+  ],
+  "properties": {
+    "manifest_schema": {
+      "const": "laughlm_runtime_manifest_v1"
+    },
+    "manifest_version": {
+      "const": 1
+    },
+    "captured_at_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "python": {
+      "type": "object",
+      "required": ["version", "implementation", "build"],
+      "properties": {
+        "version": {"type": "string"},
+        "implementation": {"type": "string"},
+        "build": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "platform": {
+      "type": "object",
+      "required": ["system", "release", "machine", "processor"],
+      "properties": {
+        "system": {"type": "string"},
+        "release": {"type": "string"},
+        "machine": {"type": "string"},
+        "processor": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "package_versions": {
+      "type": "object",
+      "required": [
+        "jax",
+        "jaxlib",
+        "libtpu",
+        "flax",
+        "optax",
+        "orbax-checkpoint",
+        "tokamax",
+        "xprof",
+        "grain",
+        "pydantic"
+      ],
+      "additionalProperties": {
+        "type": ["string", "null"]
+      }
+    },
+    "git_revision": {
+      "type": ["string", "null"]
+    },
+    "git_dirty": {
+      "type": ["boolean", "null"]
+    },
+    "config_path": {
+      "type": ["string", "null"]
+    },
+    "config_sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "jax": {
+      "type": "object",
+      "required": ["available", "version", "backend", "x64_enabled", "devices"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "version": {"type": ["string", "null"]},
+        "backend": {"type": ["string", "null"]},
+        "x64_enabled": {"type": ["boolean", "null"]},
+        "process_index": {"type": ["integer", "null"]},
+        "process_count": {"type": ["integer", "null"]},
+        "devices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "platform", "kind", "process_index"],
+            "properties": {
+              "id": {"type": ["integer", "null"]},
+              "platform": {"type": "string"},
+              "kind": {"type": "string"},
+              "process_index": {"type": ["integer", "null"]}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

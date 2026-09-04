@@ -124,6 +124,15 @@ def _tokens_per_step(
 
 
 def _scheduler_horizon_tokens(config) -> int:
+    if getattr(config.scheduler, "type", None) == "continuation_decay":
+        end_tokens = getattr(
+            config.scheduler,
+            "continuation_end_tokens",
+            None,
+        )
+        if end_tokens is not None:
+            return int(end_tokens)
+
     horizon_tokens = getattr(
         config.scheduler,
         "horizon_tokens",
@@ -222,6 +231,29 @@ def _scheduler_metadata(
         ),
         "min_lr_ratio": float(
             config.scheduler.min_lr_ratio
+        ),
+        "continuation_start_tokens": (
+            None
+            if config.scheduler.continuation_start_tokens is None
+            else int(config.scheduler.continuation_start_tokens)
+        ),
+        "continuation_end_tokens": (
+            None
+            if config.scheduler.continuation_end_tokens is None
+            else int(config.scheduler.continuation_end_tokens)
+        ),
+        "continuation_start_lr": (
+            None
+            if config.scheduler.continuation_start_lr is None
+            else float(config.scheduler.continuation_start_lr)
+        ),
+        "continuation_end_lr": (
+            None
+            if config.scheduler.continuation_end_lr is None
+            else float(config.scheduler.continuation_end_lr)
+        ),
+        "continuation_decay_type": str(
+            config.scheduler.continuation_decay_type
         ),
     }
 

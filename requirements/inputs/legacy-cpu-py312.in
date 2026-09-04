@@ -1,0 +1,6 @@
+# LaughLM stable CPU/developer lane.
+#
+# Generate a complete, hashed lock from this input in G2-004. Until then,
+# requirements/locks/legacy-cpu-py312.txt is the checked-in baseline constraint
+# set for the versions already promised by pyproject.toml.
+-e .[dev]

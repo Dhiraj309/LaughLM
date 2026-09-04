@@ -44,6 +44,7 @@ from LaughLM.training.train_step import (
 from LaughLM.training.logger import TrainingLogger
 from LaughLM.utils.checkpoint_factory import create_checkpoint_manager
 from LaughLM.training.train_state import TrainState
+from LaughLM.training.integrity import state_integrity
 
 from LaughLM.distributed.sharding import device_put_replicated
 from LaughLM.profiling.core.profiler import Profiler
@@ -66,6 +67,51 @@ def _unreplicate(tree):
     )
 
 
+def _validate_checkpoint_sidecar(
+    *,
+    checkpoint_dir: str | Path,
+    expected_step: int,
+    expected_tokens: int,
+) -> dict:
+    """Require the final checkpoint metadata needed by strict HF export."""
+
+    sidecar_path = (
+        Path(checkpoint_dir).expanduser().resolve()
+        / "checkpoint_metadata"
+        / f"step_{int(expected_step):08d}.json"
+    )
+    if not sidecar_path.is_file():
+        raise RuntimeError(
+            "Final checkpoint is not export-ready: metadata sidecar missing.\n"
+            f"  expected: {sidecar_path}"
+        )
+
+    with sidecar_path.open("r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+
+    mismatches = []
+    if metadata.get("format") != "laughlm_checkpoint_v3":
+        mismatches.append(
+            f"format={metadata.get('format')!r}"
+        )
+    if int(metadata.get("step", -1)) != int(expected_step):
+        mismatches.append(
+            f"step={metadata.get('step')!r}"
+        )
+    if int(metadata.get("tokens_processed", -1)) != int(expected_tokens):
+        mismatches.append(
+            f"tokens_processed={metadata.get('tokens_processed')!r}"
+        )
+
+    if mismatches:
+        raise RuntimeError(
+            "Final checkpoint metadata is not export-ready.\n  "
+            + "\n  ".join(mismatches)
+        )
+
+    return metadata
+
+
 class Trainer:
     def __init__(
         self,
@@ -76,6 +122,17 @@ class Trainer:
         self.config = config
         self.profiler = profiler or Profiler.from_config(config)
         self._device_memory_profile_captured = False
+        self._training_integrity_enabled = bool(
+            getattr(config.monitoring, "training_integrity", False)
+        )
+        configured_integrity_interval = int(
+            getattr(config.monitoring, "integrity_interval", 0)
+        )
+        self._training_integrity_interval = max(
+            1,
+            configured_integrity_interval or int(config.runtime.log_interval),
+        )
+        self._previous_integrity = None
 
         self.num_devices = jax.local_device_count()
         self.devices = jax.local_devices()
@@ -140,9 +197,18 @@ class Trainer:
         # Checkpoints
         # ====================================================
 
+        fork_requested = (
+            config.runtime.resume_mode == "scheduler_fork"
+        )
+
+        # The output directory is always config.runtime.checkpoint_dir. A
+        # scheduler fork restores once from runtime.resume_from, then writes
+        # only to the new output directory. Normal resumes retain the legacy
+        # resume_dir behavior used by existing scripts.
         ckpt_dir = (
-            resume_dir
-            or config.runtime.checkpoint_dir
+            config.runtime.checkpoint_dir
+            if fork_requested
+            else (resume_dir or config.runtime.checkpoint_dir)
         )
 
         self.checkpoints = create_checkpoint_manager(
@@ -155,11 +221,35 @@ class Trainer:
             config.runtime.checkpoint_interval
         )
 
-        resume_step = self.checkpoints.latest_step()
+        output_resume_step = self.checkpoints.latest_step()
+        self._scheduler_fork_initial = bool(
+            fork_requested and output_resume_step is None
+        )
+
+        if self._scheduler_fork_initial:
+            parent_dir = config.runtime.resume_from
+            if not parent_dir:
+                raise ValueError(
+                    "scheduler_fork requires runtime.resume_from."
+                )
+            self._restore_checkpoints = create_checkpoint_manager(
+                config,
+                parent_dir,
+                max_to_keep=config.runtime.checkpoint_max_to_keep,
+            )
+        else:
+            self._restore_checkpoints = self.checkpoints
+
+        resume_step = self._restore_checkpoints.latest_step()
+        if self._scheduler_fork_initial and resume_step is None:
+            raise RuntimeError(
+                "scheduler_fork parent checkpoint directory has no checkpoint: "
+                f"{config.runtime.resume_from}"
+            )
         resume_metadata = (
             None
             if resume_step is None
-            else self.checkpoints.load_metadata(resume_step)
+            else self._restore_checkpoints.load_metadata(resume_step)
         )
 
         # Checkpoints written before M3 stored this scalar as int32. Restore
@@ -266,13 +356,17 @@ class Trainer:
             rng_key=self.rng.key,
         )
 
-        restored = self.checkpoints.restore_latest(
+        restored = self._restore_checkpoints.restore_latest(
             target_state=state,
             config=config,
             num_devices=self.num_devices,
             require_metadata=True,
             require_v3=True,
-            purpose="pmap_resume",
+            purpose=(
+                "pmap_scheduler_fork"
+                if self._scheduler_fork_initial
+                else "pmap_resume"
+            ),
         )
 
         tokens_per_step_for_resume = (
@@ -287,7 +381,7 @@ class Trainer:
 
             self.start_step = int(state.step)
 
-            metadata = self.checkpoints.load_metadata(
+            metadata = self._restore_checkpoints.load_metadata(
                 restored_step
             )
 
@@ -303,15 +397,24 @@ class Trainer:
 
             self._resume_iterator_state = (
                 None
-                if metadata is None
+                if self._scheduler_fork_initial or metadata is None
                 else metadata.get("data_iterator")
             )
+
+            if self._scheduler_fork_initial:
+                print(
+                    "[trainer] scheduler fork: resetting data iterator for "
+                    "the continuation shard pool",
+                    flush=True,
+                )
 
             if self._resume_iterator_state is None:
                 self._resume_iterator_state = {
                     "mode": "deterministic_batch_index_v1",
                     "next_batch_index": (
-                        int(self.start_step) * int(self.grad_accum)
+                        0
+                        if self._scheduler_fork_initial
+                        else int(self.start_step) * int(self.grad_accum)
                     ),
                 }
                 print(
@@ -444,6 +547,30 @@ class Trainer:
             self._device_memory_profile_captured = True
 
         return memory_stats
+
+    def _maybe_capture_training_integrity(self, *, step: int):
+        """Capture sparse host-side state evidence when explicitly enabled."""
+        if (
+            not self._training_integrity_enabled
+            or step % self._training_integrity_interval != 0
+        ):
+            return None
+        host_state = _unreplicate(self.state)
+        diagnostics = state_integrity(host_state.params, host_state.opt_state)
+        previous = self._previous_integrity
+        diagnostics["parameter_changed_since_capture"] = (
+            None
+            if previous is None
+            else diagnostics["parameter_checksum"] != previous["parameter_checksum"]
+        )
+        diagnostics["optimizer_state_changed_since_capture"] = (
+            None
+            if previous is None
+            else diagnostics["optimizer_state_checksum"]
+            != previous["optimizer_state_checksum"]
+        )
+        self._previous_integrity = diagnostics
+        return diagnostics
 
 
     def train(
@@ -649,6 +776,9 @@ class Trainer:
                     )
 
                     current_step += 1
+                    integrity_metrics = self._maybe_capture_training_integrity(
+                        step=current_step,
+                    )
                     memory_stats = self._maybe_capture_device_memory_profile(
                         step=current_step,
                     )
@@ -679,6 +809,7 @@ class Trainer:
                         tokens_in_step=tokens_per_step,
                         step_time=step_time,
                         timing_breakdown=timing_breakdown,
+                        integrity=integrity_metrics,
                     )
 
                     if (
@@ -697,6 +828,7 @@ class Trainer:
                             tokens_in_step=tokens_per_step,
                             step_time=step_time,
                             timing_breakdown=timing_breakdown,
+                            integrity=integrity_metrics,
                         )
 
                     # ============================================
@@ -848,6 +980,30 @@ class Trainer:
             wait_start = time.perf_counter()
             self.checkpoints.wait()
             completion_wait_time = time.perf_counter() - wait_start
+
+            latest_step = self.checkpoints.latest_step()
+            if latest_step is None or int(latest_step) != int(final_step):
+                raise RuntimeError(
+                    "Final checkpoint is not export-ready: latest Orbax step "
+                    f"is {latest_step!r}, expected {final_step}."
+                )
+
+            if jax.process_index() == 0:
+                _validate_checkpoint_sidecar(
+                    checkpoint_dir=self.config.runtime.checkpoint_dir,
+                    expected_step=final_step,
+                    expected_tokens=final_tokens_seen,
+                )
+                print(
+                    "[trainer] final checkpoint is v3 metadata-complete and "
+                    "ready for strict Hugging Face export",
+                    flush=True,
+                )
+
+            jax.experimental.multihost_utils.sync_global_devices(
+                "checkpoint-final-export-ready"
+            )
+
             self.logger.log_checkpoint_timing(
                 step=final_step,
                 tokens_processed=final_tokens_seen,
@@ -874,3 +1030,9 @@ class Trainer:
                 self.checkpoints.close()
             else:
                 self.checkpoints.wait()
+
+            if self._restore_checkpoints is not self.checkpoints:
+                if hasattr(self._restore_checkpoints, "close"):
+                    self._restore_checkpoints.close()
+                else:
+                    self._restore_checkpoints.wait()

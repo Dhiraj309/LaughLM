@@ -31,13 +31,16 @@ import jax
 from huggingface_hub import hf_hub_download
 
 from LaughLM.config.loader import load_config
+from LaughLM.data.exposure import summarize_token_paths
+from LaughLM.data.fixed_batch import FixedBatchDataLoader
+from LaughLM.data.manifest_contract import build_artifact_contract, canonical_hash
 from LaughLM.training.trainer import Trainer
 # --- NEW IMPORTS ---
 from LaughLM.utils.data_factory import create_dataloader
 # -------------------
 
 
-DEFAULT_CONFIG = "configs/v5e_pmap_optimized.yaml"
+DEFAULT_CONFIG = "configs/production/laughlm_v1_127m_4b.yaml"
 
 
 def _configure_persistent_compilation_cache(config) -> None:
@@ -186,6 +189,11 @@ def parse_args():
             "record an explicit cold-cache run in the manifest."
         ),
     )
+    parser.add_argument(
+        "--overfit-smoke",
+        action="store_true",
+        help="Repeat one captured training batch for the fixed-batch smoke gate.",
+    )
 
     parser.add_argument(
         "--hf-repo-id",
@@ -206,10 +214,28 @@ def parse_args():
         help="Override data.shard_directory, for example fineweb-edu.",
     )
     parser.add_argument(
+        "--train-shard-directory",
+        type=str,
+        default=None,
+        help="Override data.train_shard_directory for training files.",
+    )
+    parser.add_argument(
+        "--validation-shard-directory",
+        type=str,
+        default=None,
+        help="Override data.validation_shard_directory for validation files.",
+    )
+    parser.add_argument(
         "--shard-filename-prefix",
         type=str,
         default=None,
         help="Override data.shard_filename_prefix, for example fineweb-edu_shard.",
+    )
+    parser.add_argument(
+        "--validation-shard-filename-prefix",
+        type=str,
+        default=None,
+        help="Override data.validation_shard_filename_prefix.",
     )
     parser.add_argument(
         "--train-shard-start",
@@ -234,6 +260,23 @@ def parse_args():
         type=int,
         default=None,
         help="Number of consecutive held-out validation shard files to download.",
+    )
+    parser.add_argument(
+        "--stage4-train-manifest",
+        type=str,
+        default=None,
+        help="Repository-relative Stage-4 train corpus_manifest.json. Overrides numbered shard selection.",
+    )
+    parser.add_argument(
+        "--stage4-validation-manifest",
+        type=str,
+        default=None,
+        help="Repository-relative Stage-4 validation corpus_manifest.json. Overrides numbered shard selection.",
+    )
+    parser.add_argument(
+        "--stage4-active",
+        action="store_true",
+        help="Resolve train and validation manifests from the dataset repository's ACTIVE.json.",
     )
 
     return parser.parse_args()
@@ -383,7 +426,10 @@ def _apply_data_source_overrides(data_cfg, args) -> None:
         "hf_repo_id": args.hf_repo_id,
         "hf_revision": args.hf_revision,
         "shard_directory": args.shard_directory,
+        "train_shard_directory": args.train_shard_directory,
+        "validation_shard_directory": args.validation_shard_directory,
         "shard_filename_prefix": args.shard_filename_prefix,
+        "validation_shard_filename_prefix": args.validation_shard_filename_prefix,
         "train_shard_start": args.train_shard_start,
         "train_shard_count": args.train_shard_count,
         "validation_shard_start": args.validation_shard_start,
@@ -406,6 +452,47 @@ def _apply_data_source_overrides(data_cfg, args) -> None:
 
     # Hugging Face filenames are repository-relative, never absolute paths.
     data_cfg.shard_directory = data_cfg.shard_directory.strip("/")
+    for field_name in ("train_shard_directory", "validation_shard_directory"):
+        value = getattr(data_cfg, field_name, None)
+        if value is not None:
+            value = value.strip("/")
+            if not value:
+                raise ValueError(f"data.{field_name} must be non-empty when provided.")
+            setattr(data_cfg, field_name, value)
+    validation_prefix = getattr(data_cfg, "validation_shard_filename_prefix", None)
+    if validation_prefix is not None:
+        validation_prefix = validation_prefix.strip()
+        if not validation_prefix:
+            raise ValueError(
+                "data.validation_shard_filename_prefix must be non-empty when provided."
+            )
+        data_cfg.validation_shard_filename_prefix = validation_prefix
+
+
+def _resolve_stage4_manifest_shards(manifest_remote, label, download_kwargs, vocab_size):
+    """Download and validate one committed Stage-4 manifest, returning shard paths."""
+    local_manifest = hf_hub_download(filename=manifest_remote, **download_kwargs)
+    manifest = json.loads(Path(local_manifest).read_text(encoding="utf-8"))
+    if manifest.get("stage") != 4 or manifest.get("processing_status") != "committed":
+        raise ValueError(f"{label} Stage-4 manifest is not a committed stage=4 artifact: {manifest_remote}")
+    tokenizer_contract = manifest.get("tokenizer_contract") or {}
+    actual_vocab = tokenizer_contract.get("vocab_size")
+    if int(actual_vocab or -1) != int(vocab_size):
+        raise ValueError(
+            f"{label} Stage-4 tokenizer vocab mismatch: manifest={actual_vocab}, model={vocab_size}"
+        )
+    expected_dtype = "uint16" if int(vocab_size) <= 65_536 else "uint64"
+    if str(manifest.get("dtype")) != expected_dtype:
+        raise ValueError(
+            f"{label} Stage-4 dtype mismatch: manifest={manifest.get('dtype')}, expected={expected_dtype}"
+        )
+    shards = manifest.get("shards") or []
+    paths = [str(item.get("path", "")) for item in shards]
+    if not paths or any(not path.endswith(".bin") for path in paths):
+        raise ValueError(f"{label} Stage-4 manifest has no valid .bin shards: {manifest_remote}")
+    if len(paths) != len(set(paths)):
+        raise ValueError(f"{label} Stage-4 manifest lists duplicate shard paths: {manifest_remote}")
+    return paths
 
 
 def _write_run_manifest(
@@ -419,12 +506,13 @@ def _write_run_manifest(
     num_devices: int,
     compilation_cache: dict,
     loss_contract: dict,
+    overfit_batch_checksum: str | None = None,
 ) -> None:
     """Persist the resolved inputs needed to compare TPU runs later."""
     if jax.process_index() != 0:
         return
 
-    token_dtype = "uint16" if int(config.model.vocab_size) <= 65535 else "uint64"
+    token_dtype = "uint16" if int(config.model.vocab_size) <= 65536 else "uint64"
     token_itemsize = 2 if token_dtype == "uint16" else 8
 
     def shard_details(paths):
@@ -447,6 +535,32 @@ def _write_run_manifest(
                 detail["error"] = f"stat failed: {type(exc).__name__}: {exc}"
             details.append(detail)
         return details
+
+    exposure = {"enabled": False}
+    if bool(getattr(config.data, "record_exposure_stats", False)):
+        chunk_tokens = int(
+            getattr(config.data, "exposure_chunk_tokens", 1_000_000)
+        )
+        exposure = {
+            "enabled": True,
+            "chunk_tokens": chunk_tokens,
+            "train": summarize_token_paths(
+                train_paths,
+                dtype=token_dtype,
+                vocab_size=int(config.model.vocab_size),
+                chunk_tokens=chunk_tokens,
+            ),
+            "validation": (
+                summarize_token_paths(
+                    validation_paths,
+                    dtype=token_dtype,
+                    vocab_size=int(config.model.vocab_size),
+                    chunk_tokens=chunk_tokens,
+                )
+                if validation_paths
+                else None
+            ),
+        }
 
     package_names = (
         "jax",
@@ -478,7 +592,35 @@ def _write_run_manifest(
     except OSError:
         pass
 
+    dataset_id = str(getattr(config.data, "hf_repo_id", "unknown"))
+    dataset_revision = getattr(config.data, "hf_revision", None) or "main"
+    run_id = Path(config.runtime.checkpoint_dir).expanduser().name
+    resolved_config = config.model_dump(mode="json")
     manifest = {
+        "artifact_contract": build_artifact_contract(
+            artifact_type="training_run",
+            stage="training",
+            dataset_id=dataset_id,
+            run_id=run_id,
+            config_hash=canonical_hash(resolved_config),
+            source_refs=[
+                {
+                    "split": "train",
+                    "revision": dataset_revision,
+                    "paths": train_files,
+                },
+                {
+                    "split": "validation",
+                    "revision": dataset_revision,
+                    "paths": validation_files,
+                },
+            ],
+            attributes={
+                "dataset_revision": dataset_revision,
+                "tokenizer_vocab_size": int(config.model.vocab_size),
+                "token_dtype": token_dtype,
+            },
+        ),
         "manifest_version": 2,
         "python": sys.version,
         "platform": platform.platform(),
@@ -486,7 +628,7 @@ def _write_run_manifest(
         "git_revision": git_revision,
         "config_path": str(Path(args.config).expanduser().resolve()),
         "cli_args": vars(args),
-        "resolved_config": config.model_dump(mode="json"),
+        "resolved_config": resolved_config,
         "jax": {
             "devices": [str(device) for device in jax.devices()],
             "local_device_count": int(num_devices),
@@ -512,6 +654,29 @@ def _write_run_manifest(
             "dispatch_confirmation": "startup/log evidence required",
         },
         "loss_contract": loss_contract,
+        "training_integrity": {
+            "enabled": bool(
+                getattr(config.monitoring, "training_integrity", False)
+            ),
+            "interval": int(
+                getattr(config.monitoring, "integrity_interval", 0)
+            ),
+            "diagnostics": [
+                "parameter_checksum",
+                "parameter_l2_norm",
+                "optimizer_state_checksum",
+                "optimizer_state_l2_norm",
+                "parameter_changed_since_capture",
+                "optimizer_state_changed_since_capture",
+            ],
+        },
+        "training_gates": {
+            "overfit_smoke": {
+                "enabled": bool(getattr(args, "overfit_smoke", False)),
+                "mode": "fixed_batch_v1" if overfit_batch_checksum else None,
+                "batch_checksum": overfit_batch_checksum,
+            },
+        },
         "compilation_cache": compilation_cache,
         "data": {
             "token_dtype": token_dtype,
@@ -524,6 +689,7 @@ def _write_run_manifest(
             "validation_files": validation_files,
             "train_shard_details": shard_details(train_paths),
             "validation_shard_details": shard_details(validation_paths),
+            "exposure": exposure,
         },
     }
 
@@ -555,6 +721,9 @@ def _write_run_manifest(
 def main():
     args = parse_args()
 
+    if args.overfit_smoke and not args.fresh:
+        raise ValueError("--overfit-smoke requires --fresh for a clean gate run.")
+
     print(
         f"JAX devices: {jax.devices()}",
         flush=True,
@@ -571,37 +740,59 @@ def main():
 
     data_cfg = config.data
     _apply_data_source_overrides(data_cfg, args)
+    manifest_mode = bool(args.stage4_active or args.stage4_train_manifest or args.stage4_validation_manifest)
+    if args.stage4_active and (args.stage4_train_manifest or args.stage4_validation_manifest):
+        raise ValueError("--stage4-active cannot be combined with explicit Stage-4 manifest paths")
+    if manifest_mode and not args.stage4_active and not args.stage4_train_manifest:
+        raise ValueError("--stage4-validation-manifest requires --stage4-train-manifest")
     train_start = int(data_cfg.train_shard_start)
     train_count = int(data_cfg.train_shard_count)
     validation_count = int(data_cfg.validation_shard_count)
     validation_start = data_cfg.validation_shard_start
 
-    if validation_count and validation_start is None:
-        raise ValueError(
-            "data.validation_shard_start is required when validation_shard_count > 0"
+    if not manifest_mode:
+        if validation_count and validation_start is None:
+            raise ValueError(
+                "data.validation_shard_start is required when validation_shard_count > 0"
+            )
+        train_ids = list(range(train_start, train_start + train_count))
+        validation_ids = (
+            list(range(int(validation_start), int(validation_start) + validation_count))
+            if validation_count
+            else []
         )
+        overlap = set(train_ids).intersection(validation_ids)
+        if overlap:
+            raise ValueError(
+                f"Train/validation shard overlap is not allowed: {sorted(overlap)}"
+            )
+    else:
+        train_ids, validation_ids = [], []
 
-    train_ids = list(range(train_start, train_start + train_count))
-    validation_ids = (
-        list(range(int(validation_start), int(validation_start) + validation_count))
-        if validation_count
-        else []
+    train_directory = (
+        data_cfg.train_shard_directory or data_cfg.shard_directory
     )
-    overlap = set(train_ids).intersection(validation_ids)
-    if overlap:
-        raise ValueError(
-            f"Train/validation shard overlap is not allowed: {sorted(overlap)}"
-        )
+    validation_directory = (
+        data_cfg.validation_shard_directory or data_cfg.shard_directory
+    )
+    validation_prefix = (
+        data_cfg.validation_shard_filename_prefix
+        or data_cfg.shard_filename_prefix
+    )
 
-    def _shard_name(shard_id: int) -> str:
+    def _shard_name(directory: str, prefix: str, shard_id: int) -> str:
         return (
-            f"{data_cfg.shard_directory}/"
-            f"{data_cfg.shard_filename_prefix}_{shard_id:05d}.bin"
+            f"{directory}/"
+            f"{prefix}_{shard_id:05d}.bin"
         )
 
-    train_files = [_shard_name(shard_id) for shard_id in train_ids]
+    train_files = [
+        _shard_name(train_directory, data_cfg.shard_filename_prefix, shard_id)
+        for shard_id in train_ids
+    ]
     validation_files = [
-        _shard_name(shard_id) for shard_id in validation_ids
+        _shard_name(validation_directory, validation_prefix, shard_id)
+        for shard_id in validation_ids
     ]
 
     cache_dir = data_cfg.hf_cache_dir
@@ -615,13 +806,32 @@ def main():
         f"{data_cfg.hf_repo_id} @ {resolved_revision}",
         flush=True,
     )
-    print(
-        "[data] shard selector: "
-        f"folder={data_cfg.shard_directory}, "
-        f"prefix={data_cfg.shard_filename_prefix}, "
-        f"train={train_start}:{train_start + train_count - 1}",
-        flush=True,
-    )
+    if manifest_mode:
+        print(
+            "[data] Stage-4 manifest selector: "
+            f"train={args.stage4_train_manifest or ('ACTIVE.json' if args.stage4_active else 'missing')}, "
+            f"validation={args.stage4_validation_manifest or ('ACTIVE.json' if args.stage4_active else 'none')}",
+            flush=True,
+        )
+    else:
+        print(
+            "[data] shard selector: "
+            f"train_folder={train_directory}, "
+            f"train_prefix={data_cfg.shard_filename_prefix}, "
+            f"train={train_start}:{train_start + train_count - 1}, "
+            f"validation_folder={validation_directory}, "
+            f"validation_prefix={validation_prefix}, "
+            f"validation={validation_start}:{int(validation_start) + validation_count - 1}"
+            if validation_count
+            else (
+                "[data] shard selector: "
+                f"train_folder={train_directory}, "
+                f"train_prefix={data_cfg.shard_filename_prefix}, "
+                f"train={train_start}:{train_start + train_count - 1}, "
+                "validation=disabled"
+            ),
+            flush=True,
+        )
     if data_cfg.hf_revision:
         download_kwargs["revision"] = data_cfg.hf_revision
     if cache_dir:
@@ -632,6 +842,37 @@ def main():
             f"[data] Hugging Face cache directory: {cache_path}",
             flush=True,
         )
+
+    if manifest_mode:
+        train_manifest_remote = args.stage4_train_manifest
+        validation_manifest_remote = args.stage4_validation_manifest
+        if args.stage4_active:
+            active_local = hf_hub_download(filename="ACTIVE.json", **download_kwargs)
+            active = json.loads(Path(active_local).read_text(encoding="utf-8"))
+            outputs = active.get("outputs") or {}
+            train_manifest_remote = (outputs.get("train") or {}).get("manifest")
+            validation_manifest_remote = (outputs.get("validation") or {}).get("manifest")
+            if not train_manifest_remote:
+                raise ValueError("Stage-4 ACTIVE.json does not define a train output manifest")
+        train_files = _resolve_stage4_manifest_shards(
+            train_manifest_remote,
+            "train",
+            download_kwargs,
+            config.model.vocab_size,
+        )
+        validation_files = (
+            _resolve_stage4_manifest_shards(
+                validation_manifest_remote,
+                "validation",
+                download_kwargs,
+                config.model.vocab_size,
+            )
+            if validation_manifest_remote
+            else []
+        )
+        overlap = set(train_files).intersection(validation_files)
+        if overlap:
+            raise ValueError(f"Stage-4 train/validation shard overlap is not allowed: {sorted(overlap)}")
 
     def _download(files, label: str):
         print(
@@ -730,6 +971,10 @@ def main():
         process_index=jax.process_index(),
         process_count=jax.process_count(),
     )
+    overfit_batch_checksum = None
+    if args.overfit_smoke:
+        dataset = FixedBatchDataLoader(dataset)
+        overfit_batch_checksum = dataset.batch_checksum
     # ------------------------------------
 
     trainer = Trainer(
@@ -750,6 +995,7 @@ def main():
         num_devices=num_devices,
         compilation_cache=compilation_cache,
         loss_contract=loss_contract,
+        overfit_batch_checksum=overfit_batch_checksum,
     )
 
     eval_dataset = (

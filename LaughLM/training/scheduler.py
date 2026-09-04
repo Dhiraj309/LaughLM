@@ -123,6 +123,15 @@ def get_scheduler_horizon_tokens(
         scheduler.horizon_tokens  = LR schedule horizon
     """
 
+    if config.scheduler.type == "continuation_decay":
+        end_tokens = getattr(
+            config.scheduler,
+            "continuation_end_tokens",
+            None,
+        )
+        if end_tokens is not None:
+            return int(end_tokens)
+
     horizon_tokens = getattr(
         config.scheduler,
         "horizon_tokens",
@@ -615,6 +624,70 @@ def build_wsd_scheduler(
     )
 
 
+def build_continuation_decay_scheduler(
+    config: LaughLMConfig,
+    num_devices: int | None = None,
+) -> Callable:
+    """Build an absolute-step LR continuation from a parent checkpoint.
+
+    Unlike WSD, this schedule has no warmup and does not reconstruct the
+    parent schedule from a new horizon. The optimizer count is the restored
+    absolute step, so the first update after the fork uses start_lr exactly.
+    """
+
+    scheduler = config.scheduler
+    required = {
+        "continuation_start_tokens": scheduler.continuation_start_tokens,
+        "continuation_end_tokens": scheduler.continuation_end_tokens,
+        "continuation_start_lr": scheduler.continuation_start_lr,
+        "continuation_end_lr": scheduler.continuation_end_lr,
+    }
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        raise ValueError(
+            "continuation_decay requires: " + ", ".join(missing)
+        )
+
+    tokens_per_step = compute_tokens_per_step(config, num_devices)
+    start_step = int(scheduler.continuation_start_tokens) // tokens_per_step
+    end_step = int(scheduler.continuation_end_tokens) // tokens_per_step
+    extension_steps = end_step - start_step
+    if extension_steps <= 0:
+        raise ValueError(
+            "continuation_decay must span at least one optimizer step: "
+            f"start_step={start_step}, end_step={end_step}"
+        )
+
+    start_lr = float(scheduler.continuation_start_lr)
+    end_lr = float(scheduler.continuation_end_lr)
+    decay_type = str(scheduler.continuation_decay_type)
+
+    print(
+        "[scheduler] continuation-decay phases:\n"
+        f"  start_step: {start_step:,}\n"
+        f"  end_step:   {end_step:,}\n"
+        f"  start_lr:   {start_lr:.8g}\n"
+        f"  end_lr:     {end_lr:.8g}\n"
+        f"  type:       {decay_type}",
+        flush=True,
+    )
+
+    def schedule(step):
+        step_f = jnp.asarray(step, dtype=jnp.float32)
+        progress = jnp.clip(
+            (step_f - float(start_step)) / float(extension_steps),
+            0.0,
+            1.0,
+        )
+        if decay_type == "cosine":
+            progress = 0.5 * (1.0 - jnp.cos(jnp.pi * progress))
+        return jnp.asarray(start_lr, dtype=jnp.float32) + (
+            jnp.asarray(end_lr - start_lr, dtype=jnp.float32) * progress
+        )
+
+    return schedule
+
+
 # ------------------------------------------------------------
 # Dispatcher
 # ------------------------------------------------------------
@@ -662,7 +735,13 @@ def build_scheduler(
             num_devices,
         )
 
+    if sched_type == "continuation_decay":
+        return build_continuation_decay_scheduler(
+            config,
+            num_devices,
+        )
+
     raise ValueError(
         f"Unknown scheduler type: '{sched_type}'. "
-        "Valid options: cosine, linear, rsqrt, wsd."
+        "Valid options: cosine, linear, rsqrt, wsd, continuation_decay."
     )

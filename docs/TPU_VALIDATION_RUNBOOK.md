@@ -12,15 +12,15 @@ Use the selected two training and three validation shards:
 mkdir -p reports
 
 python -u -m scripts.train_tpu_optimized \
-  --config configs/v5e_pmap_true135m_production.yaml \
+  --config configs/production/laughlm_v1_127m_4b.yaml \
   --hf-repo-id LaughTaleAI/LaughLM-Tokenized-Fine \
   --hf-revision main \
-  --shard-directory fineweb-edu \
-  --shard-filename-prefix fineweb-edu_shard \
+  --shard-directory laughlm-v1 \
+  --shard-filename-prefix laughlm-v1_shard \
   --train-shard-start 0 \
   --train-shard-count 2 \
   --validation-shard-start 2 \
-  --validation-shard-count 3 \
+  --validation-shard-count 2 \
   --max_steps 60 \
   --fresh \
   --clear-compilation-cache 2>&1 | tee reports/tpu_gate1_cold.log
@@ -37,19 +37,19 @@ After Gate 1 completes, run these read-only audits:
 
 ```bash
 python -u scripts/audit_checkpoint_artifacts.py \
-  --checkpoint-dir checkpoints/production/135M_true_h128 \
-  --expected-max-to-keep 1 \
+  --checkpoint-dir checkpoints/production/laughlm_v1_127m_20b \
+  --expected-max-to-keep 2 \
   --require-run-manifest \
   --output reports/tpu_gate1_checkpoint_audit.json
 
 python -u scripts/audit_checkpoint_compatibility.py \
-  --config configs/v5e_pmap_true135m_production.yaml \
-  --checkpoint-dir checkpoints/production/135M_true_h128 \
+  --config configs/production/laughlm_v1_127m_4b.yaml \
+  --checkpoint-dir checkpoints/production/laughlm_v1_127m_20b \
   --expected-num-devices 8 \
   --output reports/tpu_gate1_compatibility.json
 
 python -u scripts/audit_run_artifacts.py \
-  --run-dir checkpoints/production/135M_true_h128 \
+  --run-dir checkpoints/production/laughlm_v1_127m_20b \
   --require-checkpoint-timings \
   --output reports/tpu_gate1_run_audit.json
 ```
@@ -89,6 +89,40 @@ metrics, checkpoint timings, memory profile, and TPU log. Use the candidate
 evaluator before accepting a change. Perform export, HF parity, release audit,
 bundle creation, and readiness aggregation only after the final configuration
 has been selected.
+
+## Deferred M6 gate: training-integrity evidence
+
+Training-integrity diagnostics and exposure scans are disabled in the
+production configuration. They are opt-in because they periodically
+materialize state or scan token shards on the host. After the static roadmap
+work is complete, enable them only for a short, explicitly labeled evidence
+run:
+
+```yaml
+data:
+  record_exposure_stats: true
+monitoring:
+  training_integrity: true
+  integrity_interval: 10
+```
+
+For the fixed-batch smoke gate, add `--overfit-smoke` and use
+`--max_steps 20 --fresh`. Preserve the run manifest and metrics, then run:
+
+```bash
+python -u scripts/audit_dataset_contract.py \
+  --manifest checkpoints/experiments/m6_integrity/run_manifest.json \
+  --output reports/m6_dataset_contract.json
+
+python -u scripts/audit_overfit_smoke.py \
+  --manifest checkpoints/experiments/m6_integrity/run_manifest.json \
+  --metrics checkpoints/experiments/m6_integrity/metrics.jsonl \
+  --output reports/m6_overfit_smoke.json
+```
+
+Do not use this diagnostic mode for throughput comparisons or production
+training. Return `record_exposure_stats: false` and `training_integrity: false`
+before any performance run.
 
 ## What to send back
 

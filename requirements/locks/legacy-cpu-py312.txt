@@ -1,0 +1,22 @@
+# LaughLM stable CPU baseline constraints for Python 3.12.
+#
+# This file intentionally constrains the existing stable direct dependencies
+# without changing pyproject.toml or requirements.txt. It is not yet a
+# transitive, hash-complete lock; G2-004 owns that migration.
+flax==0.10.2
+jax==0.4.38
+jaxlib==0.4.38
+optax==0.2.4
+orbax-checkpoint==0.11.4
+pydantic>=2.0
+PyYAML>=6.0
+numpy>=1.24
+tqdm>=4.65
+tokenizers>=0.15
+datasets>=2.14
+huggingface_hub>=0.16
+transformers>=4.30
+black>=23.0
+ruff>=0.1.0
+mypy>=1.0
+pytest>=7.0
