@@ -1,0 +1,26 @@
+# LaughLM Gen-2 CPU compatibility lane, Python 3.12+.
+#
+# This input deliberately does not include -e .[dev]. The stable package
+# metadata currently pins the legacy JAX stack. Install this explicit Gen-2
+# dependency set first, then install LaughLM with --no-deps as documented in
+# requirements/README.md. G2-004 will turn this input into a hash-complete lock.
+jax==0.11.1
+jaxlib==0.11.1
+flax==0.12.9
+optax==0.2.8
+orbax-checkpoint==0.12.4
+tokamax==0.0.13
+xprof==2.23.1
+grain==0.2.18
+pydantic==2.13.5
+PyYAML>=6.0
+numpy>=1.24
+tqdm>=4.65
+tokenizers>=0.15
+datasets>=2.14
+huggingface_hub>=0.16
+transformers>=4.30
+black>=23.0
+ruff>=0.1.0
+mypy>=1.0
+pytest>=7.0
